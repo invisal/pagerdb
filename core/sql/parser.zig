@@ -44,6 +44,20 @@ pub const Parser = struct {
         return ParseResult{ .arena = p.arena, .stmt = stmt };
     }
 
+    pub fn parseStandaloneExpr(src: []const u8, allocator: std.mem.Allocator) ParseError!ast.Expr {
+        const tokens = try lexer.Lexer.tokenize(src, allocator);
+        defer allocator.free(tokens);
+
+        var p = Parser{
+            .tokens = tokens,
+            .src = src,
+            .pos = 0,
+            .arena = std.heap.ArenaAllocator.init(allocator),
+        };
+        errdefer p.arena.deinit();
+        return p.parseExpr();
+    }
+
     fn alloc(self: *Parser) std.mem.Allocator {
         return self.arena.allocator();
     }
