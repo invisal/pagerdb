@@ -1,0 +1,54 @@
+name: CI
+
+run-name: >
+  Core CI (${{ github.ref_name }}) — ${{ github.event.head_commit.message }}
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+env:
+  ZIG_VERSION: "0.16.0"
+
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-zig
+        with:
+          version: ${{ env.ZIG_VERSION }}
+      - name: Build
+        run: zig build
+
+  benchmark:
+    name: Benchmark
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-zig
+        with:
+          version: ${{ env.ZIG_VERSION }}
+      - name: Install sqlite3
+        run: sudo apt-get install -y libsqlite3-dev
+      - name: Run benchmark
+        run: zig build bench
+
+  dst:
+    name: DST
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-zig
+        with:
+          version: ${{ env.ZIG_VERSION }}
+      - name: Run DST
+        run: zig build dst -- --seeds 500 --ops 100

@@ -1,0 +1,239 @@
+const std = @import("std");
+const row = @import("../row.zig");
+const lp = @import("logical_plan.zig");
+
+pub const EvalValue = union(enum) {
+    int: i64,
+    real: f64,
+    text: []const u8, // not owned — points into row data or a literal
+    bool_: bool,
+    null_: void,
+};
+
+pub const EvalError = error{ TypeMismatch, DivisionByZero };
+
+pub fn evalExpr(
+    expr: lp.Expr,
+    row_values: []const row.Value,
+    alloc: std.mem.Allocator,
+) EvalError!EvalValue {
+    _ = alloc;
+    return switch (expr) {
+        .int_lit => |v| .{ .int = v },
+        .float_lit => |v| .{ .real = v },
+        .str_lit => |v| .{ .text = v },
+        .bool_lit => |v| .{ .bool_ = v },
+        .null_lit => .{ .null_ = {} },
+        .col_idx => |i| rowValToEval(row_values[i]),
+        .binary => |b| try evalBinary(b, row_values),
+        .unary => |u| try evalUnary(u, row_values),
+    };
+}
+
+// SQL truthiness rules:
+//   - Boolean: use the value directly
+//   - Integer: non-zero is true, zero is false
+//   - NULL: always false (this is for WHERE clause filtering; NULL in a
+//     SELECT result is still displayed as NULL)
+//   - Everything else (text, real): true
+pub fn isTruthy(v: EvalValue) bool {
+    return switch (v) {
+        .bool_ => |b| b,
+        .int => |n| n != 0,
+        .null_ => false,
+        else => true,
+    };
+}
+
+fn rowValToEval(v: row.Value) EvalValue {
+    return switch (v) {
+        .null => .{ .null_ = {} },
+        .int => |n| .{ .int = n },
+        .real => |f| .{ .real = f },
+        .text => |s| .{ .text = s },
+        .blob => |b| .{ .text = b },
+    };
+}
+
+fn evalBinary(
+    b: *lp.Expr.Binary,
+    row_values: []const row.Value,
+) EvalError!EvalValue {
+    // SQL uses three-valued logic (TRUE/FALSE/NULL).  For AND/OR we must
+    // short-circuit to avoid evaluating the right side when the left side
+    // already determines the result.  This also prevents type errors when
+    // the right side contains invalid expressions guarded by NULL checks.
+    // Short-circuit AND / OR before evaluating both sides.
+    if (b.op == .and_) {
+        const left = try evalExpr(b.left, row_values, undefined);
+        if (left == .bool_ and !left.bool_) return .{ .bool_ = false };
+        const right = try evalExpr(b.right, row_values, undefined);
+        if (left == .null_ or right == .null_) return .{ .null_ = {} };
+        return .{ .bool_ = isTruthy(left) and isTruthy(right) };
+    }
+    if (b.op == .or_) {
+        const left = try evalExpr(b.left, row_values, undefined);
+        if (left == .bool_ and left.bool_) return .{ .bool_ = true };
+        const right = try evalExpr(b.right, row_values, undefined);
+        if (left == .bool_ and right == .bool_) return .{ .bool_ = left.bool_ or right.bool_ };
+        if (left == .null_ and right == .null_) return .{ .null_ = {} };
+        if (right == .bool_ and right.bool_) return .{ .bool_ = true };
+        return .{ .null_ = {} };
+    }
+
+    const left = try evalExpr(b.left, row_values, undefined);
+    const right = try evalExpr(b.right, row_values, undefined);
+
+    if (left == .null_ or right == .null_) return .{ .null_ = {} };
+
+    return switch (b.op) {
+        .eq => .{ .bool_ = compareValues(left, right) == .eq },
+        .neq => .{ .bool_ = compareValues(left, right) != .eq },
+        .lt => .{ .bool_ = compareValues(left, right) == .lt },
+        .lte => .{ .bool_ = compareValues(left, right) != .gt },
+        .gt => .{ .bool_ = compareValues(left, right) == .gt },
+        .gte => .{ .bool_ = compareValues(left, right) != .lt },
+        .add => try evalArith(.add, left, right),
+        .sub => try evalArith(.sub, left, right),
+        .mul => try evalArith(.mul, left, right),
+        .div => try evalArith(.div, left, right),
+        .and_, .or_ => unreachable,
+    };
+}
+
+fn evalUnary(
+    u: *lp.Expr.Unary,
+    row_values: []const row.Value,
+) EvalError!EvalValue {
+    const operand = try evalExpr(u.operand, row_values, undefined);
+    return switch (u.op) {
+        .not => switch (operand) {
+            .bool_ => |b| .{ .bool_ = !b },
+            .null_ => .{ .null_ = {} },
+            else => EvalError.TypeMismatch,
+        },
+        .neg => switch (operand) {
+            .int => |n| .{ .int = -n },
+            .real => |f| .{ .real = -f },
+            .null_ => .{ .null_ = {} },
+            else => EvalError.TypeMismatch,
+        },
+    };
+}
+
+fn compareValues(a: EvalValue, b: EvalValue) std.math.Order {
+    return switch (a) {
+        .int => |av| switch (b) {
+            .int => |bv| std.math.order(av, bv),
+            .real => |bv| std.math.order(@as(f64, @floatFromInt(av)), bv),
+            else => .lt,
+        },
+        .real => |av| switch (b) {
+            .real => |bv| std.math.order(av, bv),
+            .int => |bv| std.math.order(av, @as(f64, @floatFromInt(bv))),
+            else => .lt,
+        },
+        .text => |av| switch (b) {
+            .text => |bv| std.mem.order(u8, av, bv),
+            else => .lt,
+        },
+        .bool_ => |av| switch (b) {
+            .bool_ => |bv| if (av == bv) .eq else if (!av) .lt else .gt,
+            else => .lt,
+        },
+        .null_ => .lt,
+    };
+}
+
+fn evalArith(op: @import("ast.zig").BinaryOp, a: EvalValue, b: EvalValue) EvalError!EvalValue {
+    switch (a) {
+        .int => |av| switch (b) {
+            .int => |bv| return switch (op) {
+                .add => .{ .int = av + bv },
+                .sub => .{ .int = av - bv },
+                .mul => .{ .int = av * bv },
+                .div => if (bv == 0) EvalError.DivisionByZero else .{ .int = @divTrunc(av, bv) },
+                else => EvalError.TypeMismatch,
+            },
+            .real => |bv| return evalArith(op, .{ .real = @as(f64, @floatFromInt(av)) }, .{ .real = bv }),
+            else => return EvalError.TypeMismatch,
+        },
+        .real => |av| switch (b) {
+            .real => |bv| return switch (op) {
+                .add => .{ .real = av + bv },
+                .sub => .{ .real = av - bv },
+                .mul => .{ .real = av * bv },
+                .div => if (bv == 0.0) EvalError.DivisionByZero else .{ .real = av / bv },
+                else => EvalError.TypeMismatch,
+            },
+            .int => |bv| return evalArith(op, .{ .real = av }, .{ .real = @as(f64, @floatFromInt(bv)) }),
+            else => return EvalError.TypeMismatch,
+        },
+        else => return EvalError.TypeMismatch,
+    }
+}
+
+// ── Tests ──────────────────────────────────────────────────────────────────────
+
+test "evalExpr literals" {
+    const alloc = std.testing.allocator;
+    const vals: []const row.Value = &.{};
+
+    const v_int = try evalExpr(.{ .int_lit = 42 }, vals, alloc);
+    const v_float = try evalExpr(.{ .float_lit = 3.14 }, vals, alloc);
+    const v_str = try evalExpr(.{ .str_lit = "hi" }, vals, alloc);
+    const v_bool = try evalExpr(.{ .bool_lit = true }, vals, alloc);
+    const v_null = try evalExpr(.{ .null_lit = {} }, vals, alloc);
+
+    try std.testing.expectEqual(@as(i64, 42), v_int.int);
+    try std.testing.expectApproxEqAbs(3.14, v_float.real, 1e-9);
+    try std.testing.expectEqualStrings("hi", v_str.text);
+    try std.testing.expect(v_bool.bool_);
+    try std.testing.expect(v_null == .null_);
+}
+
+test "evalExpr col_idx reads from row" {
+    const alloc = std.testing.allocator;
+    const vals = [_]row.Value{
+        .{ .int = 99 },
+        .null,
+    };
+    const v0 = try evalExpr(.{ .col_idx = 0 }, &vals, alloc);
+    const v1 = try evalExpr(.{ .col_idx = 1 }, &vals, alloc);
+    try std.testing.expectEqual(@as(i64, 99), v0.int);
+    try std.testing.expect(v1 == .null_);
+}
+
+test "evalExpr comparison operators" {
+    const alloc = std.testing.allocator;
+    const vals: []const row.Value = &.{};
+
+    const ast = @import("ast.zig");
+    var b_eq = lp.Expr.Binary{ .op = .eq, .left = .{ .int_lit = 5 }, .right = .{ .int_lit = 5 } };
+    var b_neq = lp.Expr.Binary{ .op = .neq, .left = .{ .int_lit = 5 }, .right = .{ .int_lit = 6 } };
+    var b_lt = lp.Expr.Binary{ .op = .lt, .left = .{ .int_lit = 3 }, .right = .{ .int_lit = 5 } };
+    _ = ast;
+
+    try std.testing.expect((try evalExpr(.{ .binary = &b_eq }, vals, alloc)).bool_);
+    try std.testing.expect((try evalExpr(.{ .binary = &b_neq }, vals, alloc)).bool_);
+    try std.testing.expect((try evalExpr(.{ .binary = &b_lt }, vals, alloc)).bool_);
+}
+
+test "evalExpr arithmetic" {
+    const alloc = std.testing.allocator;
+    const vals: []const row.Value = &.{};
+
+    var b_add = lp.Expr.Binary{ .op = .add, .left = .{ .int_lit = 3 }, .right = .{ .int_lit = 4 } };
+    var b_div = lp.Expr.Binary{ .op = .div, .left = .{ .int_lit = 10 }, .right = .{ .int_lit = 0 } };
+
+    try std.testing.expectEqual(@as(i64, 7), (try evalExpr(.{ .binary = &b_add }, vals, alloc)).int);
+    try std.testing.expectError(EvalError.DivisionByZero, evalExpr(.{ .binary = &b_div }, vals, alloc));
+}
+
+test "evalExpr NULL propagation" {
+    const alloc = std.testing.allocator;
+    const vals = [_]row.Value{.null};
+    var b = lp.Expr.Binary{ .op = .eq, .left = .{ .col_idx = 0 }, .right = .{ .int_lit = 5 } };
+    const result = try evalExpr(.{ .binary = &b }, &vals, alloc);
+    try std.testing.expect(result == .null_);
+}
