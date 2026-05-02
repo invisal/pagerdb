@@ -276,7 +276,11 @@ pub const LogicalPlanner = struct {
         // Initialize defaults
         for (meta.columns) |col| {
             const idx = col.attnum;
-            if (col.nullable) {
+
+            if (col.default_expr) |default_expr| {
+                row_values[idx] = try self.resolveExpr(default_expr, schema);
+                is_set[idx] = true;
+            } else if (col.nullable) {
                 row_values[idx] = .null_lit;
                 is_set[idx] = true;
             } else {
@@ -295,9 +299,6 @@ pub const LogicalPlanner = struct {
                     return PlanError.ColumnNotFound;
 
                 const idx = col.attnum;
-
-                if (is_set[idx]) return PlanError.ColumnNotFound;
-
                 row_values[idx] = try self.resolveExpr(stmt.values[i], schema);
                 is_set[idx] = true;
             }
@@ -394,10 +395,19 @@ pub const LogicalPlanner = struct {
         const table = try self.alloc().dupe(u8, stmt.table);
         const cols = try self.alloc().alloc(catalog.ColumnMeta, stmt.columns.len);
         for (stmt.columns, 0..) |col_def, i| {
+            // Clone the AST expression to the planner's allocator.
+            // The expression will be resolved at runtime when needed.
+            const default_expr: ?ast.Expr = if (col_def.default_expr) |ast_expr|
+                try ast_expr.clone(self.alloc())
+            else
+                null;
+
             cols[i] = .{
                 .name = try self.alloc().dupe(u8, col_def.name),
                 .col_type = col_def.col_type,
                 .nullable = col_def.nullable,
+                .default_expr = default_expr,
+                .default_src = if (col_def.default_src) |src| try self.alloc().dupe(u8, src) else null,
             };
         }
         return .{ .create_table = .{ .table = table, .columns = cols } };

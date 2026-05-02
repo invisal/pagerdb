@@ -147,7 +147,13 @@ test "execute point-lookup via _rowid_" {
     defer db.close();
 
     try db.createTable("t", &.{
-        .{ .name = "v", .col_type = .int, .nullable = false },
+        .{
+            .name = "v",
+            .col_type = .int,
+            .nullable = false,
+            .default_src = null,
+            .default_expr = null,
+        },
     });
     _ = try db.insert("t", &.{.{ .int = 11 }});
     const rowid = try db.insert("t", &.{.{ .int = 22 }});

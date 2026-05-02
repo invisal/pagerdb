@@ -41,7 +41,7 @@ test "createTable allocates catalog roots lazily" {
         try cat.bootstrap();
 
         _ = try cat.createTable("users", &.{
-            .{ .name = "id", .col_type = .int, .nullable = false },
+            .{ .name = "id", .col_type = .int, .nullable = false, .default_src = null, .default_expr = null },
         });
 
         tables_root = pager.sys_tables_root;
@@ -75,8 +75,8 @@ test "createTable persists across reopen" {
     const alloc = std.testing.allocator;
 
     const cols = [_]ColumnMeta{
-        .{ .name = "id", .col_type = .int, .nullable = false },
-        .{ .name = "name", .col_type = .text, .nullable = true },
+        .{ .name = "id", .col_type = .int, .nullable = false, .default_src = null, .default_expr = null },
+        .{ .name = "name", .col_type = .text, .nullable = true, .default_src = null, .default_expr = null },
     };
 
     {
@@ -111,7 +111,7 @@ test "next_table_id increments correctly across multiple tables" {
     defer Dir.deleteFile(.cwd(), io, path) catch {};
     const alloc = std.testing.allocator;
 
-    const col = [_]ColumnMeta{.{ .name = "x", .col_type = .int, .nullable = false }};
+    const col = [_]ColumnMeta{.{ .name = "x", .col_type = .int, .nullable = false, .default_src = null, .default_expr = null }};
 
     {
         var pager = try DiskPager.create(alloc, io, path);
@@ -155,7 +155,7 @@ test "duplicate table name returns error" {
     try cat.bootstrap();
 
     const cols = [_]ColumnMeta{
-        .{ .name = "x", .col_type = .int, .nullable = false },
+        .{ .name = "x", .col_type = .int, .nullable = false, .default_src = null, .default_expr = null },
     };
     _ = try cat.createTable("foo", &cols);
     try std.testing.expectError(error.TableAlreadyExists, cat.createTable("foo", &cols));

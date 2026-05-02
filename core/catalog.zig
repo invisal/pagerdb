@@ -1,5 +1,6 @@
 const std = @import("std");
 const t = @import("types.zig");
+const ast = @import("sql/ast.zig");
 const Pager = @import("pager/pager.zig").Pager;
 const btree = @import("btree.zig");
 const row = @import("row.zig");
@@ -18,6 +19,7 @@ const COLUMNS_SCHEMA = [_]row.ColumnSchema{
     .{ .col_type = .text, .nullable = false }, // name
     .{ .col_type = .int, .nullable = false }, // col_type (as i64)
     .{ .col_type = .int, .nullable = false }, // nullable (0 or 1)
+    .{ .col_type = .text, .nullable = true }, // default value expression
 };
 
 // ── Public types ──────────────────────────────────────────────────────────────
@@ -28,6 +30,12 @@ pub const ColumnMeta = struct {
     name: []const u8,
     col_type: t.ColType,
     nullable: bool,
+    /// Default expression in its original string form (e.g., "CURRENT_TIMESTAMP").
+    /// Preserved for displaying in DESCRIBE and INFORMATION_SCHEMA.
+    default_src: ?[]const u8 = null,
+    /// Parsed AST of the default expression, ready for evaluation at runtime.
+    /// NULL for columns without a default
+    default_expr: ?ast.Expr = null,
 };
 
 pub const TableMeta = struct {
@@ -120,6 +128,8 @@ pub const Catalog = struct {
                 .name = try self.allocator.dupe(u8, vals[2].text),
                 .col_type = @enumFromInt(vals[3].int),
                 .nullable = vals[4].int != 0,
+                .default_expr = null,
+                .default_src = null,
             };
             var it = self.tables.valueIterator();
             while (it.next()) |meta| {
@@ -176,6 +186,7 @@ pub const Catalog = struct {
                 col.name,
                 col.col_type,
                 col.nullable,
+                col.default_src,
             );
         }
 
@@ -186,12 +197,26 @@ pub const Catalog = struct {
         // Build the in-memory entry with deep-copied strings.
         const duped_name = try self.allocator.dupe(u8, name);
         const duped_cols = try self.allocator.alloc(ColumnMeta, cols.len);
+
         for (cols, 0..) |col, i| {
+            const duped_default_src = if (col.default_src) |src|
+                try self.allocator.dupe(u8, src)
+            else
+                null;
+
+            // Deep-clone the default expression to the catalog's allocator.
+            const duped_default_expr: ?ast.Expr = if (col.default_expr) |expr|
+                try expr.clone(self.allocator)
+            else
+                null;
+
             duped_cols[i] = .{
                 .attnum = @intCast(i),
                 .name = try self.allocator.dupe(u8, col.name),
                 .col_type = col.col_type,
                 .nullable = col.nullable,
+                .default_src = duped_default_src,
+                .default_expr = duped_default_expr,
             };
         }
         const meta = TableMeta{
@@ -212,7 +237,11 @@ pub const Catalog = struct {
     pub fn deinit(self: *Catalog) void {
         var it = self.tables.valueIterator();
         while (it.next()) |meta| {
-            for (meta.columns) |col| self.allocator.free(col.name);
+            for (meta.columns) |col| {
+                self.allocator.free(col.name);
+                if (col.default_src) |src| self.allocator.free(src);
+                if (col.default_expr) |expr| expr.deinit(self.allocator);
+            }
             if (meta.columns.len > 0) self.allocator.free(meta.columns);
             self.allocator.free(meta.name);
         }
@@ -244,14 +273,22 @@ pub const Catalog = struct {
         name: []const u8,
         col_type: t.ColType,
         nullable: bool,
+        default_src: ?[]const u8,
     ) !void {
+        const default_value = if (default_src) |src|
+            row.Value{ .text = src }
+        else
+            row.Value{ .null = {} };
+
         const values = [_]row.Value{
             .{ .int = table_id },
             .{ .int = col_index },
             .{ .text = name },
             .{ .int = @intFromEnum(col_type) },
             .{ .int = if (nullable) 1 else 0 },
+            default_value,
         };
+
         var buf: [256]u8 = undefined;
         const len = row.encodeRow(&values, &buf);
         try btree.insert(self.pager, self.pager.sys_columns_root, rowid, buf[0..len], true);

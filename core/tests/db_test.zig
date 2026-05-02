@@ -2,6 +2,7 @@ const std = @import("std");
 const Db = @import("../db.zig").Db;
 const DiskPager = @import("../pager/disk.zig").DiskPager;
 const row = @import("../row.zig");
+const exec = @import("../sql/executor.zig").execute;
 
 const Dir = std.Io.Dir;
 
@@ -45,6 +46,34 @@ test "create db, insert rows, scan back" {
     }.cb, &count);
 
     try std.testing.expectEqual(count, 2);
+}
+
+test "insert with default value" {
+    const io = std.testing.io;
+    const alloc = std.testing.allocator;
+
+    const path = "/tmp/test_db_insert_default_value.db";
+    defer Dir.deleteFile(.cwd(), io, path) catch {};
+
+    const db = try Db.init(try DiskPager.create(alloc, io, path), alloc);
+    defer db.close();
+
+    var r1 = try exec(db, "CREATE TABLE users(name TEXT, age INT DEFAULT 18);", alloc);
+    defer r1.deinit();
+
+    var r2 = try exec(db, "INSERT INTO users(name) VALUES('alice');", alloc);
+    defer r2.deinit();
+
+    var r3 = try exec(db, "SELECT age FROM users WHERE name = 'alice';", alloc);
+    defer r3.deinit();
+
+    switch (r3) {
+        .result_set => |rs| {
+            try std.testing.expectEqual(@as(usize, 1), rs.rows.len);
+            try std.testing.expectEqual(@as(i64, 18), rs.rows[0].values[0].int);
+        },
+        else => unreachable, // test assumes SELECT returns result_set
+    }
 }
 
 test "rowid_counter increments across reopens" {
