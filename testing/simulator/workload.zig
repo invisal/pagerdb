@@ -7,8 +7,8 @@ const catalog = core.catalog;
 pub const TABLE_NAME = "dst_test";
 
 pub const SCHEMA = [_]catalog.ColumnMeta{
-    .{ .name = "a", .col_type = .int, .nullable = false },
-    .{ .name = "b", .col_type = .int, .nullable = false },
+    .{ .name = "a", .col_type = .int, .nullable = false, .default_src = null, .default_expr = null },
+    .{ .name = "b", .col_type = .int, .nullable = false, .default_src = null, .default_expr = null },
 };
 
 pub const ShadowState = struct {

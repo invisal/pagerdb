@@ -17,9 +17,9 @@ const Dir = std.Io.Dir;
 const COUNTS = [_]usize{ 500, 2_000 };
 
 const SCHEMA = [_]catalog.ColumnMeta{
-    .{ .name = "id", .col_type = .int, .nullable = false },
-    .{ .name = "name", .col_type = .text, .nullable = false },
-    .{ .name = "score", .col_type = .real, .nullable = false },
+    .{ .name = "id", .col_type = .int, .nullable = false, .default_src = null, .default_expr = null },
+    .{ .name = "name", .col_type = .text, .nullable = false, .default_src = null, .default_expr = null },
+    .{ .name = "score", .col_type = .real, .nullable = false, .default_src = null, .default_expr = null },
 };
 
 const InsertResult = struct { ns: u64, bytes: u64 };
