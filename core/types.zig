@@ -30,6 +30,15 @@ pub const ColType = enum(u8) {
     real = 1,
     text = 2,
     blob = 3,
+
+    pub fn name(self: ColType) []const u8 {
+        return switch (self) {
+            .int => "INT",
+            .real => "REAL",
+            .text => "TEXT",
+            .blob => "BLOB",
+        };
+    }
 };
 
 pub const DB_MAGIC: u32 = 0x50474442; // "PGDB"
