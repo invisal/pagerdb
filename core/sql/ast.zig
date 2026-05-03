@@ -25,6 +25,7 @@ pub const Expr = union(enum) {
     bool_lit: bool,
     null_lit: void,
     col_ref: []const u8, // column name, arena-owned
+    default_value: void, // using column default value
 
     // Binary and unary nodes are heap-allocated so the Expr union stays small
     // (two pointers).  This keeps stack frames shallow during deep recursion
@@ -62,6 +63,7 @@ pub const Expr = union(enum) {
                 };
                 break :blk .{ .unary = node };
             },
+            .default_value => .{ .default_value = {} },
         };
     }
 

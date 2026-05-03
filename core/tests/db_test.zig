@@ -48,7 +48,7 @@ test "create db, insert rows, scan back" {
     try std.testing.expectEqual(count, 2);
 }
 
-test "insert with default value" {
+test "insert with omitted column uses default value" {
     const io = std.testing.io;
     const alloc = std.testing.allocator;
 
@@ -67,6 +67,39 @@ test "insert with default value" {
     defer db.close();
 
     var r2 = try exec(db, "INSERT INTO users(name) VALUES('alice');", alloc);
+    defer r2.deinit();
+
+    var r3 = try exec(db, "SELECT age FROM users WHERE name = 'alice';", alloc);
+    defer r3.deinit();
+
+    switch (r3) {
+        .result_set => |rs| {
+            try std.testing.expectEqual(@as(usize, 1), rs.rows.len);
+            try std.testing.expectEqual(@as(i64, 18), rs.rows[0].values[0].int);
+        },
+        else => unreachable, // test assumes SELECT returns result_set
+    }
+}
+
+test "insert with DEFAULT keyword uses default value" {
+    const io = std.testing.io;
+    const alloc = std.testing.allocator;
+
+    const path = "/tmp/test_db_insert_default_value.db";
+    defer Dir.deleteFile(.cwd(), io, path) catch {};
+
+    {
+        const db1 = try Db.init(try DiskPager.create(alloc, io, path), alloc);
+        defer db1.close();
+
+        var r1 = try exec(db1, "CREATE TABLE users(name TEXT, age INT DEFAULT 18);", alloc);
+        defer r1.deinit();
+    }
+
+    const db = try Db.load(try DiskPager.open(alloc, io, path), alloc);
+    defer db.close();
+
+    var r2 = try exec(db, "INSERT INTO users(name, age) VALUES('alice', DEFAULT);", alloc);
     defer r2.deinit();
 
     var r3 = try exec(db, "SELECT age FROM users WHERE name = 'alice';", alloc);

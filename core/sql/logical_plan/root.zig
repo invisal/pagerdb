@@ -134,6 +134,7 @@ pub const PlanError = error{
     ColumnCountMismatch,
     ArgCountMismatch,
     OutOfMemory,
+    NoDefaultValue,
 };
 
 pub const LogicalPlanner = struct {
@@ -299,8 +300,13 @@ pub const LogicalPlanner = struct {
                     return PlanError.ColumnNotFound;
 
                 const idx = col.attnum;
-                row_values[idx] = try self.resolveExpr(stmt.values[i], schema);
-                is_set[idx] = true;
+
+                const current_value = stmt.values[i];
+
+                if (current_value != .default_value) {
+                    row_values[idx] = try self.resolveExpr(current_value, schema);
+                    is_set[idx] = true;
+                }
             }
         } else {
             // Positional insert (values mapped by column order)
@@ -309,14 +315,16 @@ pub const LogicalPlanner = struct {
                 return PlanError.ColumnCountMismatch;
 
             for (stmt.values, 0..) |expr, i| {
-                row_values[i] = try self.resolveExpr(expr, schema);
-                is_set[i] = true;
+                if (expr != .default_value) {
+                    row_values[i] = try self.resolveExpr(expr, schema);
+                    is_set[i] = true;
+                }
             }
         }
 
         // Ensure all required columns are filled
         for (is_set) |set| {
-            if (!set) return PlanError.ColumnNotFound;
+            if (!set) return PlanError.NoDefaultValue;
         }
 
         return .{
@@ -440,6 +448,9 @@ pub const LogicalPlanner = struct {
                 };
                 break :blk .{ .unary = node };
             },
+            // DEFAULT should have been rewritten to the column's default expression
+            // during INSERT/UPDATE planning. It must not reach this stage.
+            .default_value => std.debug.panic("DEFAULT must be resolved during planning", .{}),
         };
     }
 
