@@ -38,10 +38,11 @@ pub fn build(b: *std.Build) void {
     run_step.dependOn(&run_exe.step);
 
     // ── Benchmark executable ──────────────────────────────────────────────────
+    // Benchmarks always use ReleaseFast — debug GPA overhead skews results by 100-2000x
     const bench_mod = b.createModule(.{
         .root_source_file = b.path("bench/benchmark.zig"),
         .target = target,
-        .optimize = optimize,
+        .optimize = .ReleaseFast,
         .link_libc = true,
     });
     bench_mod.addImport("core", core_mod);
