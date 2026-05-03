@@ -56,15 +56,18 @@ pub const TableMeta = struct {
 // ── Catalog ───────────────────────────────────────────────────────────────────
 
 pub const Catalog = struct {
-    allocator: std.mem.Allocator,
+    /// Owns all catalog strings and metadata; freed in one shot on deinit.
+    arena: std.heap.ArenaAllocator,
     pager: *Pager,
+    /// Uses the backing allocator so tables.deinit() reclaims its internal
+    /// array independently from the arena.
     tables: std.StringHashMap(TableMeta),
     next_table_id: u64,
     next_col_rowid: u64,
 
     pub fn init(allocator: std.mem.Allocator, pager: *Pager) Catalog {
         return .{
-            .allocator = allocator,
+            .arena = std.heap.ArenaAllocator.init(allocator),
             .pager = pager,
             .tables = std.StringHashMap(TableMeta).init(allocator),
             .next_table_id = 1,
@@ -85,6 +88,15 @@ pub const Catalog = struct {
     pub fn load(self: *Catalog) !void {
         if (self.pager.sys_tables_root == 0) return;
 
+        const alloc = self.arena.allocator();
+
+        // Temporary arena for decoded row bytes that are never kept in the catalog.
+        // All per-row values are allocated here and freed together when load() returns,
+        // replacing the manual defer-free pattern that appeared on every iteration.
+        var tmp_arena = std.heap.ArenaAllocator.init(self.arena.child_allocator);
+        defer tmp_arena.deinit();
+        const tmp = tmp_arena.allocator();
+
         // Pass 1: load table entries with empty columns slice.
         // We defer column loading to a second pass because columns are stored
         // in a separate B-tree (sys_columns).  This two-pass approach lets us
@@ -93,16 +105,12 @@ pub const Catalog = struct {
         var max_table_id: u64 = 0;
         var table_scan = try btree.ScanIterator.init(self.pager, self.pager.sys_tables_root);
         while (try table_scan.next()) |cell| {
-            const vals = try row.decodeRow(&TABLES_SCHEMA, cell.row_data, self.allocator);
-            defer {
-                self.allocator.free(vals[0].text);
-                self.allocator.free(vals);
-            }
+            const vals = try row.decodeRow(&TABLES_SCHEMA, cell.row_data, tmp);
             const btree_root: u32 = @intCast(vals[1].int);
             const rowid_counter = if (try btree.maxRowid(self.pager, btree_root)) |max| max + 1 else 1;
             const meta = TableMeta{
                 .id = cell.rowid,
-                .name = try self.allocator.dupe(u8, vals[0].text),
+                .name = try alloc.dupe(u8, vals[0].text),
                 .btree_root = btree_root,
                 .rowid_counter = rowid_counter,
                 .columns = &.{},
@@ -117,15 +125,11 @@ pub const Catalog = struct {
         var col_scan = try btree.ScanIterator.init(self.pager, self.pager.sys_columns_root);
         while (try col_scan.next()) |cell| {
             if (cell.rowid > max_col_rowid) max_col_rowid = cell.rowid;
-            const vals = try row.decodeRow(&COLUMNS_SCHEMA, cell.row_data, self.allocator);
-            defer {
-                self.allocator.free(vals[2].text);
-                self.allocator.free(vals);
-            }
+            const vals = try row.decodeRow(&COLUMNS_SCHEMA, cell.row_data, tmp);
             const table_id = @as(u64, @intCast(vals[0].int));
             const col = ColumnMeta{
                 .attnum = @intCast(vals[1].int),
-                .name = try self.allocator.dupe(u8, vals[2].text),
+                .name = try alloc.dupe(u8, vals[2].text),
                 .col_type = @enumFromInt(vals[3].int),
                 .nullable = vals[4].int != 0,
                 .default_expr = null,
@@ -134,11 +138,9 @@ pub const Catalog = struct {
             var it = self.tables.valueIterator();
             while (it.next()) |meta| {
                 if (meta.id == table_id) {
-                    meta.columns = try appendColumn(self.allocator, meta.columns, col);
+                    meta.columns = try appendColumn(alloc, meta.columns, col);
                     break;
                 }
-            } else {
-                self.allocator.free(col.name);
             }
         }
         self.next_col_rowid = max_col_rowid + 1;
@@ -194,25 +196,26 @@ pub const Catalog = struct {
         self.next_table_id = new_table_id + 1;
         self.next_col_rowid = col_rowid_start + @as(u64, cols.len);
 
-        // Build the in-memory entry with deep-copied strings.
-        const duped_name = try self.allocator.dupe(u8, name);
-        const duped_cols = try self.allocator.alloc(ColumnMeta, cols.len);
+        // Build the in-memory entry with deep-copied strings into the catalog arena.
+        const alloc = self.arena.allocator();
+        const duped_name = try alloc.dupe(u8, name);
+        const duped_cols = try alloc.alloc(ColumnMeta, cols.len);
 
         for (cols, 0..) |col, i| {
             const duped_default_src = if (col.default_src) |src|
-                try self.allocator.dupe(u8, src)
+                try alloc.dupe(u8, src)
             else
                 null;
 
-            // Deep-clone the default expression to the catalog's allocator.
+            // Deep-clone the default expression to the catalog arena.
             const duped_default_expr: ?ast.Expr = if (col.default_expr) |expr|
-                try expr.clone(self.allocator)
+                try expr.clone(alloc)
             else
                 null;
 
             duped_cols[i] = .{
                 .attnum = @intCast(i),
-                .name = try self.allocator.dupe(u8, col.name),
+                .name = try alloc.dupe(u8, col.name),
                 .col_type = col.col_type,
                 .nullable = col.nullable,
                 .default_src = duped_default_src,
@@ -235,17 +238,10 @@ pub const Catalog = struct {
     }
 
     pub fn deinit(self: *Catalog) void {
-        var it = self.tables.valueIterator();
-        while (it.next()) |meta| {
-            for (meta.columns) |col| {
-                self.allocator.free(col.name);
-                if (col.default_src) |src| self.allocator.free(src);
-                if (col.default_expr) |expr| expr.deinit(self.allocator);
-            }
-            if (meta.columns.len > 0) self.allocator.free(meta.columns);
-            self.allocator.free(meta.name);
-        }
+        // tables uses the backing allocator, so its internal array must be
+        // freed before the arena; the arena owns all the string/column data.
         self.tables.deinit();
+        self.arena.deinit();
     }
 
     // ── Private helpers ───────────────────────────────────────────────────────
