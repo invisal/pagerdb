@@ -1,28 +1,19 @@
 const std = @import("std");
 const Parser = @import("../parser.zig").Parser;
 const LogicalPlanner = @import("../logical_plan.zig").LogicalPlanner;
-const utils = @import("utils.zig");
-const makeDb = utils.makeDb;
-
-const Dir = utils.Dir;
+const makeMemoryDb = @import("../../test_helpers.zig").makeMemoryDb;
 
 test "plan CREATE TABLE" {
-    const io = std.testing.io;
-    const path = "/tmp/test_lp_create.db";
-    defer Dir.deleteFile(.cwd(), io, path) catch {};
     const alloc = std.testing.allocator;
-
-    var db = try makeDb(io, path, alloc);
-    defer db.deinit();
-
-    var planner = LogicalPlanner.init(&db.cat, alloc);
+    var h = try makeMemoryDb(alloc, .{});
+    defer h.deinit();
+    var planner = LogicalPlanner.init(&h.db.cat, alloc);
     defer planner.deinit();
 
     var parsed = try Parser.parse("CREATE TABLE items (id INT NOT NULL, label TEXT)", alloc);
     defer parsed.deinit();
 
-    const lp = try planner.plan(parsed.stmt);
-    const ct = lp.create_table;
+    const ct = (try planner.plan(parsed.stmt)).create_table;
     try std.testing.expectEqualStrings("items", ct.table);
     try std.testing.expectEqual(@as(usize, 2), ct.columns.len);
     try std.testing.expectEqualStrings("id", ct.columns[0].name);

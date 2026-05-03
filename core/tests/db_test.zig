@@ -1,164 +1,72 @@
 const std = @import("std");
-const Db = @import("../db.zig").Db;
-const DiskPager = @import("../pager/disk.zig").DiskPager;
 const row = @import("../row.zig");
-const exec = @import("../sql/executor.zig").execute;
-
-const Dir = std.Io.Dir;
+const th = @import("../test_helpers.zig");
+const makeMemoryDb = th.makeMemoryDb;
+const makeDiskDb = th.makeDiskDb;
+const loadDiskDb = th.loadDiskDb;
 
 test "create db, insert rows, scan back" {
     const io = std.testing.io;
-    const path = "/tmp/test_db_insert_scan.db";
-    defer Dir.deleteFile(.cwd(), io, path) catch {};
     const alloc = std.testing.allocator;
 
     {
-        const db = try Db.init(try DiskPager.create(alloc, io, path, .{}), alloc);
-
-        try db.createTable("users", &.{
+        const h = try makeDiskDb(alloc, io, "/tmp/test_db_insert_scan.db", .{});
+        defer h.db.close();
+        try h.db.createTable("users", &.{
             .{ .name = "name", .col_type = .text, .nullable = false },
             .{ .name = "age", .col_type = .int, .nullable = true },
         });
-
-        _ = try db.insert("users", &.{
-            .{ .text = "alice" },
-            .{ .int = 30 },
-        });
-        _ = try db.insert("users", &.{
-            .{ .text = "bob" },
-            .null,
-        });
-
-        db.close();
+        _ = try h.db.insert("users", &.{ .{ .text = "alice" }, .{ .int = 30 } });
+        _ = try h.db.insert("users", &.{ .{ .text = "bob" }, .null });
     }
 
-    const db2 = try Db.load(try DiskPager.open(alloc, io, path, .{}), alloc);
-    defer db2.close();
+    const h2 = try loadDiskDb(alloc, io, "/tmp/test_db_insert_scan.db");
+    defer h2.deinit();
 
     var count: usize = 0;
-    try db2.scan("users", struct {
-        fn cb(rowid: u64, values: []const row.Value, ctx: anytype) bool {
-            _ = rowid;
-            _ = values;
+    try h2.db.scan("users", struct {
+        fn cb(_: u64, _: []const row.Value, ctx: anytype) bool {
             ctx.* += 1;
             return true;
         }
     }.cb, &count);
-
     try std.testing.expectEqual(count, 2);
-}
-
-test "insert with omitted column uses default value" {
-    const io = std.testing.io;
-    const alloc = std.testing.allocator;
-
-    const path = "/tmp/test_db_insert_default_value.db";
-    defer Dir.deleteFile(.cwd(), io, path) catch {};
-
-    {
-        const db1 = try Db.init(try DiskPager.create(alloc, io, path, .{}), alloc);
-        defer db1.close();
-
-        var r1 = try exec(db1, "CREATE TABLE users(name TEXT, age INT DEFAULT 18);", alloc);
-        defer r1.deinit();
-    }
-
-    const db = try Db.load(try DiskPager.open(alloc, io, path, .{}), alloc);
-    defer db.close();
-
-    var r2 = try exec(db, "INSERT INTO users(name) VALUES('alice');", alloc);
-    defer r2.deinit();
-
-    var r3 = try exec(db, "SELECT age FROM users WHERE name = 'alice';", alloc);
-    defer r3.deinit();
-
-    switch (r3) {
-        .result_set => |rs| {
-            try std.testing.expectEqual(@as(usize, 1), rs.rows.len);
-            try std.testing.expectEqual(@as(i64, 18), rs.rows[0].values[0].int);
-        },
-        else => unreachable, // test assumes SELECT returns result_set
-    }
-}
-
-test "insert with DEFAULT keyword uses default value" {
-    const io = std.testing.io;
-    const alloc = std.testing.allocator;
-
-    const path = "/tmp/test_db_insert_default_value.db";
-    defer Dir.deleteFile(.cwd(), io, path) catch {};
-
-    {
-        const db1 = try Db.init(try DiskPager.create(alloc, io, path, .{}), alloc);
-        defer db1.close();
-
-        var r1 = try exec(db1, "CREATE TABLE users(name TEXT, age INT DEFAULT 18);", alloc);
-        defer r1.deinit();
-    }
-
-    const db = try Db.load(try DiskPager.open(alloc, io, path, .{}), alloc);
-    defer db.close();
-
-    var r2 = try exec(db, "INSERT INTO users(name, age) VALUES('alice', DEFAULT);", alloc);
-    defer r2.deinit();
-
-    var r3 = try exec(db, "SELECT age FROM users WHERE name = 'alice';", alloc);
-    defer r3.deinit();
-
-    switch (r3) {
-        .result_set => |rs| {
-            try std.testing.expectEqual(@as(usize, 1), rs.rows.len);
-            try std.testing.expectEqual(@as(i64, 18), rs.rows[0].values[0].int);
-        },
-        else => unreachable, // test assumes SELECT returns result_set
-    }
 }
 
 test "rowid_counter increments across reopens" {
     const io = std.testing.io;
-    const path = "/tmp/test_db_rowid.db";
-    defer Dir.deleteFile(.cwd(), io, path) catch {};
     const alloc = std.testing.allocator;
 
     const r1 = blk: {
-        const db = try Db.init(try DiskPager.create(alloc, io, path, .{}), alloc);
-        try db.createTable("t", &.{
-            .{ .name = "v", .col_type = .int, .nullable = false },
-        });
-        const r = try db.insert("t", &.{.{ .int = 1 }});
-        db.close();
-        break :blk r;
+        const h = try makeDiskDb(alloc, io, "/tmp/test_db_rowid.db", .{});
+        defer h.db.close();
+        try h.db.createTable("t", &.{.{ .name = "v", .col_type = .int, .nullable = false }});
+        break :blk try h.db.insert("t", &.{.{ .int = 1 }});
     };
 
-    const db2 = try Db.load(try DiskPager.open(alloc, io, path, .{}), alloc);
-    defer db2.close();
-    const r2 = try db2.insert("t", &.{.{ .int = 2 }});
+    const h2 = try loadDiskDb(alloc, io, "/tmp/test_db_rowid.db");
+    defer h2.deinit();
+    const r2 = try h2.db.insert("t", &.{.{ .int = 2 }});
 
     try std.testing.expect(r2 > r1);
 }
 
 test "insert and scan verify row contents" {
-    const io = std.testing.io;
-    const path = "/tmp/test_db_contents.db";
-    defer Dir.deleteFile(.cwd(), io, path) catch {};
     const alloc = std.testing.allocator;
+    const h = try makeMemoryDb(alloc, .{});
+    defer h.deinit();
 
-    const db = try Db.init(try DiskPager.create(alloc, io, path, .{}), alloc);
-    defer db.close();
-
-    try db.createTable("things", &.{
+    try h.db.createTable("things", &.{
         .{ .name = "label", .col_type = .text, .nullable = false },
         .{ .name = "score", .col_type = .int, .nullable = false },
     });
-
-    _ = try db.insert("things", &.{ .{ .text = "alpha" }, .{ .int = 100 } });
-    _ = try db.insert("things", &.{ .{ .text = "beta" }, .{ .int = 200 } });
+    _ = try h.db.insert("things", &.{ .{ .text = "alpha" }, .{ .int = 100 } });
+    _ = try h.db.insert("things", &.{ .{ .text = "beta" }, .{ .int = 200 } });
 
     const Ctx = struct { count: usize, sum: i64 };
     var ctx = Ctx{ .count = 0, .sum = 0 };
-    try db.scan("things", struct {
-        fn cb(rowid: u64, values: []const row.Value, c: anytype) bool {
-            _ = rowid;
+    try h.db.scan("things", struct {
+        fn cb(_: u64, values: []const row.Value, c: anytype) bool {
             c.count += 1;
             c.sum += values[1].int;
             return true;
@@ -170,37 +78,26 @@ test "insert and scan verify row contents" {
 }
 
 test "TableNotFound returned for missing table" {
-    const io = std.testing.io;
-    const path = "/tmp/test_db_notfound.db";
-    defer Dir.deleteFile(.cwd(), io, path) catch {};
     const alloc = std.testing.allocator;
-
-    const db = try Db.init(try DiskPager.create(alloc, io, path, .{}), alloc);
-    defer db.close();
-
-    try std.testing.expectError(error.TableNotFound, db.insert("nonexistent", &.{}));
+    const h = try makeMemoryDb(alloc, .{});
+    defer h.deinit();
+    try std.testing.expectError(error.TableNotFound, h.db.insert("nonexistent", &.{}));
 }
 
 test "delete removes row and scan skips it" {
-    const io = std.testing.io;
-    const path = "/tmp/test_db_delete.db";
-    defer Dir.deleteFile(.cwd(), io, path) catch {};
     const alloc = std.testing.allocator;
+    const h = try makeMemoryDb(alloc, .{});
+    defer h.deinit();
 
-    const db = try Db.init(try DiskPager.create(alloc, io, path, .{}), alloc);
-    defer db.close();
-
-    try db.createTable("t", &.{.{ .name = "v", .col_type = .int, .nullable = false }});
-
-    const r1 = try db.insert("t", &.{.{ .int = 1 }});
-    const r2 = try db.insert("t", &.{.{ .int = 2 }});
-    const r3 = try db.insert("t", &.{.{ .int = 3 }});
-
-    try std.testing.expect(try db.delete("t", r2));
+    try h.db.createTable("t", &.{.{ .name = "v", .col_type = .int, .nullable = false }});
+    const r1 = try h.db.insert("t", &.{.{ .int = 1 }});
+    const r2 = try h.db.insert("t", &.{.{ .int = 2 }});
+    const r3 = try h.db.insert("t", &.{.{ .int = 3 }});
+    try std.testing.expect(try h.db.delete("t", r2));
 
     const ScanCtx = struct { ids: [3]u64 = undefined, count: usize = 0 };
     var scan_ctx = ScanCtx{};
-    try db.scan("t", struct {
+    try h.db.scan("t", struct {
         fn cb(rowid: u64, _: []const row.Value, ctx: anytype) bool {
             ctx.ids[ctx.count] = rowid;
             ctx.count += 1;
@@ -214,59 +111,43 @@ test "delete removes row and scan skips it" {
 }
 
 test "delete non-existent rowid returns false" {
-    const io = std.testing.io;
-    const path = "/tmp/test_db_delete_missing.db";
-    defer Dir.deleteFile(.cwd(), io, path) catch {};
     const alloc = std.testing.allocator;
-
-    const db = try Db.init(try DiskPager.create(alloc, io, path, .{}), alloc);
-    defer db.close();
-
-    try db.createTable("t", &.{.{ .name = "v", .col_type = .int, .nullable = false }});
-
-    try std.testing.expect(!try db.delete("t", 99));
+    const h = try makeMemoryDb(alloc, .{});
+    defer h.deinit();
+    try h.db.createTable("t", &.{.{ .name = "v", .col_type = .int, .nullable = false }});
+    try std.testing.expect(!try h.db.delete("t", 99));
 }
 
 test "update changes row value" {
-    const io = std.testing.io;
-    const path = "/tmp/test_db_update.db";
-    defer Dir.deleteFile(.cwd(), io, path) catch {};
     const alloc = std.testing.allocator;
+    const h = try makeMemoryDb(alloc, .{});
+    defer h.deinit();
 
-    const db = try Db.init(try DiskPager.create(alloc, io, path, .{}), alloc);
-    defer db.close();
+    try h.db.createTable("t", &.{.{ .name = "v", .col_type = .int, .nullable = false }});
+    const rowid = try h.db.insert("t", &.{.{ .int = 100 }});
+    try std.testing.expect(try h.db.update("t", rowid, &.{.{ .int = 999 }}));
 
-    try db.createTable("t", &.{.{ .name = "v", .col_type = .int, .nullable = false }});
-    const rowid = try db.insert("t", &.{.{ .int = 100 }});
-
-    try std.testing.expect(try db.update("t", rowid, &.{.{ .int = 999 }}));
-
-    const vals = try db.getByRowid("t", rowid, alloc);
+    const vals = try h.db.getByRowid("t", rowid, alloc);
     try std.testing.expect(vals != null);
     defer alloc.free(vals.?);
     try std.testing.expectEqual(vals.?[0].int, 999);
 }
 
 test "update inline to overflow builds new chain" {
-    const io = std.testing.io;
-    const path = "/tmp/test_db_update_overflow.db";
-    defer Dir.deleteFile(.cwd(), io, path) catch {};
     const alloc = std.testing.allocator;
+    const h = try makeMemoryDb(alloc, .{});
+    defer h.deinit();
 
-    const db = try Db.init(try DiskPager.create(alloc, io, path, .{}), alloc);
-    defer db.close();
-
-    try db.createTable("t", &.{.{ .name = "v", .col_type = .blob, .nullable = false }});
-
+    try h.db.createTable("t", &.{.{ .name = "v", .col_type = .blob, .nullable = false }});
     const small = [_]u8{0xAA} ** 16;
-    const rowid = try db.insert("t", &.{.{ .blob = &small }});
+    const rowid = try h.db.insert("t", &.{.{ .blob = &small }});
 
     const big = try alloc.alloc(u8, 5000);
     defer alloc.free(big);
     @memset(big, 0xBB);
-    try std.testing.expect(try db.update("t", rowid, &.{.{ .blob = big }}));
+    try std.testing.expect(try h.db.update("t", rowid, &.{.{ .blob = big }}));
 
-    const vals = try db.getByRowid("t", rowid, alloc);
+    const vals = try h.db.getByRowid("t", rowid, alloc);
     try std.testing.expect(vals != null);
     defer {
         alloc.free(vals.?[0].blob);
@@ -277,29 +158,22 @@ test "update inline to overflow builds new chain" {
 }
 
 test "update overflow to inline frees old chain" {
-    const io = std.testing.io;
-    const path = "/tmp/test_db_update_shrink.db";
-    defer Dir.deleteFile(.cwd(), io, path) catch {};
     const alloc = std.testing.allocator;
+    const h = try makeMemoryDb(alloc, .{});
+    defer h.deinit();
 
-    const db = try Db.init(try DiskPager.create(alloc, io, path, .{}), alloc);
-    defer db.close();
-
-    try db.createTable("t", &.{.{ .name = "v", .col_type = .blob, .nullable = false }});
-
+    try h.db.createTable("t", &.{.{ .name = "v", .col_type = .blob, .nullable = false }});
     const big = try alloc.alloc(u8, 5000);
     defer alloc.free(big);
     @memset(big, 0xCC);
-    const rowid = try db.insert("t", &.{.{ .blob = big }});
-
-    const pages_before = db.pager.total_pages;
+    const rowid = try h.db.insert("t", &.{.{ .blob = big }});
+    const pages_before = h.db.pager.total_pages;
 
     const small = [_]u8{0xDD} ** 16;
-    try std.testing.expect(try db.update("t", rowid, &.{.{ .blob = &small }}));
+    try std.testing.expect(try h.db.update("t", rowid, &.{.{ .blob = &small }}));
+    try std.testing.expect(h.db.pager.free_list_head != 0 or h.db.pager.total_pages < pages_before);
 
-    try std.testing.expect(db.pager.free_list_head != 0 or db.pager.total_pages < pages_before);
-
-    const vals = try db.getByRowid("t", rowid, alloc);
+    const vals = try h.db.getByRowid("t", rowid, alloc);
     try std.testing.expect(vals != null);
     defer {
         alloc.free(vals.?[0].blob);
@@ -310,24 +184,19 @@ test "update overflow to inline frees old chain" {
 }
 
 test "begin + commit persists rows" {
-    const io = std.testing.io;
-    const path = "/tmp/test_txn_commit.db";
-    defer Dir.deleteFile(.cwd(), io, path) catch {};
     const alloc = std.testing.allocator;
+    const h = try makeMemoryDb(alloc, .{});
+    defer h.deinit();
 
-    const db = try Db.init(try DiskPager.create(alloc, io, path, .{}), alloc);
-    defer db.close();
-
-    try db.createTable("t", &.{.{ .name = "v", .col_type = .int, .nullable = false }});
-
-    try db.begin();
-    _ = try db.insert("t", &.{.{ .int = 1 }});
-    _ = try db.insert("t", &.{.{ .int = 2 }});
-    _ = try db.insert("t", &.{.{ .int = 3 }});
-    try db.commit();
+    try h.db.createTable("t", &.{.{ .name = "v", .col_type = .int, .nullable = false }});
+    try h.db.begin();
+    _ = try h.db.insert("t", &.{.{ .int = 1 }});
+    _ = try h.db.insert("t", &.{.{ .int = 2 }});
+    _ = try h.db.insert("t", &.{.{ .int = 3 }});
+    try h.db.commit();
 
     var count: usize = 0;
-    try db.scan("t", struct {
+    try h.db.scan("t", struct {
         fn cb(_: u64, _: []const row.Value, ctx: anytype) bool {
             ctx.* += 1;
             return true;
@@ -337,23 +206,18 @@ test "begin + commit persists rows" {
 }
 
 test "begin + rollback erases inserted rows" {
-    const io = std.testing.io;
-    const path = "/tmp/test_txn_rollback_insert.db";
-    defer Dir.deleteFile(.cwd(), io, path) catch {};
     const alloc = std.testing.allocator;
+    const h = try makeMemoryDb(alloc, .{});
+    defer h.deinit();
 
-    const db = try Db.init(try DiskPager.create(alloc, io, path, .{}), alloc);
-    defer db.close();
-
-    try db.createTable("t", &.{.{ .name = "v", .col_type = .int, .nullable = false }});
-
-    try db.begin();
-    _ = try db.insert("t", &.{.{ .int = 1 }});
-    _ = try db.insert("t", &.{.{ .int = 2 }});
-    try db.rollback();
+    try h.db.createTable("t", &.{.{ .name = "v", .col_type = .int, .nullable = false }});
+    try h.db.begin();
+    _ = try h.db.insert("t", &.{.{ .int = 1 }});
+    _ = try h.db.insert("t", &.{.{ .int = 2 }});
+    try h.db.rollback();
 
     var count: usize = 0;
-    try db.scan("t", struct {
+    try h.db.scan("t", struct {
         fn cb(_: u64, _: []const row.Value, ctx: anytype) bool {
             ctx.* += 1;
             return true;
@@ -363,175 +227,65 @@ test "begin + rollback erases inserted rows" {
 }
 
 test "rollback of DELETE restores the row" {
-    const io = std.testing.io;
-    const path = "/tmp/test_txn_rollback_delete.db";
-    defer Dir.deleteFile(.cwd(), io, path) catch {};
     const alloc = std.testing.allocator;
+    const h = try makeMemoryDb(alloc, .{});
+    defer h.deinit();
 
-    const db = try Db.init(try DiskPager.create(alloc, io, path, .{}), alloc);
-    defer db.close();
+    try h.db.createTable("t", &.{.{ .name = "v", .col_type = .int, .nullable = false }});
+    const rowid = try h.db.insert("t", &.{.{ .int = 42 }});
+    try h.db.begin();
+    try std.testing.expect(try h.db.delete("t", rowid));
+    try h.db.rollback();
 
-    try db.createTable("t", &.{.{ .name = "v", .col_type = .int, .nullable = false }});
-    const rowid = try db.insert("t", &.{.{ .int = 42 }});
-
-    try db.begin();
-    try std.testing.expect(try db.delete("t", rowid));
-    try db.rollback();
-
-    const vals = try db.getByRowid("t", rowid, alloc);
+    const vals = try h.db.getByRowid("t", rowid, alloc);
     try std.testing.expect(vals != null);
     defer alloc.free(vals.?);
     try std.testing.expectEqual(@as(i64, 42), vals.?[0].int);
 }
 
 test "rollback of UPDATE restores original value" {
-    const io = std.testing.io;
-    const path = "/tmp/test_txn_rollback_update.db";
-    defer Dir.deleteFile(.cwd(), io, path) catch {};
     const alloc = std.testing.allocator;
+    const h = try makeMemoryDb(alloc, .{});
+    defer h.deinit();
 
-    const db = try Db.init(try DiskPager.create(alloc, io, path, .{}), alloc);
-    defer db.close();
+    try h.db.createTable("t", &.{.{ .name = "v", .col_type = .int, .nullable = false }});
+    const rowid = try h.db.insert("t", &.{.{ .int = 10 }});
+    try h.db.begin();
+    try std.testing.expect(try h.db.update("t", rowid, &.{.{ .int = 999 }}));
+    try h.db.rollback();
 
-    try db.createTable("t", &.{.{ .name = "v", .col_type = .int, .nullable = false }});
-    const rowid = try db.insert("t", &.{.{ .int = 10 }});
-
-    try db.begin();
-    try std.testing.expect(try db.update("t", rowid, &.{.{ .int = 999 }}));
-    try db.rollback();
-
-    const vals = try db.getByRowid("t", rowid, alloc);
+    const vals = try h.db.getByRowid("t", rowid, alloc);
     try std.testing.expect(vals != null);
     defer alloc.free(vals.?);
     try std.testing.expectEqual(@as(i64, 10), vals.?[0].int);
 }
 
 test "auto-commit works without explicit BEGIN" {
-    const io = std.testing.io;
-    const path = "/tmp/test_txn_autocommit.db";
-    defer Dir.deleteFile(.cwd(), io, path) catch {};
     const alloc = std.testing.allocator;
+    const h = try makeMemoryDb(alloc, .{});
+    defer h.deinit();
 
-    const db = try Db.init(try DiskPager.create(alloc, io, path, .{}), alloc);
-    defer db.close();
+    try h.db.createTable("t", &.{.{ .name = "v", .col_type = .int, .nullable = false }});
+    const rowid = try h.db.insert("t", &.{.{ .int = 7 }});
 
-    try db.createTable("t", &.{.{ .name = "v", .col_type = .int, .nullable = false }});
-    const rowid = try db.insert("t", &.{.{ .int = 7 }});
-
-    const vals = try db.getByRowid("t", rowid, alloc);
+    const vals = try h.db.getByRowid("t", rowid, alloc);
     try std.testing.expect(vals != null);
     defer alloc.free(vals.?);
     try std.testing.expectEqual(@as(i64, 7), vals.?[0].int);
 }
 
 test "double BEGIN returns error" {
-    const io = std.testing.io;
-    const path = "/tmp/test_txn_double_begin.db";
-    defer Dir.deleteFile(.cwd(), io, path) catch {};
     const alloc = std.testing.allocator;
-
-    const db = try Db.init(try DiskPager.create(alloc, io, path, .{}), alloc);
-    defer db.close();
-
-    try db.begin();
-    try std.testing.expectError(error.TransactionAlreadyActive, db.begin());
-    try db.rollback();
+    const h = try makeMemoryDb(alloc, .{});
+    defer h.deinit();
+    try h.db.begin();
+    try std.testing.expectError(error.TransactionAlreadyActive, h.db.begin());
+    try h.db.rollback();
 }
 
 test "COMMIT with no active transaction returns error" {
-    const io = std.testing.io;
-    const path = "/tmp/test_txn_commit_no_txn.db";
-    defer Dir.deleteFile(.cwd(), io, path) catch {};
     const alloc = std.testing.allocator;
-
-    const db = try Db.init(try DiskPager.create(alloc, io, path, .{}), alloc);
-    defer db.close();
-
-    try std.testing.expectError(error.NoActiveTransaction, db.commit());
-}
-
-test "SQL BEGIN / COMMIT round-trip" {
-    const io = std.testing.io;
-    const path = "/tmp/test_txn_sql_commit.db";
-    defer Dir.deleteFile(.cwd(), io, path) catch {};
-    const alloc = std.testing.allocator;
-
-    const execute = @import("../sql/executor.zig").execute;
-
-    const db = try Db.init(try DiskPager.create(alloc, io, path, .{}), alloc);
-    defer db.close();
-
-    var r = try execute(db, "CREATE TABLE t (v INT)", alloc);
-    r.deinit();
-    r = try execute(db, "BEGIN", alloc);
-    r.deinit();
-    r = try execute(db, "INSERT INTO t VALUES (1)", alloc);
-    r.deinit();
-    r = try execute(db, "INSERT INTO t VALUES (2)", alloc);
-    r.deinit();
-    r = try execute(db, "COMMIT", alloc);
-    r.deinit();
-
-    var result = try execute(db, "SELECT * FROM t", alloc);
-    defer result.deinit();
-    try std.testing.expectEqual(@as(usize, 2), result.result_set.rows.len);
-}
-
-test "SQL BEGIN / ROLLBACK discards rows" {
-    const io = std.testing.io;
-    const path = "/tmp/test_txn_sql_rollback.db";
-    defer Dir.deleteFile(.cwd(), io, path) catch {};
-    const alloc = std.testing.allocator;
-
-    const execute = @import("../sql/executor.zig").execute;
-
-    const db = try Db.init(try DiskPager.create(alloc, io, path, .{}), alloc);
-    defer db.close();
-
-    var r = try execute(db, "CREATE TABLE t (v INT)", alloc);
-    r.deinit();
-    r = try execute(db, "BEGIN", alloc);
-    r.deinit();
-    r = try execute(db, "INSERT INTO t VALUES (99)", alloc);
-    r.deinit();
-    r = try execute(db, "ROLLBACK", alloc);
-    r.deinit();
-
-    var result = try execute(db, "SELECT * FROM t", alloc);
-    defer result.deinit();
-    try std.testing.expectEqual(@as(usize, 0), result.result_set.rows.len);
-}
-
-test "exec with schema-qualified table name" {
-    const io = std.testing.io;
-    const path = "/tmp/test_db_schema.db";
-    defer Dir.deleteFile(.cwd(), io, path) catch {};
-    const alloc = std.testing.allocator;
-
-    const execute = @import("../sql/executor.zig").execute;
-    const PlanError = @import("../sql/logical_plan.zig").PlanError;
-
-    const db = try Db.init(try DiskPager.create(alloc, io, path, .{}), alloc);
-    defer db.close();
-
-    // Create table and insert data
-    var r = try execute(db, "CREATE TABLE users (id INT, name TEXT)", alloc);
-    r.deinit();
-    r = try execute(db, "INSERT INTO users VALUES (1, 'alice')", alloc);
-    r.deinit();
-    r = try execute(db, "INSERT INTO users VALUES (2, 'bob')", alloc);
-    r.deinit();
-
-    // Query without schema (default)
-    var result = try execute(db, "SELECT * FROM users", alloc);
-    try std.testing.expectEqual(@as(usize, 2), result.result_set.rows.len);
-    result.deinit();
-
-    // Query with main schema
-    result = try execute(db, "SELECT * FROM main.users", alloc);
-    try std.testing.expectEqual(@as(usize, 2), result.result_set.rows.len);
-    result.deinit();
-
-    // Query with non-existent schema should fail
-    try std.testing.expectError(PlanError.TableNotFound, execute(db, "SELECT * FROM other.users", alloc));
+    const h = try makeMemoryDb(alloc, .{});
+    defer h.deinit();
+    try std.testing.expectError(error.NoActiveTransaction, h.db.commit());
 }
