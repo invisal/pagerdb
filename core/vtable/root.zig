@@ -31,6 +31,7 @@ pub const VTab = struct {
 const pages = @import("pages.zig");
 const page_slots = @import("page_slots.zig");
 const tables = @import("tables.zig");
+const columns = @import("columns.zig");
 
 // ── Registry ──────────────────────────────────────────────────────────────────
 
@@ -58,6 +59,14 @@ const REGISTRY = [_]VTab{
         .min_args = 0,
         .max_args = 0,
         .scan = tables.scan,
+    },
+    .{
+        .schema = "information_schema",
+        .name = "columns",
+        .columns = &columns.columns,
+        .min_args = 0,
+        .max_args = 0,
+        .scan = columns.scan,
     },
 };
 
