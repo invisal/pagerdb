@@ -144,7 +144,7 @@ pub const Catalog = struct {
             // default_src is borrowed from tmp arena; we dup it into the catalog arena below.
             const default_src: ?[]const u8 = if (vals[COL.default_expr] == .text) vals[COL.default_expr].text else null;
             const default_expr: ?ast.Expr = if (default_src) |src|
-                try Parser.parseStandaloneExpr(src, tmp)
+                (try Parser.parseStandaloneExpr(src, tmp)).expr
             else
                 null;
 

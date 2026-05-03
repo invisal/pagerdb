@@ -22,6 +22,15 @@ pub const ParseResult = struct {
     }
 };
 
+pub const ParseExprResult = struct {
+    arena: std.heap.ArenaAllocator,
+    expr: ast.Expr,
+
+    pub fn deinit(self: *ParseResult) void {
+        self.arena.deinit();
+    }
+};
+
 pub const Parser = struct {
     tokens: []const Token,
     src: []const u8,
@@ -44,7 +53,7 @@ pub const Parser = struct {
         return ParseResult{ .arena = p.arena, .stmt = stmt };
     }
 
-    pub fn parseStandaloneExpr(src: []const u8, allocator: std.mem.Allocator) ParseError!ast.Expr {
+    pub fn parseStandaloneExpr(src: []const u8, allocator: std.mem.Allocator) ParseError!ParseExprResult {
         const tokens = try lexer.Lexer.tokenize(src, allocator);
         defer allocator.free(tokens);
 
@@ -60,10 +69,12 @@ pub const Parser = struct {
         if (p.peek().kind == .semicolon) {
             _ = p.advance();
         }
+
         if (p.peek().kind != .eof) {
             return error.UnexpectedToken;
         }
-        return expr;
+
+        return ParseExprResult{ .arena = p.arena, .expr = expr };
     }
 
     fn alloc(self: *Parser) std.mem.Allocator {

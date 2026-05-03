@@ -63,7 +63,7 @@ test "insert with default value" {
         defer r1.deinit();
     }
 
-    const db = try Db.init(try DiskPager.open(alloc, io, path), alloc);
+    const db = try Db.load(try DiskPager.open(alloc, io, path), alloc);
     defer db.close();
 
     var r2 = try exec(db, "INSERT INTO users(name) VALUES('alice');", alloc);
