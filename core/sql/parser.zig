@@ -55,7 +55,15 @@ pub const Parser = struct {
             .arena = std.heap.ArenaAllocator.init(allocator),
         };
         errdefer p.arena.deinit();
-        return p.parseExpr();
+
+        const expr = try p.parseExpr();
+        if (p.peek().kind == .semicolon) {
+            _ = p.advance();
+        }
+        if (p.peek().kind != .eof) {
+            return error.UnexpectedToken;
+        }
+        return expr;
     }
 
     fn alloc(self: *Parser) std.mem.Allocator {
