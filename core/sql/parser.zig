@@ -109,6 +109,18 @@ pub const Parser = struct {
             .kw_update => .{ .update = try self.parseUpdate() },
             .kw_delete => .{ .delete = try self.parseDelete() },
             .kw_create => .{ .create_table = try self.parseCreateTable() },
+            .kw_begin => blk: {
+                _ = self.advance();
+                break :blk .{ .begin = {} };
+            },
+            .kw_commit => blk: {
+                _ = self.advance();
+                break :blk .{ .commit = {} };
+            },
+            .kw_rollback => blk: {
+                _ = self.advance();
+                break :blk .{ .rollback = {} };
+            },
             else => ParseError.UnexpectedToken,
         };
     }

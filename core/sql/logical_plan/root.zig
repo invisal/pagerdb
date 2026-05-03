@@ -110,6 +110,9 @@ pub const LogicalPlan = union(enum) {
     update: LogicalUpdate,
     delete: LogicalDelete,
     create_table: LogicalCreateTable,
+    begin: void,
+    commit: void,
+    rollback: void,
 
     pub fn schema(self: LogicalPlan) Schema {
         return switch (self) {
@@ -120,7 +123,7 @@ pub const LogicalPlan = union(enum) {
             .insert => |n| n.schema,
             .update => |n| n.schema,
             .delete => |n| n.schema,
-            .create_table => Schema{ .table = "", .columns = &.{} },
+            .create_table, .begin, .commit, .rollback => Schema{ .table = "", .columns = &.{} },
         };
     }
 };
@@ -160,6 +163,9 @@ pub const LogicalPlanner = struct {
             .update => |s| try self.planUpdate(s),
             .delete => |s| try self.planDelete(s),
             .create_table => |s| try self.planCreateTable(s),
+            .begin => .{ .begin = {} },
+            .commit => .{ .commit = {} },
+            .rollback => .{ .rollback = {} },
         };
     }
 

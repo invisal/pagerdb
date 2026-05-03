@@ -34,7 +34,7 @@ pub fn main(init: std.process.Init) !void {
 }
 
 fn initInMemoryDb(alloc: std.mem.Allocator, out: *std.Io.Writer) !*Db {
-    try out.print("VisalDB — in-memory mode (data will be lost on exit)\n", .{});
+    try out.print("PagerDB — in-memory mode (data will be lost on exit)\n", .{});
     try out.print("Type SQL followed by ';', or .help for commands.\n\n", .{});
     try out.flush();
 
@@ -77,7 +77,7 @@ fn initDiskDb(
 }
 
 fn printWelcome(out: *std.Io.Writer, path: []const u8) !void {
-    try out.print("VisalDB — {s}\n", .{path});
+    try out.print("PagerDB — {s}\n", .{path});
     try out.print("Type SQL followed by ';', or .help for commands.\n\n", .{});
     try out.flush();
 }

@@ -58,6 +58,18 @@ pub const Executor = struct {
                 try self.db.createTable(n.table, n.columns);
                 break :blk .{ .created = {} };
             },
+            .begin => blk: {
+                try self.db.begin();
+                break :blk .{ .affected = 0 };
+            },
+            .commit => blk: {
+                try self.db.commit();
+                break :blk .{ .affected = 0 };
+            },
+            .rollback => blk: {
+                try self.db.rollback();
+                break :blk .{ .affected = 0 };
+            },
         };
     }
 

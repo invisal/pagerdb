@@ -155,4 +155,7 @@ pub const Stmt = union(enum) {
     update: UpdateStmt,
     delete: DeleteStmt,
     create_table: CreateTableStmt,
+    begin: void,
+    commit: void,
+    rollback: void,
 };

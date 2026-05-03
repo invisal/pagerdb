@@ -1,4 +1,4 @@
-# VisalDB — Agent Rules
+# PagerDB — Agent Rules
 
 ## After Every Fix
 
