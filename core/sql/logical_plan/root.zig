@@ -134,6 +134,7 @@ pub const PlanError = error{
     ColumnCountMismatch,
     ArgCountMismatch,
     OutOfMemory,
+    NoDefaultValue,
 };
 
 pub const LogicalPlanner = struct {
@@ -299,7 +300,19 @@ pub const LogicalPlanner = struct {
                     return PlanError.ColumnNotFound;
 
                 const idx = col.attnum;
-                row_values[idx] = try self.resolveExpr(stmt.values[i], schema);
+
+                const current_value = stmt.values[i];
+
+                if (current_value == .default_value) {
+                    if (meta.columns[idx].default_expr) |default_expr| {
+                        row_values[idx] = try self.resolveExpr(default_expr, schema);
+                    } else {
+                        return PlanError.NoDefaultValue;
+                    }
+                } else {
+                    row_values[idx] = try self.resolveExpr(current_value, schema);
+                }
+
                 is_set[idx] = true;
             }
         } else {
@@ -309,7 +322,16 @@ pub const LogicalPlanner = struct {
                 return PlanError.ColumnCountMismatch;
 
             for (stmt.values, 0..) |expr, i| {
-                row_values[i] = try self.resolveExpr(expr, schema);
+                if (expr == .default_value) {
+                    if (meta.columns[i].default_expr) |default_expr| {
+                        row_values[i] = try self.resolveExpr(default_expr, schema);
+                    } else {
+                        return PlanError.NoDefaultValue;
+                    }
+                } else {
+                    row_values[i] = try self.resolveExpr(expr, schema);
+                }
+
                 is_set[i] = true;
             }
         }
@@ -440,6 +462,9 @@ pub const LogicalPlanner = struct {
                 };
                 break :blk .{ .unary = node };
             },
+            // DEFAULT should have been rewritten to the column's default expression
+            // during INSERT/UPDATE planning. It must not reach this stage.
+            .default_value => std.debug.panic("DEFAULT must be resolved during planning", .{}),
         };
     }
 

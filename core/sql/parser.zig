@@ -226,8 +226,15 @@ pub const Parser = struct {
         _ = try self.expect(.lparen);
 
         var values: std.ArrayList(ast.Expr) = .empty;
+
         while (true) {
-            try values.append(self.alloc(), try self.parseExpr());
+            if (self.peek().kind == .kw_default) {
+                _ = self.advance();
+                try values.append(self.alloc(), .default_value);
+            } else {
+                try values.append(self.alloc(), try self.parseExpr());
+            }
+
             if (self.peek().kind != .comma) break;
             _ = self.advance();
         }

@@ -3,25 +3,17 @@ const Parser = @import("../parser.zig").Parser;
 const LogicalPlanner = @import("../logical_plan.zig").LogicalPlanner;
 const PlanError = @import("../logical_plan.zig").PlanError;
 const utils = @import("utils.zig");
-const makeDb = utils.makeDb;
-
-const Dir = utils.Dir;
+const makeCatalog = utils.makeCatalog;
 
 test "plan INSERT resolves values" {
-    const io = std.testing.io;
-    const path = "/tmp/test_lp_insert.db";
-    defer Dir.deleteFile(.cwd(), io, path) catch {};
     const alloc = std.testing.allocator;
 
-    var db = try makeDb(io, path, alloc);
-    defer db.deinit();
-
-    _ = try db.cat.createTable("t", &.{
-        .{ .name = "name", .col_type = .text, .nullable = false },
-        .{ .name = "score", .col_type = .int, .nullable = false },
+    var cat_handle = try makeCatalog(alloc, &.{
+        "CREATE TABLE t (name TEXT NOT NULL, score INT NOT NULL)",
     });
+    defer cat_handle.deinit();
 
-    var planner = LogicalPlanner.init(&db.cat, alloc);
+    var planner = LogicalPlanner.init(&cat_handle.cat, alloc);
     defer planner.deinit();
 
     var parsed = try Parser.parse("INSERT INTO t VALUES ('alice', 100)", alloc);
@@ -36,20 +28,14 @@ test "plan INSERT resolves values" {
 }
 
 test "plan INSERT with specified columns" {
-    const io = std.testing.io;
-    const path = "/tmp/test_lp_insert.db";
-    defer Dir.deleteFile(.cwd(), io, path) catch {};
     const alloc = std.testing.allocator;
 
-    var db = try makeDb(io, path, alloc);
-    defer db.deinit();
-
-    _ = try db.cat.createTable("t", &.{
-        .{ .name = "name", .col_type = .text, .nullable = false },
-        .{ .name = "score", .col_type = .int, .nullable = false },
+    var cat_handle = try makeCatalog(alloc, &.{
+        "CREATE TABLE t (name TEXT NOT NULL, score INT NOT NULL)",
     });
+    defer cat_handle.deinit();
 
-    var planner = LogicalPlanner.init(&db.cat, alloc);
+    var planner = LogicalPlanner.init(&cat_handle.cat, alloc);
     defer planner.deinit();
 
     var parsed = try Parser.parse("INSERT INTO t(score, name) VALUES (100, 'alice')", alloc);
@@ -64,20 +50,15 @@ test "plan INSERT with specified columns" {
 }
 
 test "plan INSERT wrong column count returns ColumnNotFound" {
-    const io = std.testing.io;
-    const path = "/tmp/test_lp_insert_cc.db";
-    defer Dir.deleteFile(.cwd(), io, path) catch {};
     const alloc = std.testing.allocator;
 
-    var db = try makeDb(io, path, alloc);
-    defer db.deinit();
-
-    _ = try db.cat.createTable("t", &.{
-        .{ .name = "x", .col_type = .int, .nullable = false },
-        .{ .name = "y", .col_type = .int, .nullable = false },
+    // Both columns are NOT NULL, so missing values should cause an error
+    var cat_handle = try makeCatalog(alloc, &.{
+        "CREATE TABLE t (x INT NOT NULL, y INT NOT NULL)",
     });
+    defer cat_handle.deinit();
 
-    var planner = LogicalPlanner.init(&db.cat, alloc);
+    var planner = LogicalPlanner.init(&cat_handle.cat, alloc);
     defer planner.deinit();
 
     var parsed = try Parser.parse("INSERT INTO t VALUES (1)", alloc);
@@ -87,21 +68,14 @@ test "plan INSERT wrong column count returns ColumnNotFound" {
 }
 
 test "plan INSERT specified columns count mismatch values count returns ColumnCountMismatch" {
-    const io = std.testing.io;
-    const path = "/tmp/test_lp_insert_colval.db";
-    defer Dir.deleteFile(.cwd(), io, path) catch {};
     const alloc = std.testing.allocator;
 
-    var db = try makeDb(io, path, alloc);
-    defer db.deinit();
-
-    _ = try db.cat.createTable("t", &.{
-        .{ .name = "x", .col_type = .int, .nullable = false },
-        .{ .name = "y", .col_type = .int, .nullable = false },
-        .{ .name = "z", .col_type = .int, .nullable = false },
+    var cat_handle = try makeCatalog(alloc, &.{
+        "CREATE TABLE t (x INT NOT NULL, y INT NOT NULL, z INT NOT NULL)",
     });
+    defer cat_handle.deinit();
 
-    var planner = LogicalPlanner.init(&db.cat, alloc);
+    var planner = LogicalPlanner.init(&cat_handle.cat, alloc);
     defer planner.deinit();
 
     // Specifying 2 columns but providing 3 values
@@ -111,23 +85,32 @@ test "plan INSERT specified columns count mismatch values count returns ColumnCo
     try std.testing.expectError(PlanError.ColumnCountMismatch, planner.plan(parsed.stmt));
 }
 
+test "plan INSERT specified columns with DEFAULT on column with no default" {
+    const alloc = std.testing.allocator;
+    var cat_handle = try makeCatalog(alloc, &.{
+        "CREATE TABLE t(x INT, y INT)",
+    });
+    defer cat_handle.deinit();
+
+    var planner = LogicalPlanner.init(&cat_handle.cat, alloc);
+    defer planner.deinit();
+
+    var parsed = try Parser.parse("INSERT INTO t(x, y) VALUES(1, DEFAULT);", alloc);
+    defer parsed.deinit();
+
+    try std.testing.expectError(PlanError.NoDefaultValue, planner.plan(parsed.stmt));
+}
+
 test "plan INSERT with partial columns fills missing with NULL" {
-    const io = std.testing.io;
-    const path = "/tmp/test_lp_insert_partial.db";
-    defer Dir.deleteFile(.cwd(), io, path) catch {};
     const alloc = std.testing.allocator;
 
-    var db = try makeDb(io, path, alloc);
-    defer db.deinit();
-
-    // Table with 3 columns, where the third is nullable
-    _ = try db.cat.createTable("t", &.{
-        .{ .name = "x", .col_type = .int, .nullable = false },
-        .{ .name = "y", .col_type = .int, .nullable = false },
-        .{ .name = "z", .col_type = .int, .nullable = true },
+    // Table with 3 columns, where the third is nullable (by default)
+    var cat_handle = try makeCatalog(alloc, &.{
+        "CREATE TABLE t (x INT NOT NULL, y INT NOT NULL, z INT)",
     });
+    defer cat_handle.deinit();
 
-    var planner = LogicalPlanner.init(&db.cat, alloc);
+    var planner = LogicalPlanner.init(&cat_handle.cat, alloc);
     defer planner.deinit();
 
     // Specifying only 2 columns - the third should be filled with NULL
@@ -147,20 +130,14 @@ test "plan INSERT with partial columns fills missing with NULL" {
 }
 
 test "plan INSERT with nonexistent column returns ColumnNotFound" {
-    const io = std.testing.io;
-    const path = "/tmp/test_lp_insert_badcol.db";
-    defer Dir.deleteFile(.cwd(), io, path) catch {};
     const alloc = std.testing.allocator;
 
-    var db = try makeDb(io, path, alloc);
-    defer db.deinit();
-
-    _ = try db.cat.createTable("t", &.{
-        .{ .name = "x", .col_type = .int, .nullable = false },
-        .{ .name = "y", .col_type = .int, .nullable = false },
+    var cat_handle = try makeCatalog(alloc, &.{
+        "CREATE TABLE t (x INT NOT NULL, y INT NOT NULL)",
     });
+    defer cat_handle.deinit();
 
-    var planner = LogicalPlanner.init(&db.cat, alloc);
+    var planner = LogicalPlanner.init(&cat_handle.cat, alloc);
     defer planner.deinit();
 
     // Specifying a column that doesn't exist in the table
