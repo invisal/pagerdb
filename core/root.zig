@@ -29,6 +29,6 @@ test {
     _ = @import("tests/btree_test.zig");
     _ = @import("tests/catalog_test.zig");
     _ = @import("tests/db_test.zig");
-    _ = @import("tests/executor_test.zig");
+    _ = @import("tests/sql/root.zig");
     _ = @import("tests/parser_test.zig");
 }
