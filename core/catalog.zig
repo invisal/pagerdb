@@ -5,6 +5,7 @@ const Pager = @import("pager/pager.zig").Pager;
 const btree = @import("btree.zig");
 const row = @import("row.zig");
 const page0 = @import("page0.zig");
+const Parser = @import("sql/parser.zig").Parser;
 
 // ── Hardcoded catalog schemas ─────────────────────────────────────────────────
 
@@ -20,6 +21,15 @@ const COLUMNS_SCHEMA = [_]row.ColumnSchema{
     .{ .col_type = .int, .nullable = false }, // col_type (as i64)
     .{ .col_type = .int, .nullable = false }, // nullable (0 or 1)
     .{ .col_type = .text, .nullable = true }, // default value expression
+};
+
+const COL = struct {
+    const table_id: usize = 0;
+    const attnum: usize = 1;
+    const name: usize = 2;
+    const col_type: usize = 3;
+    const nullable: usize = 4;
+    const default_expr: usize = 5;
 };
 
 // ── Public types ──────────────────────────────────────────────────────────────
@@ -123,18 +133,30 @@ pub const Catalog = struct {
         // Pass 2: attach column metadata to each table.
         var max_col_rowid: u64 = 0;
         var col_scan = try btree.ScanIterator.init(self.pager, self.pager.sys_columns_root);
+
         while (try col_scan.next()) |cell| {
             if (cell.rowid > max_col_rowid) max_col_rowid = cell.rowid;
+
             const vals = try row.decodeRow(&COLUMNS_SCHEMA, cell.row_data, tmp);
-            const table_id = @as(u64, @intCast(vals[0].int));
+            const table_id = @as(u64, @intCast(vals[COL.table_id].int));
+
+            // Extract once, use twice - avoids redundant check and keeps logic together.
+            // default_src is borrowed from tmp arena; we dup it into the catalog arena below.
+            const default_src: ?[]const u8 = if (vals[COL.default_expr] == .text) vals[COL.default_expr].text else null;
+            const default_expr: ?ast.Expr = if (default_src) |src|
+                (try Parser.parseStandaloneExpr(src, tmp)).expr
+            else
+                null;
+
             const col = ColumnMeta{
-                .attnum = @intCast(vals[1].int),
-                .name = try alloc.dupe(u8, vals[2].text),
-                .col_type = @enumFromInt(vals[3].int),
-                .nullable = vals[4].int != 0,
-                .default_expr = null,
-                .default_src = null,
+                .attnum = @intCast(vals[COL.attnum].int),
+                .name = try alloc.dupe(u8, vals[COL.name].text),
+                .col_type = @enumFromInt(vals[COL.col_type].int),
+                .nullable = vals[COL.nullable].int != 0,
+                .default_expr = if (default_expr) |expr| try expr.clone(alloc) else null,
+                .default_src = if (default_src) |src| try alloc.dupe(u8, src) else null,
             };
+
             var it = self.tables.valueIterator();
             while (it.next()) |meta| {
                 if (meta.id == table_id) {

@@ -55,11 +55,16 @@ test "insert with default value" {
     const path = "/tmp/test_db_insert_default_value.db";
     defer Dir.deleteFile(.cwd(), io, path) catch {};
 
-    const db = try Db.init(try DiskPager.create(alloc, io, path), alloc);
-    defer db.close();
+    {
+        const db1 = try Db.init(try DiskPager.create(alloc, io, path), alloc);
+        defer db1.close();
 
-    var r1 = try exec(db, "CREATE TABLE users(name TEXT, age INT DEFAULT 18);", alloc);
-    defer r1.deinit();
+        var r1 = try exec(db1, "CREATE TABLE users(name TEXT, age INT DEFAULT 18);", alloc);
+        defer r1.deinit();
+    }
+
+    const db = try Db.load(try DiskPager.open(alloc, io, path), alloc);
+    defer db.close();
 
     var r2 = try exec(db, "INSERT INTO users(name) VALUES('alice');", alloc);
     defer r2.deinit();
