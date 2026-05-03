@@ -48,11 +48,11 @@ fn initDiskDb(
     path: []const u8,
     out: *std.Io.Writer,
 ) !*Db {
-    const pager = DiskPager.open(alloc, io, path) catch |err| switch (err) {
+    const pager = DiskPager.open(alloc, io, path, .{}) catch |err| switch (err) {
         error.FileNotFound => {
             try out.print("Creating new database: {s}\n", .{path});
             try out.flush();
-            const new_pager = try DiskPager.create(alloc, io, path);
+            const new_pager = try DiskPager.create(alloc, io, path, .{});
             const db = try Db.init(new_pager, alloc);
             try printWelcome(out, path);
             return db;

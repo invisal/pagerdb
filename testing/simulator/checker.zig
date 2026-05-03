@@ -29,7 +29,7 @@ pub fn checkCatalog(db: *Database) !void {
 // inconsistency between in-memory and on-disk state.
 pub fn checkBTreeStructure(io: std.Io, alloc: std.mem.Allocator, db: *Database, path: []const u8, table_name: []const u8) !void {
     const meta = db.cat.tables.get(table_name) orelse return Error.TableNotFound;
-    var disk_pager = try DiskPager.open(alloc, io, path);
+    var disk_pager = try DiskPager.open(alloc, io, path, .{});
     defer disk_pager.close();
     btree.verifyTree(&disk_pager, meta.btree_root) catch |err| {
         std.debug.print(

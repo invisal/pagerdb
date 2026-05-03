@@ -8,10 +8,15 @@ const Dir = std.Io.Dir;
 const File = std.Io.File;
 const Allocator = std.mem.Allocator;
 
-// Fixed-size buffer pool.  64 frames × 8 KB = 512 KB of RAM.
-// We use a simple array instead of a hash map because POOL_SIZE is small
-// enough that linear scan is faster than the cache misses of a complex structure.
-const POOL_SIZE: usize = 64;
+pub const DEFAULT_POOL_SIZE: usize = 64;
+
+// Runtime-configurable buffer pool settings.  Pass .{} to create/open to
+// accept all defaults (DEFAULT_POOL_SIZE frames × PAGE_SIZE bytes each).
+pub const Config = struct {
+    // How many pages to keep in RAM.  Linear scan over the pool is O(pool_size),
+    // so values above ~512 may benefit from a hash-map eviction index instead.
+    pool_size: usize = DEFAULT_POOL_SIZE,
+};
 
 const Frame = struct {
     page_id: u32,
@@ -24,7 +29,8 @@ pub const DiskPager = struct {
     file: File,
     io: Io,
     allocator: Allocator,
-    pool: [POOL_SIZE]Frame,
+    // Heap-allocated slice; length equals the pool_size passed at creation.
+    pool: []Frame,
     tick: u64,
     fault_after: ?u32 = null,
     fault_write_count: u32 = 0,
@@ -36,12 +42,13 @@ pub const DiskPager = struct {
         .close = diskClose,
     };
 
-    pub fn create(allocator: Allocator, io: Io, path: []const u8) !Pager {
+    pub fn create(allocator: Allocator, io: Io, path: []const u8, config: Config) !Pager {
         const file = try Dir.cwd().createFile(io, path, .{ .read = true });
         errdefer file.close(io);
         const self = try allocator.create(DiskPager);
         errdefer allocator.destroy(self);
-        initSelf(self, file, io, allocator);
+        try initSelf(self, file, io, allocator, config.pool_size);
+        errdefer allocator.free(self.pool);
         var pager = Pager{
             .ptr = self,
             .vtable = &vtable,
@@ -57,13 +64,14 @@ pub const DiskPager = struct {
         return pager;
     }
 
-    pub fn open(allocator: Allocator, io: Io, path: []const u8) !Pager {
+    pub fn open(allocator: Allocator, io: Io, path: []const u8, config: Config) !Pager {
         const file = try Dir.cwd().openFile(io, path, .{ .mode = .read_write });
         errdefer file.close(io);
         const file_size = try file.length(io);
         const self = try allocator.create(DiskPager);
         errdefer allocator.destroy(self);
-        initSelf(self, file, io, allocator);
+        try initSelf(self, file, io, allocator, config.pool_size);
+        errdefer allocator.free(self.pool);
         var pager = Pager{
             .ptr = self,
             .vtable = &vtable,
@@ -80,14 +88,15 @@ pub const DiskPager = struct {
         return pager;
     }
 
-    fn initSelf(self: *DiskPager, file: File, io: Io, allocator: Allocator) void {
+    fn initSelf(self: *DiskPager, file: File, io: Io, allocator: Allocator, pool_size: usize) !void {
         self.file = file;
         self.io = io;
         self.allocator = allocator;
         self.tick = 0;
         self.fault_after = null;
         self.fault_write_count = 0;
-        for (&self.pool) |*frame| {
+        self.pool = try allocator.alloc(Frame, pool_size);
+        for (self.pool) |*frame| {
             frame.page_id = std.math.maxInt(u32);
             frame.dirty = false;
             frame.lru_tick = 0;
@@ -95,7 +104,7 @@ pub const DiskPager = struct {
     }
 
     fn poolFind(self: *DiskPager, page_id: u32) ?*Frame {
-        for (&self.pool) |*frame| {
+        for (self.pool) |*frame| {
             if (frame.page_id == page_id) return frame;
         }
         return null;
@@ -104,7 +113,7 @@ pub const DiskPager = struct {
     // Selects the least-recently-used frame for replacement.
     // We use a monotonic tick counter rather than a linked list because:
     //   1) It requires no pointer chasing during normal access (cache-friendly)
-    //   2) With POOL_SIZE=64, a linear scan is O(64) and simpler than a heap
+    //   2) With small pool sizes, a linear scan is O(n) and simpler than a heap
     //   3) Tick comparison is branch-predictor friendly on modern CPUs
     // If the chosen frame is dirty, its contents are written back to disk.
     fn poolEvict(self: *DiskPager) !*Frame {
@@ -170,7 +179,7 @@ pub const DiskPager = struct {
     fn diskFlush(ptr: *anyopaque, pager: *Pager) anyerror!void {
         const self: *DiskPager = @ptrCast(@alignCast(ptr));
         try page0.writeHeader(pager);
-        for (&self.pool) |*frame| {
+        for (self.pool) |*frame| {
             if (frame.dirty and frame.page_id != std.math.maxInt(u32)) {
                 try self.writePageRaw(frame.page_id, &frame.data);
                 frame.dirty = false;
@@ -182,6 +191,7 @@ pub const DiskPager = struct {
     fn diskClose(ptr: *anyopaque) void {
         const self: *DiskPager = @ptrCast(@alignCast(ptr));
         self.file.close(self.io);
+        self.allocator.free(self.pool);
         self.allocator.destroy(self);
     }
 };
@@ -196,7 +206,7 @@ test "create, write, read page" {
     defer Dir2.deleteFile(.cwd(), io, path) catch {};
     const alloc = std.testing.allocator;
 
-    var pager = try DiskPager.create(alloc, io, path);
+    var pager = try DiskPager.create(alloc, io, path, .{});
     defer pager.close();
 
     var buf = [_]u8{0} ** t.PAGE_SIZE;
@@ -217,7 +227,7 @@ test "allocPage extends file" {
     defer Dir2.deleteFile(.cwd(), io, path) catch {};
     const alloc = std.testing.allocator;
 
-    var pager = try DiskPager.create(alloc, io, path);
+    var pager = try DiskPager.create(alloc, io, path, .{});
     defer pager.close();
 
     const id = try pager.allocPage();
@@ -231,7 +241,7 @@ test "buffer pool hit avoids disk read" {
     defer Dir2.deleteFile(.cwd(), io, path) catch {};
     const alloc = std.testing.allocator;
 
-    var pager = try DiskPager.create(alloc, io, path);
+    var pager = try DiskPager.create(alloc, io, path, .{});
     defer pager.close();
 
     var buf = std.mem.zeroes([t.PAGE_SIZE]u8);
@@ -249,7 +259,7 @@ test "freePage and allocPage reuse" {
     defer Dir2.deleteFile(.cwd(), io, path) catch {};
     const alloc = std.testing.allocator;
 
-    var pager = try DiskPager.create(alloc, io, path);
+    var pager = try DiskPager.create(alloc, io, path, .{});
     defer pager.close();
 
     const id = try pager.allocPage();

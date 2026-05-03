@@ -12,7 +12,7 @@ test "execute SELECT * returns all rows" {
     defer Dir.deleteFile(.cwd(), io, path) catch {};
     const alloc = std.testing.allocator;
 
-    const db = try Db.init(try DiskPager.create(alloc, io, path), alloc);
+    const db = try Db.init(try DiskPager.create(alloc, io, path, .{}), alloc);
     defer db.close();
 
     try db.createTable("t", &.{
@@ -34,7 +34,7 @@ test "execute SELECT with WHERE filters rows" {
     defer Dir.deleteFile(.cwd(), io, path) catch {};
     const alloc = std.testing.allocator;
 
-    const db = try Db.init(try DiskPager.create(alloc, io, path), alloc);
+    const db = try Db.init(try DiskPager.create(alloc, io, path, .{}), alloc);
     defer db.close();
 
     try db.createTable("t", &.{
@@ -56,7 +56,7 @@ test "execute INSERT adds a row" {
     defer Dir.deleteFile(.cwd(), io, path) catch {};
     const alloc = std.testing.allocator;
 
-    const db = try Db.init(try DiskPager.create(alloc, io, path), alloc);
+    const db = try Db.init(try DiskPager.create(alloc, io, path, .{}), alloc);
     defer db.close();
 
     _ = try execute(db, "CREATE TABLE t (n INT NOT NULL)", alloc);
@@ -75,7 +75,7 @@ test "execute UPDATE changes value" {
     defer Dir.deleteFile(.cwd(), io, path) catch {};
     const alloc = std.testing.allocator;
 
-    const db = try Db.init(try DiskPager.create(alloc, io, path), alloc);
+    const db = try Db.init(try DiskPager.create(alloc, io, path, .{}), alloc);
     defer db.close();
 
     try db.createTable("t", &.{
@@ -101,7 +101,7 @@ test "execute DELETE removes row" {
     defer Dir.deleteFile(.cwd(), io, path) catch {};
     const alloc = std.testing.allocator;
 
-    const db = try Db.init(try DiskPager.create(alloc, io, path), alloc);
+    const db = try Db.init(try DiskPager.create(alloc, io, path, .{}), alloc);
     defer db.close();
 
     try db.createTable("t", &.{
@@ -125,7 +125,7 @@ test "execute CREATE TABLE then INSERT works" {
     defer Dir.deleteFile(.cwd(), io, path) catch {};
     const alloc = std.testing.allocator;
 
-    const db = try Db.init(try DiskPager.create(alloc, io, path), alloc);
+    const db = try Db.init(try DiskPager.create(alloc, io, path, .{}), alloc);
     defer db.close();
 
     _ = try execute(db, "CREATE TABLE items (id INT NOT NULL, label TEXT)", alloc);
@@ -143,7 +143,7 @@ test "execute point-lookup via _rowid_" {
     defer Dir.deleteFile(.cwd(), io, path) catch {};
     const alloc = std.testing.allocator;
 
-    const db = try Db.init(try DiskPager.create(alloc, io, path), alloc);
+    const db = try Db.init(try DiskPager.create(alloc, io, path, .{}), alloc);
     defer db.close();
 
     try db.createTable("t", &.{
@@ -174,7 +174,7 @@ test "UPDATE with no matching rows returns affected=0" {
     defer Dir.deleteFile(.cwd(), io, path) catch {};
     const alloc = std.testing.allocator;
 
-    const db = try Db.init(try DiskPager.create(alloc, io, path), alloc);
+    const db = try Db.init(try DiskPager.create(alloc, io, path, .{}), alloc);
     defer db.close();
 
     try db.createTable("t", &.{.{ .name = "x", .col_type = .int, .nullable = false }});
@@ -190,7 +190,7 @@ test "SELECT * FROM __pages returns at least the header page" {
     defer Dir.deleteFile(.cwd(), io, path) catch {};
     const alloc = std.testing.allocator;
 
-    const db = try Db.init(try DiskPager.create(alloc, io, path), alloc);
+    const db = try Db.init(try DiskPager.create(alloc, io, path, .{}), alloc);
     defer db.close();
 
     var result = try execute(db, "SELECT * FROM __pages", alloc);
@@ -207,7 +207,7 @@ test "SELECT * FROM __pages after creating table has more pages" {
     defer Dir.deleteFile(.cwd(), io, path) catch {};
     const alloc = std.testing.allocator;
 
-    const db = try Db.init(try DiskPager.create(alloc, io, path), alloc);
+    const db = try Db.init(try DiskPager.create(alloc, io, path, .{}), alloc);
     defer db.close();
 
     _ = try execute(db, "CREATE TABLE t (n INT NOT NULL)", alloc);
@@ -224,7 +224,7 @@ test "SELECT * FROM __page_slots(1) shows btree_leaf cells" {
     defer Dir.deleteFile(.cwd(), io, path) catch {};
     const alloc = std.testing.allocator;
 
-    const db = try Db.init(try DiskPager.create(alloc, io, path), alloc);
+    const db = try Db.init(try DiskPager.create(alloc, io, path, .{}), alloc);
     defer db.close();
 
     _ = try execute(db, "CREATE TABLE t (n INT NOT NULL)", alloc);
@@ -257,7 +257,7 @@ test "DELETE with no matching rows returns affected=0" {
     defer Dir.deleteFile(.cwd(), io, path) catch {};
     const alloc = std.testing.allocator;
 
-    const db = try Db.init(try DiskPager.create(alloc, io, path), alloc);
+    const db = try Db.init(try DiskPager.create(alloc, io, path, .{}), alloc);
     defer db.close();
 
     try db.createTable("t", &.{.{ .name = "x", .col_type = .int, .nullable = false }});

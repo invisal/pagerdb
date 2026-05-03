@@ -13,7 +13,7 @@ test "create db, insert rows, scan back" {
     const alloc = std.testing.allocator;
 
     {
-        const db = try Db.init(try DiskPager.create(alloc, io, path), alloc);
+        const db = try Db.init(try DiskPager.create(alloc, io, path, .{}), alloc);
 
         try db.createTable("users", &.{
             .{ .name = "name", .col_type = .text, .nullable = false },
@@ -32,7 +32,7 @@ test "create db, insert rows, scan back" {
         db.close();
     }
 
-    const db2 = try Db.load(try DiskPager.open(alloc, io, path), alloc);
+    const db2 = try Db.load(try DiskPager.open(alloc, io, path, .{}), alloc);
     defer db2.close();
 
     var count: usize = 0;
@@ -56,14 +56,14 @@ test "insert with omitted column uses default value" {
     defer Dir.deleteFile(.cwd(), io, path) catch {};
 
     {
-        const db1 = try Db.init(try DiskPager.create(alloc, io, path), alloc);
+        const db1 = try Db.init(try DiskPager.create(alloc, io, path, .{}), alloc);
         defer db1.close();
 
         var r1 = try exec(db1, "CREATE TABLE users(name TEXT, age INT DEFAULT 18);", alloc);
         defer r1.deinit();
     }
 
-    const db = try Db.load(try DiskPager.open(alloc, io, path), alloc);
+    const db = try Db.load(try DiskPager.open(alloc, io, path, .{}), alloc);
     defer db.close();
 
     var r2 = try exec(db, "INSERT INTO users(name) VALUES('alice');", alloc);
@@ -89,14 +89,14 @@ test "insert with DEFAULT keyword uses default value" {
     defer Dir.deleteFile(.cwd(), io, path) catch {};
 
     {
-        const db1 = try Db.init(try DiskPager.create(alloc, io, path), alloc);
+        const db1 = try Db.init(try DiskPager.create(alloc, io, path, .{}), alloc);
         defer db1.close();
 
         var r1 = try exec(db1, "CREATE TABLE users(name TEXT, age INT DEFAULT 18);", alloc);
         defer r1.deinit();
     }
 
-    const db = try Db.load(try DiskPager.open(alloc, io, path), alloc);
+    const db = try Db.load(try DiskPager.open(alloc, io, path, .{}), alloc);
     defer db.close();
 
     var r2 = try exec(db, "INSERT INTO users(name, age) VALUES('alice', DEFAULT);", alloc);
@@ -121,7 +121,7 @@ test "rowid_counter increments across reopens" {
     const alloc = std.testing.allocator;
 
     const r1 = blk: {
-        const db = try Db.init(try DiskPager.create(alloc, io, path), alloc);
+        const db = try Db.init(try DiskPager.create(alloc, io, path, .{}), alloc);
         try db.createTable("t", &.{
             .{ .name = "v", .col_type = .int, .nullable = false },
         });
@@ -130,7 +130,7 @@ test "rowid_counter increments across reopens" {
         break :blk r;
     };
 
-    const db2 = try Db.load(try DiskPager.open(alloc, io, path), alloc);
+    const db2 = try Db.load(try DiskPager.open(alloc, io, path, .{}), alloc);
     defer db2.close();
     const r2 = try db2.insert("t", &.{.{ .int = 2 }});
 
@@ -143,7 +143,7 @@ test "insert and scan verify row contents" {
     defer Dir.deleteFile(.cwd(), io, path) catch {};
     const alloc = std.testing.allocator;
 
-    const db = try Db.init(try DiskPager.create(alloc, io, path), alloc);
+    const db = try Db.init(try DiskPager.create(alloc, io, path, .{}), alloc);
     defer db.close();
 
     try db.createTable("things", &.{
@@ -175,7 +175,7 @@ test "TableNotFound returned for missing table" {
     defer Dir.deleteFile(.cwd(), io, path) catch {};
     const alloc = std.testing.allocator;
 
-    const db = try Db.init(try DiskPager.create(alloc, io, path), alloc);
+    const db = try Db.init(try DiskPager.create(alloc, io, path, .{}), alloc);
     defer db.close();
 
     try std.testing.expectError(error.TableNotFound, db.insert("nonexistent", &.{}));
@@ -187,7 +187,7 @@ test "delete removes row and scan skips it" {
     defer Dir.deleteFile(.cwd(), io, path) catch {};
     const alloc = std.testing.allocator;
 
-    const db = try Db.init(try DiskPager.create(alloc, io, path), alloc);
+    const db = try Db.init(try DiskPager.create(alloc, io, path, .{}), alloc);
     defer db.close();
 
     try db.createTable("t", &.{.{ .name = "v", .col_type = .int, .nullable = false }});
@@ -219,7 +219,7 @@ test "delete non-existent rowid returns false" {
     defer Dir.deleteFile(.cwd(), io, path) catch {};
     const alloc = std.testing.allocator;
 
-    const db = try Db.init(try DiskPager.create(alloc, io, path), alloc);
+    const db = try Db.init(try DiskPager.create(alloc, io, path, .{}), alloc);
     defer db.close();
 
     try db.createTable("t", &.{.{ .name = "v", .col_type = .int, .nullable = false }});
@@ -233,7 +233,7 @@ test "update changes row value" {
     defer Dir.deleteFile(.cwd(), io, path) catch {};
     const alloc = std.testing.allocator;
 
-    const db = try Db.init(try DiskPager.create(alloc, io, path), alloc);
+    const db = try Db.init(try DiskPager.create(alloc, io, path, .{}), alloc);
     defer db.close();
 
     try db.createTable("t", &.{.{ .name = "v", .col_type = .int, .nullable = false }});
@@ -253,7 +253,7 @@ test "update inline to overflow builds new chain" {
     defer Dir.deleteFile(.cwd(), io, path) catch {};
     const alloc = std.testing.allocator;
 
-    const db = try Db.init(try DiskPager.create(alloc, io, path), alloc);
+    const db = try Db.init(try DiskPager.create(alloc, io, path, .{}), alloc);
     defer db.close();
 
     try db.createTable("t", &.{.{ .name = "v", .col_type = .blob, .nullable = false }});
@@ -282,7 +282,7 @@ test "update overflow to inline frees old chain" {
     defer Dir.deleteFile(.cwd(), io, path) catch {};
     const alloc = std.testing.allocator;
 
-    const db = try Db.init(try DiskPager.create(alloc, io, path), alloc);
+    const db = try Db.init(try DiskPager.create(alloc, io, path, .{}), alloc);
     defer db.close();
 
     try db.createTable("t", &.{.{ .name = "v", .col_type = .blob, .nullable = false }});
@@ -315,7 +315,7 @@ test "begin + commit persists rows" {
     defer Dir.deleteFile(.cwd(), io, path) catch {};
     const alloc = std.testing.allocator;
 
-    const db = try Db.init(try DiskPager.create(alloc, io, path), alloc);
+    const db = try Db.init(try DiskPager.create(alloc, io, path, .{}), alloc);
     defer db.close();
 
     try db.createTable("t", &.{.{ .name = "v", .col_type = .int, .nullable = false }});
@@ -342,7 +342,7 @@ test "begin + rollback erases inserted rows" {
     defer Dir.deleteFile(.cwd(), io, path) catch {};
     const alloc = std.testing.allocator;
 
-    const db = try Db.init(try DiskPager.create(alloc, io, path), alloc);
+    const db = try Db.init(try DiskPager.create(alloc, io, path, .{}), alloc);
     defer db.close();
 
     try db.createTable("t", &.{.{ .name = "v", .col_type = .int, .nullable = false }});
@@ -368,7 +368,7 @@ test "rollback of DELETE restores the row" {
     defer Dir.deleteFile(.cwd(), io, path) catch {};
     const alloc = std.testing.allocator;
 
-    const db = try Db.init(try DiskPager.create(alloc, io, path), alloc);
+    const db = try Db.init(try DiskPager.create(alloc, io, path, .{}), alloc);
     defer db.close();
 
     try db.createTable("t", &.{.{ .name = "v", .col_type = .int, .nullable = false }});
@@ -390,7 +390,7 @@ test "rollback of UPDATE restores original value" {
     defer Dir.deleteFile(.cwd(), io, path) catch {};
     const alloc = std.testing.allocator;
 
-    const db = try Db.init(try DiskPager.create(alloc, io, path), alloc);
+    const db = try Db.init(try DiskPager.create(alloc, io, path, .{}), alloc);
     defer db.close();
 
     try db.createTable("t", &.{.{ .name = "v", .col_type = .int, .nullable = false }});
@@ -412,7 +412,7 @@ test "auto-commit works without explicit BEGIN" {
     defer Dir.deleteFile(.cwd(), io, path) catch {};
     const alloc = std.testing.allocator;
 
-    const db = try Db.init(try DiskPager.create(alloc, io, path), alloc);
+    const db = try Db.init(try DiskPager.create(alloc, io, path, .{}), alloc);
     defer db.close();
 
     try db.createTable("t", &.{.{ .name = "v", .col_type = .int, .nullable = false }});
@@ -430,7 +430,7 @@ test "double BEGIN returns error" {
     defer Dir.deleteFile(.cwd(), io, path) catch {};
     const alloc = std.testing.allocator;
 
-    const db = try Db.init(try DiskPager.create(alloc, io, path), alloc);
+    const db = try Db.init(try DiskPager.create(alloc, io, path, .{}), alloc);
     defer db.close();
 
     try db.begin();
@@ -444,7 +444,7 @@ test "COMMIT with no active transaction returns error" {
     defer Dir.deleteFile(.cwd(), io, path) catch {};
     const alloc = std.testing.allocator;
 
-    const db = try Db.init(try DiskPager.create(alloc, io, path), alloc);
+    const db = try Db.init(try DiskPager.create(alloc, io, path, .{}), alloc);
     defer db.close();
 
     try std.testing.expectError(error.NoActiveTransaction, db.commit());
@@ -458,7 +458,7 @@ test "SQL BEGIN / COMMIT round-trip" {
 
     const execute = @import("../sql/executor.zig").execute;
 
-    const db = try Db.init(try DiskPager.create(alloc, io, path), alloc);
+    const db = try Db.init(try DiskPager.create(alloc, io, path, .{}), alloc);
     defer db.close();
 
     var r = try execute(db, "CREATE TABLE t (v INT)", alloc);
@@ -485,7 +485,7 @@ test "SQL BEGIN / ROLLBACK discards rows" {
 
     const execute = @import("../sql/executor.zig").execute;
 
-    const db = try Db.init(try DiskPager.create(alloc, io, path), alloc);
+    const db = try Db.init(try DiskPager.create(alloc, io, path, .{}), alloc);
     defer db.close();
 
     var r = try execute(db, "CREATE TABLE t (v INT)", alloc);
@@ -511,7 +511,7 @@ test "exec with schema-qualified table name" {
     const execute = @import("../sql/executor.zig").execute;
     const PlanError = @import("../sql/logical_plan.zig").PlanError;
 
-    const db = try Db.init(try DiskPager.create(alloc, io, path), alloc);
+    const db = try Db.init(try DiskPager.create(alloc, io, path, .{}), alloc);
     defer db.close();
 
     // Create table and insert data

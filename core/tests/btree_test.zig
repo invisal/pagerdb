@@ -11,7 +11,7 @@ test "scan returns rows in rowid order" {
     const path = "/tmp/test_btree_scan_order.db";
     defer Dir.deleteFile(.cwd(), io, path) catch {};
 
-    var pager = try DiskPager.create(alloc, io, path);
+    var pager = try DiskPager.create(alloc, io, path, .{});
     defer pager.close();
 
     const root_id = try pager.allocPage();
@@ -40,7 +40,7 @@ test "delete existing row" {
     const path = "/tmp/test_btree_delete_row.db";
     defer Dir.deleteFile(.cwd(), io, path) catch {};
 
-    var pager = try DiskPager.create(alloc, io, path);
+    var pager = try DiskPager.create(alloc, io, path, .{});
     defer pager.close();
 
     const root_id = try pager.allocPage();
@@ -70,7 +70,7 @@ test "delete non-existent row returns false" {
     const path = "/tmp/test_btree_delete_nonexist.db";
     defer Dir.deleteFile(.cwd(), io, path) catch {};
 
-    var pager = try DiskPager.create(alloc, io, path);
+    var pager = try DiskPager.create(alloc, io, path, .{});
     defer pager.close();
 
     const root_id = try pager.allocPage();
@@ -90,7 +90,7 @@ test "delete all rows in a page frees the page" {
     const path = "/tmp/test_btree_delete_freepage.db";
     defer Dir.deleteFile(.cwd(), io, path) catch {};
 
-    var pager = try DiskPager.create(alloc, io, path);
+    var pager = try DiskPager.create(alloc, io, path, .{});
     defer pager.close();
 
     const root_id = try pager.allocPage();
@@ -124,7 +124,7 @@ test "insert and lookup large row via btree" {
     const path = "/tmp/test_btree_overflow.db";
     defer Dir.deleteFile(.cwd(), io, path) catch {};
 
-    var pager = try DiskPager.create(alloc, io, path);
+    var pager = try DiskPager.create(alloc, io, path, .{});
     defer pager.close();
 
     const root_id = try pager.allocPage();
@@ -150,7 +150,7 @@ test "delete overflowed row frees overflow chain" {
     const path = "/tmp/test_btree_overflow_delete.db";
     defer Dir.deleteFile(.cwd(), io, path) catch {};
 
-    var pager = try DiskPager.create(alloc, io, path);
+    var pager = try DiskPager.create(alloc, io, path, .{});
     defer pager.close();
 
     const root_id = try pager.allocPage();
