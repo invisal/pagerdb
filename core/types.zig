@@ -32,7 +32,7 @@ pub const ColType = enum(u8) {
     blob = 3,
 };
 
-pub const DB_MAGIC: u32 = 0x56534442; // "VSDB"
+pub const DB_MAGIC: u32 = 0x50474442; // "PGDB"
 
 // 4+2+2+4+4+4+4+4+36 = 64 bytes
 pub const DbHeader = extern struct {

@@ -1,4 +1,4 @@
-// Deterministic Simulation Test for VisalDB.
+// Deterministic Simulation Test for PagerDB.
 //
 // Runs seeded random workloads (INSERT / UPDATE / DELETE) and checks
 // structural invariants after every operation:

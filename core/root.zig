@@ -1,4 +1,4 @@
-// Public API surface for the visaldb library.
+// Public API surface for the pagerdb library.
 pub const Database = @import("db.zig").Db;
 pub const Pager = @import("pager/pager.zig").Pager;
 pub const DiskPager = @import("pager/disk.zig").DiskPager;

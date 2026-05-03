@@ -4,7 +4,7 @@ const Db = lib.Database;
 const execute = lib.execute;
 const Console = @import("console.zig").Console;
 
-const PROMPT = "visaldb> ";
+const PROMPT = "pagerdb> ";
 const CONT_PROMPT = "   ...> ";
 
 pub fn run(db: *Db, io: std.Io, alloc: std.mem.Allocator) !void {

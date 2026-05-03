@@ -4,7 +4,7 @@ const ResultSet = @import("sql/executor.zig").ResultSet;
 const Row = @import("sql/executor.zig").Row;
 const row_mod = @import("row.zig");
 
-// Debug printing utilities for VisalDB.
+// Debug printing utilities for PagerDB.
 // These are convenience functions for printing query results during development.
 // They format output as ASCII tables similar to the CLI REPL.
 //

@@ -1,6 +1,6 @@
-# VisalDB Architecture
+# PagerDB Architecture
 
-VisalDB is an embedded relational database written in Zig. It follows a classic layered architecture: raw page I/O → B-tree storage → catalog → SQL pipeline. The design is intentionally similar to SQLite — single-file, rowid-based B-trees, page-level caching — but built from scratch for learning and extension.
+PagerDB is an embedded relational database written in Zig. It follows a classic layered architecture: raw page I/O → B-tree storage → catalog → SQL pipeline. The design is intentionally similar to SQLite — single-file, rowid-based B-trees, page-level caching — but built from scratch for learning and extension.
 
 ---
 
@@ -15,6 +15,7 @@ VisalDB is an embedded relational database written in Zig. It follows a classic 
 │       → Physical Plan → Executor        │  sql/
 ├─────────────────────────────────────────┤
 │          Database API  (db.zig)         │  insert/delete/update/scan
+│       Transaction / Undo Log (txn.zig)  │  BEGIN/COMMIT/ROLLBACK
 ├─────────────────────────────────────────┤
 │       Catalog  (catalog.zig)            │  __tables, __columns B-trees
 ├─────────────────────────────────────────┤
@@ -59,7 +60,7 @@ Page 0 is never used for data. It stores a 64-byte header:
 ```
 Offset  Size  Field
 ──────  ────  ─────────────────────────────────────────
-0       4     magic = 0x56534442 ("VSDB")
+0       4     magic = 0x50474442 ("PGDB")
 4       2     version_major
 6       2     version_minor
 8       4     page_size (= 8192)
@@ -215,13 +216,56 @@ The catalog is loaded entirely into an in-memory hash map (`table_name → Table
 |---|---|
 | `Db.create(io, path, alloc)` | Creates file, bootstraps catalog |
 | `Db.open(io, path, alloc)` | Opens file, loads catalog into memory |
-| `Db.close()` | Flushes, syncs, frees memory |
+| `Db.close()` | Rolls back any open transaction, flushes, syncs, frees memory |
 | `createTable(name, columns)` | Allocates B-tree root, writes catalog rows |
 | `insert(table, values)` | Encodes row, inserts into B-tree, increments rowid counter |
 | `delete(table, rowid)` | Frees overflow chain if any, removes from B-tree |
 | `update(table, rowid, values)` | Delete + re-insert with same rowid |
 | `getByRowid(table, rowid, alloc)` | Point lookup in B-tree |
 | `scan(table, callback, ctx)` | Full scan via leaf chain; stops when callback returns false |
+| `begin()` | Opens an explicit transaction; defers `flush()` until commit |
+| `commit()` | Flushes dirty pages to disk and discards the undo log |
+| `rollback()` | Replays the undo log in reverse to restore prior state, then flushes |
+
+When no explicit transaction is open (`txn == null`), every DML call flushes the pager immediately — this is *auto-commit* mode and preserves the original behaviour.
+
+---
+
+## Transaction System (`core/txn.zig`)
+
+PagerDB uses a **logical undo log** to provide atomicity. Before each mutation, the inverse operation is recorded in memory. If the transaction is rolled back, the log is replayed in reverse to restore the previous state.
+
+### Undo Log Entries
+
+```
+UndoEntry (union):
+  insert  → { table, rowid }               undo = delete that rowid
+  delete  → { table, rowid, row_bytes }     undo = re-insert original bytes
+  update  → { table, rowid, old_row_bytes } undo = delete + re-insert old bytes
+```
+
+All strings and byte slices captured for undo live in a per-transaction `ArenaAllocator`. On commit or rollback the entire arena is freed in one call — no per-entry cleanup.
+
+### Transaction Lifecycle
+
+```
+begin()   — error if already active; initialise Transaction{arena, log}
+  │
+  ├─ insert() → btree.insert; log UndoEntry.insert
+  ├─ delete() → lookup old bytes; btree.delete; log UndoEntry.delete
+  └─ update() → lookup old bytes; btree.delete + btree.insert; log UndoEntry.update
+  │
+  ├─ commit()   — pager.flush(); arena.deinit(); txn = null
+  └─ rollback() — iterate log in reverse; apply inverse btree ops;
+                  pager.flush(); arena.deinit(); txn = null
+```
+
+### Design Choices
+
+- **Logical undo, not physical**: entries record row-level inverses (re-insert old bytes) rather than byte-level page diffs. This keeps the log small and implementation simple, at the cost of requiring the B-tree to be in a consistent state during replay.
+- **In-memory only**: the undo log is not written to disk. A crash during an uncommitted transaction leaves the database in an inconsistent state — pages flushed mid-transaction may not be rolled back on next open. Durability requires WAL (redo log), which is the planned next step.
+- **rowid counter is not rolled back**: after a rolled-back INSERT the rowid counter stays advanced. Gaps in rowid sequences are acceptable.
+- **Auto-commit**: when `txn == null`, each DML op calls `pager.flush()` immediately, preserving the original one-op-per-fsync behaviour.
 
 ---
 
@@ -243,6 +287,9 @@ INSERT INTO t VALUES (v1, v2, ...)
 SELECT [* | col, ...] FROM t [WHERE expr]
 UPDATE t SET col = expr [WHERE expr]
 DELETE FROM t [WHERE expr]
+BEGIN
+COMMIT
+ROLLBACK
 ```
 
 Expression grammar supports: integer/float/string literals, column references (including `_rowid_`), binary operators (`=`, `!=`, `<`, `<=`, `>`, `>=`, `AND`, `OR`, `+`, `-`, `*`, `/`), and unary `NOT`.
@@ -342,6 +389,7 @@ To add a new virtual table: implement a `scan` function, add a `VTab` descriptor
 |---|---|
 | Pager buffer pool | Fixed 64-frame array, stack allocated inside `Pager` |
 | Catalog strings | Heap-allocated via `allocator.dupe()`, freed on `close()` |
+| Transaction undo log | `ArenaAllocator` per transaction; freed atomically on commit or rollback |
 | Parse / plan pass | `ArenaAllocator`, freed immediately after query execution |
 | Result set | `ArenaAllocator` inside `ResultSet`, freed by `deinit()` |
 
@@ -365,9 +413,11 @@ All on-disk structures use `extern struct` for a fixed, predictable layout.
 
 ## Known Limitations
 
-1. **No transactions / WAL** — each DML operation is flushed to disk immediately; there is no crash recovery and no atomicity across multiple statements.
-2. **No root internal-node split** — B-trees cannot grow past a single level of internal nodes (`NotImplementedYet` error).
-3. **No secondary indexes** — all searches are by rowid; range and equality scans on non-rowid columns require a full table scan.
-4. **No aggregates** — `COUNT`, `SUM`, `AVG`, etc. are not implemented.
-5. **No `ORDER BY`, `GROUP BY`, or `JOIN`** — single-table queries only.
-6. **No function calls in SQL** — only `_rowid_` pseudo-column is special-cased.
+1. **No WAL / crash recovery** — the undo log is in-memory only. A crash mid-transaction can leave dirty pages on disk with no way to roll them back on reopen. Durability requires a redo log (WAL), which is the planned next step.
+2. **No nested transactions** — `BEGIN` inside an active transaction returns `error.TransactionAlreadyActive`. Savepoints are not supported.
+3. **DDL is not transactional** — `CREATE TABLE` calls `pager.flush()` immediately regardless of whether a transaction is open.
+4. **No root internal-node split** — B-trees cannot grow past a single level of internal nodes (`NotImplementedYet` error).
+5. **No secondary indexes** — all searches are by rowid; range and equality scans on non-rowid columns require a full table scan.
+6. **No aggregates** — `COUNT`, `SUM`, `AVG`, etc. are not implemented.
+7. **No `ORDER BY`, `GROUP BY`, or `JOIN`** — single-table queries only.
+8. **No function calls in SQL** — only `_rowid_` pseudo-column is special-cased.

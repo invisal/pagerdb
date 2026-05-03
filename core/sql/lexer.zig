@@ -26,6 +26,9 @@ pub const TokenKind = enum {
     kw_blob,
     kw_primary,
     kw_key,
+    kw_begin,
+    kw_commit,
+    kw_rollback,
     // Literals
     lit_int, // int_val is valid
     lit_float, // float_val is valid
@@ -97,6 +100,9 @@ const keyword_pairs = [_]struct { text: []const u8, kind: TokenKind }{
     .{ .text = "primary", .kind = .kw_primary },
     .{ .text = "key", .kind = .kw_key },
     .{ .text = "default", .kind = .kw_default },
+    .{ .text = "begin", .kind = .kw_begin },
+    .{ .text = "commit", .kind = .kw_commit },
+    .{ .text = "rollback", .kind = .kw_rollback },
 };
 
 fn lookupKeyword(word: []const u8) ?TokenKind {
