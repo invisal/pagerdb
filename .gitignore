@@ -3,3 +3,5 @@ zig-out/
 mydb.db
 .claude/
 bench/data/*.db
+
+scratch/
