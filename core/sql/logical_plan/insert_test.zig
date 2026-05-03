@@ -49,7 +49,7 @@ test "plan INSERT with specified columns" {
     try std.testing.expectEqual(@as(i64, 100), ins.values[1].int_lit);
 }
 
-test "plan INSERT wrong column count returns ColumnNotFound" {
+test "plan INSERT wrong column count returns NoDefaultValue" {
     const alloc = std.testing.allocator;
 
     // Both columns are NOT NULL, so missing values should cause an error
@@ -64,7 +64,7 @@ test "plan INSERT wrong column count returns ColumnNotFound" {
     var parsed = try Parser.parse("INSERT INTO t VALUES (1)", alloc);
     defer parsed.deinit();
 
-    try std.testing.expectError(PlanError.ColumnNotFound, planner.plan(parsed.stmt));
+    try std.testing.expectError(PlanError.NoDefaultValue, planner.plan(parsed.stmt));
 }
 
 test "plan INSERT specified columns count mismatch values count returns ColumnCountMismatch" {
@@ -88,7 +88,7 @@ test "plan INSERT specified columns count mismatch values count returns ColumnCo
 test "plan INSERT specified columns with DEFAULT on column with no default" {
     const alloc = std.testing.allocator;
     var cat_handle = try makeCatalog(alloc, &.{
-        "CREATE TABLE t(x INT, y INT)",
+        "CREATE TABLE t(x INT, y INT NOT NULL)",
     });
     defer cat_handle.deinit();
 
@@ -97,8 +97,30 @@ test "plan INSERT specified columns with DEFAULT on column with no default" {
 
     var parsed = try Parser.parse("INSERT INTO t(x, y) VALUES(1, DEFAULT);", alloc);
     defer parsed.deinit();
-
     try std.testing.expectError(PlanError.NoDefaultValue, planner.plan(parsed.stmt));
+
+    var parsed2 = try Parser.parse("INSERT INTO t VALUES(DEFAULT, DEFAULT);", alloc);
+    defer parsed2.deinit();
+    try std.testing.expectError(PlanError.NoDefaultValue, planner.plan(parsed2.stmt));
+}
+
+test "plan INSERT with DEFAULT keyword should use default value" {
+    const alloc = std.testing.allocator;
+    var cat_handle = try makeCatalog(alloc, &.{
+        "CREATE TABLE t(x INT, y INT DEFAULT 10)",
+    });
+    defer cat_handle.deinit();
+
+    var planner = LogicalPlanner.init(&cat_handle.cat, alloc);
+    defer planner.deinit();
+
+    var p = try Parser.parse("INSERT INTO t(x, y) VALUES(1, DEFAULT);", alloc);
+    defer p.deinit();
+    try std.testing.expectEqual(10, (try planner.plan(p.stmt)).insert.values[1].int_lit);
+
+    var p2 = try Parser.parse("INSERT INTO t VALUES(DEFAULT, DEFAULT);", alloc);
+    defer p2.deinit();
+    try std.testing.expectEqual(10, (try planner.plan(p2.stmt)).insert.values[1].int_lit);
 }
 
 test "plan INSERT with partial columns fills missing with NULL" {

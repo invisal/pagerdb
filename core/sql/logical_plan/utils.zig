@@ -37,7 +37,7 @@ pub fn makeDb(
 /// Each SQL statement should be a CREATE TABLE statement.
 ///
 /// Example:
-///   const cat = try makeCatalog(alloc, &.{
+///   var cat = try makeCatalog(alloc, &.{
 ///       "CREATE TABLE t (name TEXT, score INT)",
 ///       "CREATE TABLE users (id INT, email TEXT)",
 ///   });
