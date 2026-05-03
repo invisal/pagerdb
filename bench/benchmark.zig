@@ -64,7 +64,7 @@ fn benchPagerdbInsert(n: usize, io: std.Io, alloc: std.mem.Allocator) !InsertRes
 
     var ns: u64 = 0;
     {
-        const db = try Db.init(try DiskPager.create(alloc, io, path), alloc);
+        const db = try Db.init(try DiskPager.create(alloc, io, path, .{}), alloc);
         defer db.close();
         try db.createTable("bench", &SCHEMA);
 
@@ -90,7 +90,7 @@ fn benchPagerdbInsertTxn(n: usize, io: std.Io, alloc: std.mem.Allocator) !Insert
 
     var ns: u64 = 0;
     {
-        const db = try Db.init(try DiskPager.create(alloc, io, path), alloc);
+        const db = try Db.init(try DiskPager.create(alloc, io, path, .{}), alloc);
         defer db.close();
         try db.createTable("bench", &SCHEMA);
 
@@ -116,7 +116,7 @@ fn benchPagerdbScan(n: usize, io: std.Io, alloc: std.mem.Allocator) !u64 {
     const path = "bench/data/bench_pagerdb_scan.db";
     defer Dir.deleteFile(.cwd(), io, path) catch {};
 
-    const db = try Db.init(try DiskPager.create(alloc, io, path), alloc);
+    const db = try Db.init(try DiskPager.create(alloc, io, path, .{}), alloc);
     defer db.close();
     try db.createTable("bench", &SCHEMA);
 
@@ -148,7 +148,7 @@ fn benchPagerdbWhere(n: usize, io: std.Io, alloc: std.mem.Allocator) !u64 {
     const path = "bench/data/bench_pagerdb_where.db";
     defer Dir.deleteFile(.cwd(), io, path) catch {};
 
-    const db = try Db.init(try DiskPager.create(alloc, io, path), alloc);
+    const db = try Db.init(try DiskPager.create(alloc, io, path, .{}), alloc);
     defer db.close();
     try db.createTable("bench", &SCHEMA);
 

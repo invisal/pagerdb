@@ -76,7 +76,7 @@ fn runSeed(io: std.Io, alloc: std.mem.Allocator, seed: u64, n_ops: u64) !void {
     const path = try std.fmt.bufPrint(&path_buf, "/tmp/dst_{d}.db", .{seed});
     defer Dir.deleteFile(.cwd(), io, path) catch {};
 
-    const db = try Database.init(try DiskPager.create(alloc, io, path), alloc);
+    const db = try Database.init(try DiskPager.create(alloc, io, path, .{}), alloc);
     defer db.close();
 
     try workload.setupTable(db);

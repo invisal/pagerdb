@@ -12,14 +12,14 @@ test "fresh database has no pages beyond header" {
     defer Dir.deleteFile(.cwd(), io, path) catch {};
     const alloc = std.testing.allocator;
 
-    var pager = try DiskPager.create(alloc, io, path);
+    var pager = try DiskPager.create(alloc, io, path, .{});
     var cat = Catalog.init(alloc, &pager);
     try cat.bootstrap();
     try pager.flush();
     pager.close();
     cat.deinit();
 
-    var pager2 = try DiskPager.open(alloc, io, path);
+    var pager2 = try DiskPager.open(alloc, io, path, .{});
     defer pager2.close();
     try std.testing.expectEqual(pager2.total_pages, 1);
     try std.testing.expectEqual(pager2.sys_tables_root, 0);
@@ -36,7 +36,7 @@ test "createTable allocates catalog roots lazily" {
     var columns_root: u32 = 0;
 
     {
-        var pager = try DiskPager.create(alloc, io, path);
+        var pager = try DiskPager.create(alloc, io, path, .{});
         var cat = Catalog.init(alloc, &pager);
         try cat.bootstrap();
 
@@ -54,7 +54,7 @@ test "createTable allocates catalog roots lazily" {
         cat.deinit();
     }
     {
-        var pager = try DiskPager.open(alloc, io, path);
+        var pager = try DiskPager.open(alloc, io, path, .{});
         var cat = Catalog.init(alloc, &pager);
         try cat.load();
         defer {
@@ -80,7 +80,7 @@ test "createTable persists across reopen" {
     };
 
     {
-        var pager = try DiskPager.create(alloc, io, path);
+        var pager = try DiskPager.create(alloc, io, path, .{});
         var cat = Catalog.init(alloc, &pager);
         try cat.bootstrap();
         _ = try cat.createTable("users", &cols);
@@ -89,7 +89,7 @@ test "createTable persists across reopen" {
         cat.deinit();
     }
     {
-        var pager = try DiskPager.open(alloc, io, path);
+        var pager = try DiskPager.open(alloc, io, path, .{});
         var cat = Catalog.init(alloc, &pager);
         try cat.load();
         defer {
@@ -114,7 +114,7 @@ test "next_table_id increments correctly across multiple tables" {
     const col = [_]ColumnMeta{.{ .name = "x", .col_type = .int, .nullable = false, .default_src = null, .default_expr = null }};
 
     {
-        var pager = try DiskPager.create(alloc, io, path);
+        var pager = try DiskPager.create(alloc, io, path, .{});
         var cat = Catalog.init(alloc, &pager);
         try cat.bootstrap();
         const a = try cat.createTable("a", &col);
@@ -126,7 +126,7 @@ test "next_table_id increments correctly across multiple tables" {
         cat.deinit();
     }
     {
-        var pager = try DiskPager.open(alloc, io, path);
+        var pager = try DiskPager.open(alloc, io, path, .{});
         var cat = Catalog.init(alloc, &pager);
         try cat.load();
         defer {
@@ -146,7 +146,7 @@ test "duplicate table name returns error" {
     defer Dir.deleteFile(.cwd(), io, path) catch {};
     const alloc = std.testing.allocator;
 
-    var pager = try DiskPager.create(alloc, io, path);
+    var pager = try DiskPager.create(alloc, io, path, .{});
     var cat = Catalog.init(alloc, &pager);
     defer {
         pager.close();

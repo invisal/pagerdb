@@ -43,12 +43,12 @@ test "create and reopen preserves header" {
     defer Dir.deleteFile(.cwd(), io, path) catch {};
 
     {
-        var pager = try DiskPager.create(alloc, io, path);
+        var pager = try DiskPager.create(alloc, io, path, .{});
         defer pager.close();
         try pager.flush();
     }
     {
-        var pager = try DiskPager.open(alloc, io, path);
+        var pager = try DiskPager.open(alloc, io, path, .{});
         defer pager.close();
         const h = try readHeader(&pager);
         try validateHeader(h);
@@ -65,7 +65,7 @@ test "catalog roots round-trip through header" {
     defer Dir.deleteFile(.cwd(), io, path) catch {};
 
     {
-        var pager = try DiskPager.create(alloc, io, path);
+        var pager = try DiskPager.create(alloc, io, path, .{});
         defer pager.close();
         pager.sys_tables_root = 1;
         pager.sys_columns_root = 2;
@@ -73,7 +73,7 @@ test "catalog roots round-trip through header" {
         try pager.flush();
     }
     {
-        var pager = try DiskPager.open(alloc, io, path);
+        var pager = try DiskPager.open(alloc, io, path, .{});
         defer pager.close();
         try std.testing.expectEqual(pager.sys_tables_root, 1);
         try std.testing.expectEqual(pager.sys_columns_root, 2);

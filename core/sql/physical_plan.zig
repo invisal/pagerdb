@@ -217,7 +217,7 @@ fn makeDb(
 ) !DbHandle {
     const pager = try alloc.create(Pager);
     errdefer alloc.destroy(pager);
-    pager.* = try DiskPager.create(alloc, io, path);
+    pager.* = try DiskPager.create(alloc, io, path, .{});
     var cat = catalog.Catalog.init(alloc, pager);
     try cat.bootstrap();
     return .{ .pager = pager, .cat = cat, .alloc = alloc };

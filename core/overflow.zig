@@ -86,7 +86,7 @@ test "overflow round-trip for large row" {
     const path = "/tmp/test_overflow_roundtrip.db";
     defer std.Io.Dir.deleteFile(.cwd(), io, path) catch {};
 
-    var pager = try DiskPager.create(std.testing.allocator, io, path);
+    var pager = try DiskPager.create(std.testing.allocator, io, path, .{});
     defer pager.close();
 
     const big_row = try std.testing.allocator.alloc(u8, 5000);
@@ -107,7 +107,7 @@ test "freeChain returns pages to free list" {
     const path = "/tmp/test_overflow_free.db";
     defer std.Io.Dir.deleteFile(.cwd(), io, path) catch {};
 
-    var pager = try DiskPager.create(std.testing.allocator, io, path);
+    var pager = try DiskPager.create(std.testing.allocator, io, path, .{});
     defer pager.close();
 
     const big_row = [_]u8{0xAB} ** 5000;
@@ -127,7 +127,7 @@ test "multi-page chain round-trip" {
     const path = "/tmp/test_overflow_multipage.db";
     defer std.Io.Dir.deleteFile(.cwd(), io, path) catch {};
 
-    var pager = try DiskPager.create(std.testing.allocator, io, path);
+    var pager = try DiskPager.create(std.testing.allocator, io, path, .{});
     defer pager.close();
 
     // 3 × DATA_CAP forces at least 3 overflow pages
