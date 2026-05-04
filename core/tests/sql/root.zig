@@ -6,4 +6,5 @@ test {
     _ = @import("default_test.zig");
     _ = @import("transaction_test.zig");
     _ = @import("vtable_test.zig");
+    _ = @import("join_test.zig");
 }

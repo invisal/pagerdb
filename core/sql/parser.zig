@@ -139,7 +139,15 @@ pub const Parser = struct {
             while (true) {
                 const tok = try self.expect(.identifier);
                 const name = try self.alloc().dupe(u8, self.tokenText(tok));
-                try columns.append(self.alloc(), .{ .name = name });
+                // Handle table.col qualified references in SELECT list
+                if (self.peek().kind == .dot) {
+                    _ = self.advance();
+                    const col_tok = try self.expect(.identifier);
+                    const col_name = try self.alloc().dupe(u8, self.tokenText(col_tok));
+                    try columns.append(self.alloc(), .{ .qual_name = .{ .table = name, .col = col_name } });
+                } else {
+                    try columns.append(self.alloc(), .{ .name = name });
+                }
                 if (self.peek().kind != .comma) break;
                 _ = self.advance();
             }
@@ -167,6 +175,18 @@ pub const Parser = struct {
             } };
         } else .{ .name = qualified_name };
 
+        // Parse optional INNER JOIN clauses
+        var joins: std.ArrayList(ast.JoinClause) = .empty;
+        while (self.peek().kind == .kw_inner) {
+            _ = self.advance(); // consume INNER
+            _ = try self.expect(.kw_join);
+            const join_table_name = try self.parseQualifiedName();
+            const join_table_ref: ast.TableRef = .{ .name = join_table_name };
+            _ = try self.expect(.kw_on);
+            const condition = try self.parseExpr();
+            try joins.append(self.alloc(), .{ .table_ref = join_table_ref, .condition = condition });
+        }
+
         var where: ?ast.Expr = null;
         if (self.peek().kind == .kw_where) {
             _ = self.advance();
@@ -175,6 +195,7 @@ pub const Parser = struct {
 
         return ast.SelectStmt{
             .table_ref = table_ref,
+            .joins = try joins.toOwnedSlice(self.alloc()),
             .columns = try columns.toOwnedSlice(self.alloc()),
             .where = where,
         };
@@ -525,6 +546,13 @@ pub const Parser = struct {
             .identifier => {
                 _ = self.advance();
                 const name = try self.alloc().dupe(u8, self.tokenText(tok));
+                // Handle table.col qualified references in expressions
+                if (self.peek().kind == .dot) {
+                    _ = self.advance();
+                    const col_tok = try self.expect(.identifier);
+                    const col_name = try self.alloc().dupe(u8, self.tokenText(col_tok));
+                    return .{ .qual_col_ref = .{ .table = name, .col = col_name } };
+                }
                 return .{ .col_ref = name };
             },
             .lparen => {

@@ -16,6 +16,7 @@ pub const ROWID_SENTINEL: usize = std.math.maxInt(usize);
 
 pub const SchemaCol = struct {
     name: []const u8, // arena-owned
+    table: []const u8, // arena-owned; source table name (used for qualified col resolution)
     col_type: t.ColType,
     nullable: bool,
     index: usize, // position in the source row
@@ -101,11 +102,21 @@ pub const LogicalCreateTable = struct {
     columns: []catalog.ColumnMeta, // arena-owned
 };
 
+// Nested-loop inner join.  The schema merges both tables' columns with
+// right-side indices offset by the number of left-side columns.
+pub const Join = struct {
+    left: *LogicalPlan,
+    right: *LogicalPlan,
+    condition: Expr, // ON predicate; col_idx values reference the merged schema
+    schema: Schema, // combined schema (left cols then right cols)
+};
+
 pub const LogicalPlan = union(enum) {
     seq_scan: SeqScan,
     vtab_scan: VTabScan,
     filter: *Filter,
     project: *Project,
+    join: *Join,
     insert: LogicalInsert,
     update: LogicalUpdate,
     delete: LogicalDelete,
@@ -120,6 +131,7 @@ pub const LogicalPlan = union(enum) {
             .vtab_scan => |n| n.schema,
             .filter => |n| n.schema,
             .project => |n| n.schema,
+            .join => |n| n.schema,
             .insert => |n| n.schema,
             .update => |n| n.schema,
             .delete => |n| n.schema,
@@ -138,6 +150,7 @@ pub const PlanError = error{
     ArgCountMismatch,
     OutOfMemory,
     NoDefaultValue,
+    JoinOnNonTable, // INNER JOIN currently only supports plain table refs
 };
 
 pub const LogicalPlanner = struct {
@@ -218,6 +231,40 @@ pub const LogicalPlanner = struct {
             },
         };
 
+        // Build Join nodes for each INNER JOIN clause.  Each join merges the
+        // accumulated schema on the left with the new table schema on the right,
+        // offsetting right-side column indices so they don't collide with left-
+        // side indices in the combined values array produced by JoinCursor.
+        for (stmt.joins) |join_clause| {
+            const right_table_name = switch (join_clause.table_ref) {
+                .name => |q| q.name,
+                .func => return PlanError.JoinOnNonTable,
+            };
+            const right_meta = self.cat.getTable(right_table_name) orelse return PlanError.TableNotFound;
+            const right_schema_raw = try self.buildSchema(right_meta);
+
+            // Offset right-side column indices by the current left column count
+            // so each col_idx in the merged schema uniquely identifies a position
+            // in the combined values slice (left_vals ++ right_vals).
+            const left_count = scan_schema.columns.len;
+            const merged_schema = try self.mergeSchemas(scan_schema, right_schema_raw, left_count);
+            const right_plan = LogicalPlan{ .seq_scan = .{
+                .table = right_schema_raw.table,
+                .schema = right_schema_raw,
+            } };
+
+            const condition = try self.resolveExpr(join_clause.condition, merged_schema);
+            const join_node = try self.alloc().create(Join);
+            join_node.* = .{
+                .left = try self.box(current),
+                .right = try self.box(right_plan),
+                .condition = condition,
+                .schema = merged_schema,
+            };
+            current = .{ .join = join_node };
+            scan_schema = merged_schema;
+        }
+
         // Wrap in Filter if WHERE is present.
         if (stmt.where) |where_expr| {
             const pred = try self.resolveExpr(where_expr, scan_schema);
@@ -236,12 +283,17 @@ pub const LogicalPlanner = struct {
             var proj_cols: std.ArrayList(SchemaCol) = .empty;
 
             for (stmt.columns) |sel_col| {
-                const src_idx = try self.resolveColName(sel_col.name, scan_schema);
+                const src_idx = switch (sel_col) {
+                    .star => unreachable, // handled by the len == 0 path above
+                    .name => |n| try self.resolveColName(n, scan_schema),
+                    .qual_name => |q| try self.resolveQualColName(q.table, q.col, scan_schema),
+                };
                 try col_indices.append(self.alloc(), src_idx);
                 for (scan_schema.columns) |sc| {
                     if (sc.index == src_idx) {
                         try proj_cols.append(self.alloc(), .{
                             .name = try self.alloc().dupe(u8, sc.name),
+                            .table = try self.alloc().dupe(u8, sc.table),
                             .col_type = sc.col_type,
                             .nullable = sc.nullable,
                             .index = src_idx,
@@ -437,6 +489,7 @@ pub const LogicalPlanner = struct {
             .bool_lit => |v| .{ .bool_lit = v },
             .null_lit => .{ .null_lit = {} },
             .col_ref => |n| .{ .col_idx = try self.resolveColName(n, schema) },
+            .qual_col_ref => |q| .{ .col_idx = try self.resolveQualColName(q.table, q.col, schema) },
             .binary => |b| blk: {
                 const node = try self.alloc().create(Expr.Binary);
                 node.* = .{
@@ -468,22 +521,33 @@ pub const LogicalPlanner = struct {
         return PlanError.ColumnNotFound;
     }
 
+    // Resolve a table-qualified column reference (tbl.col) to its merged index.
+    fn resolveQualColName(_: *LogicalPlanner, table: []const u8, col_name: []const u8, schema: Schema) PlanError!usize {
+        for (schema.columns) |col| {
+            if (std.ascii.eqlIgnoreCase(table, col.table) and
+                std.ascii.eqlIgnoreCase(col_name, col.name))
+            {
+                return col.index;
+            }
+        }
+        return PlanError.ColumnNotFound;
+    }
+
     // ── Helpers ────────────────────────────────────────────────────────────────
 
     fn buildVTabSchema(self: *LogicalPlanner, name: []const u8, vt: *const vtab_mod.VTab) PlanError!Schema {
+        const duped_name = try self.alloc().dupe(u8, name);
         const cols = try self.alloc().alloc(SchemaCol, vt.columns.len);
         for (vt.columns, 0..) |col, i| {
             cols[i] = .{
                 .name = try self.alloc().dupe(u8, col.name),
+                .table = duped_name,
                 .col_type = col.col_type,
                 .nullable = col.nullable,
                 .index = i,
             };
         }
-        return Schema{
-            .table = try self.alloc().dupe(u8, name),
-            .columns = cols,
-        };
+        return Schema{ .table = duped_name, .columns = cols };
     }
 
     fn resolveVTabArgs(self: *LogicalPlanner, args: []const ast.Expr) PlanError![]const i64 {
@@ -502,19 +566,39 @@ pub const LogicalPlanner = struct {
     }
 
     fn buildSchema(self: *LogicalPlanner, meta: *catalog.TableMeta) PlanError!Schema {
+        const duped_name = try self.alloc().dupe(u8, meta.name);
         const cols = try self.alloc().alloc(SchemaCol, meta.columns.len);
         for (meta.columns, 0..) |c, i| {
             cols[i] = .{
                 .name = try self.alloc().dupe(u8, c.name),
+                .table = duped_name,
                 .col_type = c.col_type,
                 .nullable = c.nullable,
                 .index = i,
             };
         }
-        return Schema{
-            .table = try self.alloc().dupe(u8, meta.name),
-            .columns = cols,
-        };
+        return Schema{ .table = duped_name, .columns = cols };
+    }
+
+    // Build a merged schema for a join: left columns keep their indices, right
+    // column indices are offset by left_count so they address distinct positions
+    // in the combined values slice produced by JoinCursor.
+    fn mergeSchemas(self: *LogicalPlanner, left: Schema, right: Schema, left_count: usize) PlanError!Schema {
+        const total = left_count + right.columns.len;
+        const cols = try self.alloc().alloc(SchemaCol, total);
+        for (left.columns, 0..) |col, i| {
+            cols[i] = col;
+        }
+        for (right.columns, 0..) |col, i| {
+            cols[left_count + i] = .{
+                .name = col.name,
+                .table = col.table,
+                .col_type = col.col_type,
+                .nullable = col.nullable,
+                .index = left_count + i,
+            };
+        }
+        return Schema{ .table = "", .columns = cols };
     }
 
     // Heap-allocate a LogicalPlan node in the planner's arena.

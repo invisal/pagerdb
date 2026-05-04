@@ -12,6 +12,7 @@ pub const SeqScan = root.SeqScan;
 pub const VTabScan = root.VTabScan;
 pub const Filter = root.Filter;
 pub const Project = root.Project;
+pub const Join = root.Join;
 pub const LogicalInsert = root.LogicalInsert;
 pub const LogicalUpdate = root.LogicalUpdate;
 pub const LogicalDelete = root.LogicalDelete;
