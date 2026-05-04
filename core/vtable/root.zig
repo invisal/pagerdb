@@ -23,7 +23,7 @@ pub const VTabCursor = struct {
 // internal state and must be closed by the caller.
 pub const OpenFn = *const fn (
     cat: *Catalog,
-    args: []const i64,
+    args: []const Value,
     alloc: std.mem.Allocator,
 ) anyerror!VTabCursor;
 
@@ -47,6 +47,7 @@ const pages = @import("pages.zig");
 const page_slots = @import("page_slots.zig");
 const tables = @import("tables.zig");
 const columns = @import("columns.zig");
+const generate_series = @import("generate_series.zig");
 
 // ── Registry ──────────────────────────────────────────────────────────────────
 
@@ -66,6 +67,14 @@ const REGISTRY = [_]VTab{
         .min_args = 1,
         .max_args = 1,
         .open = page_slots.open,
+    },
+    .{
+        .schema = "main",
+        .name = "generate_series",
+        .columns = &generate_series.columns,
+        .min_args = 1,
+        .max_args = 1,
+        .open = generate_series.open,
     },
     .{
         .schema = "information_schema",

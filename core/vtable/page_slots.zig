@@ -51,13 +51,16 @@ fn cursorNext(ptr: *anyopaque, alloc: std.mem.Allocator) anyerror!?[]root.Value 
     return vals;
 }
 
-pub fn open(cat: *Catalog, args: []const i64, alloc: std.mem.Allocator) anyerror!root.VTabCursor {
+pub fn open(cat: *Catalog, args: []const root.Value, alloc: std.mem.Allocator) anyerror!root.VTabCursor {
+    const page_id: u32 = switch (args[0]) {
+        .int => |n| @intCast(n),
+        else => return error.InvalidArgumentType,
+    };
+
     const cur = try alloc.create(PageSlotsCursor);
     cur.* = .{ .buf = undefined, .slot_idx = 0, .cell_count = 0, .is_leaf = false };
 
     const pager = cat.pager;
-    const page_id: u32 = @intCast(args[0]);
-
     if (page_id < pager.total_pages) {
         try pager.readPage(page_id, &cur.buf);
         const ph = std.mem.bytesToValue(t.PageHeader, cur.buf[0..@sizeOf(t.PageHeader)]);

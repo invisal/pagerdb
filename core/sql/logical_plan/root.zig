@@ -56,7 +56,7 @@ pub const SeqScan = struct {
 
 pub const VTabScan = struct {
     name: []const u8, // arena-owned
-    args: []const i64, // resolved integer args, arena-owned
+    args: []const vtab_mod.Value, // resolved args, arena-owned
     schema: Schema,
     vtab: *const vtab_mod.VTab,
 };
@@ -550,13 +550,16 @@ pub const LogicalPlanner = struct {
         return Schema{ .table = duped_name, .columns = cols };
     }
 
-    fn resolveVTabArgs(self: *LogicalPlanner, args: []const ast.Expr) PlanError![]const i64 {
-        const resolved = try self.alloc().alloc(i64, args.len);
+    fn resolveVTabArgs(self: *LogicalPlanner, args: []const ast.Expr) PlanError![]const vtab_mod.Value {
+        const resolved = try self.alloc().alloc(vtab_mod.Value, args.len);
         for (args, 0..) |arg, i| {
             resolved[i] = switch (arg) {
-                .int_lit => |v| v,
+                .int_lit => |v| .{ .int = v },
+                .float_lit => |v| .{ .real = v },
+                .str_lit => |v| .{ .text = v },
+                .bool_lit => |v| .{ .int = if (v) 1 else 0 },
                 .unary => |u| if (u.op == .neg and u.operand == .int_lit)
-                    -u.operand.int_lit
+                    .{ .int = -u.operand.int_lit }
                 else
                     return PlanError.TypeMismatch,
                 else => return PlanError.TypeMismatch,
