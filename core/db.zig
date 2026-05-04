@@ -239,6 +239,48 @@ pub const Db = struct {
         return try row.decodeRow(cols, row_bytes, allocator);
     }
 
+    // Iterator that decodes rows from a btree scan one at a time.
+    // The struct is self-contained (schema_buf is inline) so it can be returned
+    // by value without the cols slice dangling after a move.
+    pub const DbRowIterator = struct {
+        it: btree.ScanIterator,
+        schema_buf: [64]row.ColumnSchema,
+        schema_len: usize,
+
+        // Returns the next decoded row, arena-allocated, or null at EOF.
+        pub fn next(self: *DbRowIterator, allocator: std.mem.Allocator) !?struct { rowid: u64, values: []row.Value } {
+            const cell = try self.it.next() orelse return null;
+            const cols = self.schema_buf[0..self.schema_len];
+
+            // Overflow rows span multiple pages; copy into a temp buffer,
+            // decode, then free the raw bytes.
+            const row_bytes: []u8 = if (cell.is_overflow) blk: {
+                const out = try allocator.alloc(u8, cell.overflow_len);
+                errdefer allocator.free(out);
+                try overflow.readChain(self.it.pager, cell.overflow_page, cell.overflow_len, out);
+                break :blk out;
+            } else try allocator.dupe(u8, cell.row_data);
+            defer allocator.free(row_bytes);
+
+            return .{ .rowid = cell.rowid, .values = try row.decodeRow(cols, row_bytes, allocator) };
+        }
+    };
+
+    // Open a forward scan over every row in table, in rowid order.
+    // The returned iterator borrows &self.pager, so it must not outlive db.
+    pub fn scanOpen(self: *Db, table: []const u8) !DbRowIterator {
+        const meta = self.cat.getTable(table) orelse return error.TableNotFound;
+        var it = DbRowIterator{
+            .it = try btree.ScanIterator.init(&self.pager, meta.btree_root),
+            .schema_buf = undefined,
+            .schema_len = meta.columns.len,
+        };
+        for (meta.columns, 0..) |c, i| {
+            it.schema_buf[i] = .{ .col_type = c.col_type, .nullable = c.nullable };
+        }
+        return it;
+    }
+
     // Walk every row in a table in rowid order, calling cb(rowid, values, ctx).
     // Return false from the callback to stop early.
     pub fn scan(
