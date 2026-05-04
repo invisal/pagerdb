@@ -54,10 +54,6 @@ pub const VTabScanCursor = struct {
         if (buf.items.len == 0) return null;
         return buf.items;
     }
-
-    pub fn deinit(self: *VTabScanCursor, a: Allocator) void {
-        self.cursor.close(a);
-    }
 };
 
 // Point lookups fetch exactly one row (or nothing) from the btree.
@@ -261,7 +257,6 @@ pub const Cursor = union(enum) {
 
     pub fn deinit(self: *Cursor, a: Allocator) void {
         switch (self.*) {
-            .vtab_scan => |*s| s.deinit(a),
             .filter => |f| f.deinit(a),
             .project => |p| p.deinit(a),
             .join => |j| j.deinit(a),

@@ -51,10 +51,6 @@ fn cursorNext(ptr: *anyopaque, alloc: std.mem.Allocator) anyerror!?[]root.Value 
     return vals;
 }
 
-fn cursorClose(ptr: *anyopaque, alloc: std.mem.Allocator) void {
-    alloc.destroy(@as(*PageSlotsCursor, @ptrCast(@alignCast(ptr))));
-}
-
 pub fn open(cat: *Catalog, args: []const i64, alloc: std.mem.Allocator) anyerror!root.VTabCursor {
     const cur = try alloc.create(PageSlotsCursor);
     cur.* = .{ .buf = undefined, .slot_idx = 0, .cell_count = 0, .is_leaf = false };
@@ -79,5 +75,5 @@ pub fn open(cat: *Catalog, args: []const i64, alloc: std.mem.Allocator) anyerror
         }
     }
 
-    return .{ .ptr = cur, .next_fn = cursorNext, .close_fn = cursorClose };
+    return .{ .ptr = cur, .next_fn = cursorNext };
 }

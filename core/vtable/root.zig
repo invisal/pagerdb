@@ -7,20 +7,15 @@ pub const Value = row_m.Value;
 
 // ── VTabCursor ─────────────────────────────────────────────────────────────────
 
-// An open cursor over a virtual table's rows.  The vtable allocates whatever
-// state it needs in `open` and stores it behind the opaque `ptr`.  Callers
-// must call `close` exactly once to free that state.
+// An open cursor over a virtual table's rows.  The vtable allocates its cursor
+// state through the arena allocator passed by the executor; that arena owns all
+// cursor state and frees it in one shot, so no explicit close is needed.
 pub const VTabCursor = struct {
     ptr: *anyopaque,
     next_fn: *const fn (ptr: *anyopaque, alloc: std.mem.Allocator) anyerror!?[]Value,
-    close_fn: *const fn (ptr: *anyopaque, alloc: std.mem.Allocator) void,
 
     pub fn next(self: *VTabCursor, alloc: std.mem.Allocator) anyerror!?[]Value {
         return self.next_fn(self.ptr, alloc);
-    }
-
-    pub fn close(self: *VTabCursor, alloc: std.mem.Allocator) void {
-        self.close_fn(self.ptr, alloc);
     }
 };
 

@@ -66,13 +66,9 @@ fn cursorNext(ptr: *anyopaque, alloc: std.mem.Allocator) anyerror!?[]root.Value 
     }
 }
 
-fn cursorClose(ptr: *anyopaque, alloc: std.mem.Allocator) void {
-    alloc.destroy(@as(*ColumnsCursor, @ptrCast(@alignCast(ptr))));
-}
-
 pub fn open(cat: *Catalog, args: []const i64, alloc: std.mem.Allocator) anyerror!root.VTabCursor {
     _ = args;
     const cur = try alloc.create(ColumnsCursor);
     cur.* = .{ .it = cat.tables.valueIterator(), .current_meta = null, .col_idx = 0 };
-    return .{ .ptr = cur, .next_fn = cursorNext, .close_fn = cursorClose };
+    return .{ .ptr = cur, .next_fn = cursorNext };
 }
