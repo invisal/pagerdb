@@ -18,13 +18,20 @@ pub const BinaryOp = enum {
 
 pub const UnaryOp = enum { not, neg };
 
+// A column reference qualified by table name: tbl.col
+pub const QualifiedColRef = struct {
+    table: []const u8, // arena-owned
+    col: []const u8, // arena-owned
+};
+
 pub const Expr = union(enum) {
     int_lit: i64,
     float_lit: f64,
     str_lit: []const u8, // arena-owned copy, '' already unescaped
     bool_lit: bool,
     null_lit: void,
-    col_ref: []const u8, // column name, arena-owned
+    col_ref: []const u8, // unqualified column name, arena-owned
+    qual_col_ref: QualifiedColRef, // table.col reference, arena-owned
     default_value: void, // using column default value
 
     // Binary and unary nodes are heap-allocated so the Expr union stays small
@@ -46,6 +53,10 @@ pub const Expr = union(enum) {
             .bool_lit => |v| .{ .bool_lit = v },
             .null_lit => .{ .null_lit = {} },
             .col_ref => |n| .{ .col_ref = try allocator.dupe(u8, n) },
+            .qual_col_ref => |q| .{ .qual_col_ref = .{
+                .table = try allocator.dupe(u8, q.table),
+                .col = try allocator.dupe(u8, q.col),
+            } },
             .binary => |b| blk: {
                 const node = try allocator.create(Binary);
                 node.* = .{
@@ -72,6 +83,10 @@ pub const Expr = union(enum) {
         switch (self) {
             .str_lit => |s| allocator.free(s),
             .col_ref => |n| allocator.free(n),
+            .qual_col_ref => |q| {
+                allocator.free(q.table);
+                allocator.free(q.col);
+            },
             .binary => |b| {
                 b.left.deinit(allocator);
                 b.right.deinit(allocator);
@@ -88,7 +103,8 @@ pub const Expr = union(enum) {
 
 pub const SelectCol = union(enum) {
     star,
-    name: []const u8, // arena-owned
+    name: []const u8, // arena-owned: bare column name
+    qual_name: QualifiedColRef, // arena-owned: table.col
 };
 
 pub const TableFunc = struct {
@@ -107,8 +123,15 @@ pub const TableRef = union(enum) {
     func: TableFunc, // TVF:          FROM __page_slots(1)
 };
 
+// One INNER JOIN clause: the right-hand table and its ON condition.
+pub const JoinClause = struct {
+    table_ref: TableRef, // right-hand table
+    condition: Expr, // ON predicate
+};
+
 pub const SelectStmt = struct {
-    table_ref: TableRef, // arena-owned
+    table_ref: TableRef, // arena-owned; left-most table in FROM
+    joins: []JoinClause, // INNER JOIN clauses in order (empty = no joins)
     columns: []SelectCol, // len = 0 means SELECT *
     where: ?Expr,
 };

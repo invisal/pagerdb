@@ -58,12 +58,20 @@ pub const PhysicalCreateTable = struct {
     columns: []catalog.ColumnMeta,
 };
 
+pub const PhysicalJoin = struct {
+    left: PhysicalPlan,
+    right: PhysicalPlan,
+    condition: lp.Expr,
+    schema: lp.Schema,
+};
+
 pub const PhysicalPlan = union(enum) {
     seq_scan: PhysicalSeqScan,
     vtab_scan: PhysicalVTabScan,
     point_lookup: PhysicalPointLookup,
     filter: *PhysicalFilter,
     project: *PhysicalProject,
+    join: *PhysicalJoin,
     insert: PhysicalInsert,
     update: PhysicalUpdate,
     delete: PhysicalDelete,
@@ -79,6 +87,7 @@ pub const PhysicalPlan = union(enum) {
             .point_lookup => |n| n.schema,
             .filter => |n| n.schema,
             .project => |n| n.schema,
+            .join => |n| n.schema,
             .insert => |n| n.schema,
             .update => |n| n.schema,
             .delete => |n| n.schema,
@@ -110,6 +119,7 @@ pub const PhysicalPlanner = struct {
             .vtab_scan => |n| .{ .vtab_scan = .{ .vtab = n.vtab, .args = n.args, .schema = n.schema } },
             .filter => |n| try self.planFilter(n),
             .project => |n| try self.planProject(n),
+            .join => |n| try self.planJoin(n),
             .insert => |n| .{ .insert = .{ .table = n.table, .values = n.values, .schema = n.schema } },
             .update => |n| try self.planUpdate(n),
             .delete => |n| try self.planDelete(n),
@@ -151,6 +161,17 @@ pub const PhysicalPlanner = struct {
             .schema = node.schema,
         };
         return .{ .project = proj };
+    }
+
+    fn planJoin(self: *PhysicalPlanner, node: *lp.Join) !PhysicalPlan {
+        const join_node = try self.alloc().create(PhysicalJoin);
+        join_node.* = .{
+            .left = try self.plan(node.left.*),
+            .right = try self.plan(node.right.*),
+            .condition = node.condition,
+            .schema = node.schema,
+        };
+        return .{ .join = join_node };
     }
 
     fn planUpdate(self: *PhysicalPlanner, node: lp.LogicalUpdate) !PhysicalPlan {

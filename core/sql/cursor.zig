@@ -118,6 +118,73 @@ pub const ProjectCursor = struct {
     }
 };
 
+// ── Join cursor ────────────────────────────────────────────────────────────────
+
+// Nested-loop inner join with a materialized right side.
+// On open(), all right-side rows are collected into a slice so that for each
+// left row we can iterate the right side without re-opening the right cursor.
+// This is simple and correct; hash join can be added later as an optimisation.
+pub const JoinCursor = struct {
+    left: *Cursor,
+    right_rows: []Row, // all right rows, materialized at open time
+    right_pos: usize, // current position within right_rows for this left row
+    left_batch: []Row, // current batch pulled from left cursor
+    left_pos: usize, // position within left_batch
+    condition: lp.Expr,
+
+    // Pull combined (left ++ right) rows that satisfy the join condition.
+    // Returns up to BATCH_SIZE rows per call, or null when exhausted.
+    pub fn next(self: *JoinCursor, a: Allocator) !?[]Row {
+        var out: std.ArrayList(Row) = .empty;
+
+        while (true) {
+            // Advance to the next left row when the current one is exhausted.
+            while (self.left_pos >= self.left_batch.len) {
+                self.left_batch = try self.left.next(a) orelse {
+                    if (out.items.len > 0) return out.items;
+                    return null;
+                };
+                self.left_pos = 0;
+                self.right_pos = 0;
+            }
+
+            const left_row = self.left_batch[self.left_pos];
+
+            // Walk the right side for the current left row.
+            while (self.right_pos < self.right_rows.len) {
+                const right_row = self.right_rows[self.right_pos];
+                self.right_pos += 1;
+
+                // Build a combined values slice: left_vals ++ right_vals.
+                // col_idx values in the condition already reference merged positions.
+                const combined = try a.alloc(row_mod.Value, left_row.values.len + right_row.values.len);
+                @memcpy(combined[0..left_row.values.len], left_row.values);
+                @memcpy(combined[left_row.values.len..], right_row.values);
+
+                const ev = try eval.evalExpr(self.condition, combined, a);
+                if (eval.isTruthy(ev)) {
+                    try out.append(a, .{ .rowid = left_row.rowid, .values = combined });
+                }
+
+                if (out.items.len >= BATCH_SIZE) return out.items;
+            }
+
+            // Finished right side for this left row; move to the next left row.
+            self.left_pos += 1;
+            self.right_pos = 0;
+
+            // Return any accumulated rows rather than looping back to the left,
+            // to avoid unbounded iteration when most left rows have no matches.
+            if (out.items.len > 0) return out.items;
+        }
+    }
+
+    pub fn deinit(self: *JoinCursor, a: Allocator) void {
+        self.left.deinit(a);
+        a.destroy(self.left);
+    }
+};
+
 // ── Cursor union ───────────────────────────────────────────────────────────────
 
 pub const Cursor = union(enum) {
@@ -126,6 +193,7 @@ pub const Cursor = union(enum) {
     point_lookup: PointLookupCursor,
     filter: *FilterCursor,
     project: *ProjectCursor,
+    join: *JoinCursor,
 
     pub fn open(plan: pp.PhysicalPlan, db: *Db, a: Allocator) !Cursor {
         return switch (plan) {
@@ -157,6 +225,25 @@ pub const Cursor = union(enum) {
                 pc.col_indices = n.col_indices;
                 break :blk .{ .project = pc };
             },
+            .join => |n| blk: {
+                // Materialize the right side once so each left row can scan it
+                // without re-opening a cursor.
+                var right_rows: std.ArrayList(Row) = .empty;
+                var right_cur = try open(n.right, db, a);
+                defer right_cur.deinit(a);
+                while (try right_cur.next(a)) |batch| {
+                    try right_rows.appendSlice(a, batch);
+                }
+                const jc = try a.create(JoinCursor);
+                jc.left = try a.create(Cursor);
+                jc.left.* = try open(n.left, db, a);
+                jc.right_rows = try right_rows.toOwnedSlice(a);
+                jc.right_pos = 0;
+                jc.left_batch = &.{};
+                jc.left_pos = 0;
+                jc.condition = n.condition;
+                break :blk .{ .join = jc };
+            },
             else => error.UnsupportedPlan,
         };
     }
@@ -168,6 +255,7 @@ pub const Cursor = union(enum) {
             .point_lookup => |*s| s.next(a),
             .filter => |f| f.next(a),
             .project => |p| p.next(a),
+            .join => |j| j.next(a),
         };
     }
 
@@ -175,6 +263,7 @@ pub const Cursor = union(enum) {
         switch (self.*) {
             .filter => |f| f.deinit(a),
             .project => |p| p.deinit(a),
+            .join => |j| j.deinit(a),
             else => {},
         }
     }
