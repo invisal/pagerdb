@@ -26,6 +26,7 @@ test {
     _ = @import("sql/eval.zig");
     _ = @import("sql/physical_plan.zig");
     _ = @import("sql/logical_plan.zig"); // includes all logical_plan tests
+    _ = @import("sql/cursor.zig");
     _ = @import("tests/btree_test.zig");
     _ = @import("tests/catalog_test.zig");
     _ = @import("tests/db_test.zig");
