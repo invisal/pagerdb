@@ -2,7 +2,8 @@
 // Lists all user-defined tables in the database with their metadata.
 
 const std = @import("std");
-const Catalog = @import("../catalog.zig").Catalog;
+const catalog = @import("../catalog.zig");
+const Catalog = catalog.Catalog;
 const root = @import("root.zig");
 
 pub const columns = [_]root.VTabColumn{
@@ -12,20 +13,25 @@ pub const columns = [_]root.VTabColumn{
     .{ .name = "column_count", .col_type = .int, .nullable = false },
 };
 
-pub fn scan(
-    cat: *Catalog,
-    args: []const i64,
-    out: *std.ArrayList([]root.Value),
-    alloc: std.mem.Allocator,
-) anyerror!void {
+const TablesCursor = struct {
+    it: std.StringHashMap(catalog.TableMeta).ValueIterator,
+};
+
+fn cursorNext(ptr: *anyopaque, alloc: std.mem.Allocator) anyerror!?[]root.Value {
+    const self: *TablesCursor = @ptrCast(@alignCast(ptr));
+    const meta = self.it.next() orelse return null;
+
+    const vals = try alloc.alloc(root.Value, 4);
+    vals[0] = .{ .text = try alloc.dupe(u8, "main") };
+    vals[1] = .{ .text = try alloc.dupe(u8, meta.name) };
+    vals[2] = .{ .int = @intCast(meta.btree_root) };
+    vals[3] = .{ .int = @intCast(meta.columns.len) };
+    return vals;
+}
+
+pub fn open(cat: *Catalog, args: []const i64, alloc: std.mem.Allocator) anyerror!root.VTabCursor {
     _ = args;
-    var it = cat.tables.valueIterator();
-    while (it.next()) |meta| {
-        const vals = try alloc.alloc(root.Value, 4);
-        vals[0] = .{ .text = try alloc.dupe(u8, "main") };
-        vals[1] = .{ .text = try alloc.dupe(u8, meta.name) };
-        vals[2] = .{ .int = @intCast(meta.btree_root) };
-        vals[3] = .{ .int = @intCast(meta.columns.len) };
-        try out.append(alloc, vals);
-    }
+    const cur = try alloc.create(TablesCursor);
+    cur.* = .{ .it = cat.tables.valueIterator() };
+    return .{ .ptr = cur, .next_fn = cursorNext };
 }

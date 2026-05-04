@@ -5,12 +5,27 @@ const row_m = @import("../row.zig");
 
 pub const Value = row_m.Value;
 
-pub const ScanFn = *const fn (
+// ── VTabCursor ─────────────────────────────────────────────────────────────────
+
+// An open cursor over a virtual table's rows.  The vtable allocates its cursor
+// state through the arena allocator passed by the executor; that arena owns all
+// cursor state and frees it in one shot, so no explicit close is needed.
+pub const VTabCursor = struct {
+    ptr: *anyopaque,
+    next_fn: *const fn (ptr: *anyopaque, alloc: std.mem.Allocator) anyerror!?[]Value,
+
+    pub fn next(self: *VTabCursor, alloc: std.mem.Allocator) anyerror!?[]Value {
+        return self.next_fn(self.ptr, alloc);
+    }
+};
+
+// Opens a cursor over the virtual table.  The returned VTabCursor owns its
+// internal state and must be closed by the caller.
+pub const OpenFn = *const fn (
     cat: *Catalog,
     args: []const i64,
-    out: *std.ArrayList([]Value),
     alloc: std.mem.Allocator,
-) anyerror!void;
+) anyerror!VTabCursor;
 
 pub const VTabColumn = struct {
     name: []const u8,
@@ -24,7 +39,7 @@ pub const VTab = struct {
     columns: []const VTabColumn,
     min_args: usize,
     max_args: usize,
-    scan: ScanFn,
+    open: OpenFn,
 };
 
 // Import individual vtable implementations
@@ -42,7 +57,7 @@ const REGISTRY = [_]VTab{
         .columns = &pages.columns,
         .min_args = 0,
         .max_args = 0,
-        .scan = pages.scan,
+        .open = pages.open,
     },
     .{
         .schema = "main",
@@ -50,7 +65,7 @@ const REGISTRY = [_]VTab{
         .columns = &page_slots.columns,
         .min_args = 1,
         .max_args = 1,
-        .scan = page_slots.scan,
+        .open = page_slots.open,
     },
     .{
         .schema = "information_schema",
@@ -58,7 +73,7 @@ const REGISTRY = [_]VTab{
         .columns = &tables.columns,
         .min_args = 0,
         .max_args = 0,
-        .scan = tables.scan,
+        .open = tables.open,
     },
     .{
         .schema = "information_schema",
@@ -66,7 +81,7 @@ const REGISTRY = [_]VTab{
         .columns = &columns.columns,
         .min_args = 0,
         .max_args = 0,
-        .scan = columns.scan,
+        .open = columns.open,
     },
 };
 

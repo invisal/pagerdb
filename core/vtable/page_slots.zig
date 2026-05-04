@@ -16,48 +16,64 @@ pub const columns = [_]root.VTabColumn{
     .{ .name = "is_overflow", .col_type = .int, .nullable = false },
 };
 
-pub fn scan(
-    cat: *Catalog,
-    args: []const i64,
-    out: *std.ArrayList([]root.Value),
-    alloc: std.mem.Allocator,
-) anyerror!void {
+const PageSlotsCursor = struct {
+    // The page buffer is loaded once at open() and read lazily by next().
+    buf: [t.PAGE_SIZE]u8,
+    slot_idx: usize,
+    cell_count: usize,
+    is_leaf: bool,
+};
+
+fn cursorNext(ptr: *anyopaque, alloc: std.mem.Allocator) anyerror!?[]root.Value {
+    const self: *PageSlotsCursor = @ptrCast(@alignCast(ptr));
+    if (self.slot_idx >= self.cell_count) return null;
+
+    const i = self.slot_idx;
+    self.slot_idx += 1;
+
+    const vals = try alloc.alloc(root.Value, 4);
+    if (self.is_leaf) {
+        const off = btree.getCellPtr(&self.buf, @intCast(i));
+        const cell = btree.readLeafCell(&self.buf, off);
+        const dlen = if (cell.is_overflow) cell.overflow_len else cell.row_data.len;
+        vals[0] = .{ .int = @intCast(i) };
+        vals[1] = .{ .int = @intCast(cell.rowid) };
+        vals[2] = .{ .int = @intCast(dlen) };
+        vals[3] = .{ .int = if (cell.is_overflow) 1 else 0 };
+    } else {
+        const off = btree.getCellPtr(&self.buf, @intCast(i));
+        const sep_rowid = std.mem.readInt(u64, self.buf[off + 4 ..][0..8], .little);
+        vals[0] = .{ .int = @intCast(i) };
+        vals[1] = .{ .int = @intCast(sep_rowid) };
+        vals[2] = .{ .int = 0 };
+        vals[3] = .{ .int = 0 };
+    }
+    return vals;
+}
+
+pub fn open(cat: *Catalog, args: []const i64, alloc: std.mem.Allocator) anyerror!root.VTabCursor {
+    const cur = try alloc.create(PageSlotsCursor);
+    cur.* = .{ .buf = undefined, .slot_idx = 0, .cell_count = 0, .is_leaf = false };
+
     const pager = cat.pager;
     const page_id: u32 = @intCast(args[0]);
-    if (page_id >= pager.total_pages) return;
 
-    var buf: [t.PAGE_SIZE]u8 = undefined;
-    try pager.readPage(page_id, &buf);
-
-    const ph = std.mem.bytesToValue(t.PageHeader, buf[0..@sizeOf(t.PageHeader)]);
-    const bh = btree.readBTreeHeader(&buf);
-
-    switch (ph.page_type) {
-        .btree_leaf => {
-            for (0..bh.cell_count) |i| {
-                const off = btree.getCellPtr(&buf, @intCast(i));
-                const cell = btree.readLeafCell(&buf, off);
-                const dlen = if (cell.is_overflow) cell.overflow_len else cell.row_data.len;
-                const vals = try alloc.alloc(root.Value, 4);
-                vals[0] = .{ .int = @intCast(i) };
-                vals[1] = .{ .int = @intCast(cell.rowid) };
-                vals[2] = .{ .int = @intCast(dlen) };
-                vals[3] = .{ .int = if (cell.is_overflow) 1 else 0 };
-                try out.append(alloc, vals);
-            }
-        },
-        .btree_internal => {
-            for (0..bh.cell_count) |i| {
-                const off = btree.getCellPtr(&buf, @intCast(i));
-                const sep_rowid = std.mem.readInt(u64, buf[off + 4 ..][0..8], .little);
-                const vals = try alloc.alloc(root.Value, 4);
-                vals[0] = .{ .int = @intCast(i) };
-                vals[1] = .{ .int = @intCast(sep_rowid) };
-                vals[2] = .{ .int = 0 };
-                vals[3] = .{ .int = 0 };
-                try out.append(alloc, vals);
-            }
-        },
-        else => {},
+    if (page_id < pager.total_pages) {
+        try pager.readPage(page_id, &cur.buf);
+        const ph = std.mem.bytesToValue(t.PageHeader, cur.buf[0..@sizeOf(t.PageHeader)]);
+        const bh = btree.readBTreeHeader(&cur.buf);
+        switch (ph.page_type) {
+            .btree_leaf => {
+                cur.cell_count = bh.cell_count;
+                cur.is_leaf = true;
+            },
+            .btree_internal => {
+                cur.cell_count = bh.cell_count;
+                cur.is_leaf = false;
+            },
+            else => {},
+        }
     }
+
+    return .{ .ptr = cur, .next_fn = cursorNext };
 }

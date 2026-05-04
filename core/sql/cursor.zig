@@ -4,6 +4,7 @@ const row_mod = @import("../row.zig");
 const lp = @import("logical_plan.zig");
 const pp = @import("physical_plan.zig");
 const eval = @import("eval.zig");
+const vtab_mod = @import("../vtable/root.zig");
 
 const Db = db_mod.Db;
 const Allocator = std.mem.Allocator;
@@ -36,23 +37,22 @@ pub const SeqScanCursor = struct {
     }
 };
 
-// Virtual tables materialise all rows at once on open.  We buffer the full
-// result and return it in BATCH_SIZE chunks so the calling loop is uniform.
+// Virtual table cursor: pulls one row at a time from the vtable's own cursor
+// and accumulates up to BATCH_SIZE rows per call so the outer loop is uniform.
 pub const VTabScanCursor = struct {
-    rows: [][]row_mod.Value,
-    index: usize,
+    cursor: vtab_mod.VTabCursor,
+    // 1-indexed rowid, incremented for every row returned across all batches
+    rowid: u64,
 
     pub fn next(self: *VTabScanCursor, a: Allocator) !?[]Row {
-        if (self.index >= self.rows.len) return null;
-        const start = self.index;
-        const end = @min(self.index + BATCH_SIZE, self.rows.len);
-        const buf = try a.alloc(Row, end - start);
-        for (self.rows[start..end], 0..) |vals, i| {
-            // rowids are 1-indexed to match the executor convention
-            buf[i] = .{ .rowid = @intCast(start + i + 1), .values = vals };
+        var buf: std.ArrayListUnmanaged(Row) = .empty;
+        while (buf.items.len < BATCH_SIZE) {
+            const vals = try self.cursor.next(a) orelse break;
+            try buf.append(a, .{ .rowid = self.rowid, .values = vals });
+            self.rowid += 1;
         }
-        self.index = end;
-        return buf;
+        if (buf.items.len == 0) return null;
+        return buf.items;
     }
 };
 
@@ -199,12 +199,8 @@ pub const Cursor = union(enum) {
         return switch (plan) {
             .seq_scan => |n| .{ .seq_scan = .{ .it = try db.scanOpen(n.table) } },
             .vtab_scan => |n| blk: {
-                var raw: std.ArrayList([]row_mod.Value) = .empty;
-                try n.vtab.scan(&db.cat, n.args, &raw, a);
-                break :blk .{ .vtab_scan = .{
-                    .rows = try raw.toOwnedSlice(a),
-                    .index = 0,
-                } };
+                const vtab_cursor = try n.vtab.open(&db.cat, n.args, a);
+                break :blk .{ .vtab_scan = .{ .cursor = vtab_cursor, .rowid = 1 } };
             },
             .point_lookup => |n| blk: {
                 const vals = try db.getByRowid(n.table, n.rowid, a);
