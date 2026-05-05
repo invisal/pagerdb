@@ -3,6 +3,7 @@ const t = @import("../../types.zig");
 const ast = @import("../ast.zig");
 const catalog = @import("../../catalog.zig");
 const vtab_mod = @import("../../vtable/root.zig");
+const sf = @import("../scalar_func.zig");
 
 // Reserved column index that maps to the internal rowid (not a real column).
 // We use maxInt(usize) because:
@@ -42,9 +43,13 @@ pub const Expr = union(enum) {
     col_idx: usize, // source column index; ROWID_SENTINEL = _rowid_
     binary: *Binary,
     unary: *Unary,
+    func_call: *FuncCall,
 
     pub const Binary = struct { op: ast.BinaryOp, left: Expr, right: Expr };
     pub const Unary = struct { op: ast.UnaryOp, operand: Expr };
+    // func points directly into scalar_func.REGISTRY, resolved at plan time —
+    // the same pattern as VTabScan storing *const VTab.
+    pub const FuncCall = struct { func: *const sf.ScalarFunc, args: []Expr };
 };
 
 // ── Plan nodes ─────────────────────────────────────────────────────────────────
@@ -69,8 +74,11 @@ pub const Filter = struct {
 
 pub const Project = struct {
     input: *LogicalPlan,
-    col_indices: []usize, // source column indices in output order
-    schema: Schema, // output columns; schema.columns[i].index = col_indices[i]
+    // One resolved expression per output column; simple column references are
+    // represented as col_idx, while computed columns (e.g. abs(n)) use the
+    // full expression.
+    exprs: []Expr,
+    schema: Schema,
 };
 
 pub const LogicalInsert = struct {
@@ -150,6 +158,8 @@ pub const PlanError = error{
     ArgCountMismatch,
     OutOfMemory,
     NoDefaultValue,
+    UnknownFunction,
+    WrongArgCount,
 };
 
 pub const LogicalPlanner = struct {
@@ -223,27 +233,60 @@ pub const LogicalPlanner = struct {
 
         // Wrap in Project if specific columns were requested (not SELECT *).
         if (stmt.columns.len > 0) {
-            var col_indices: std.ArrayList(usize) = .empty;
+            var exprs: std.ArrayList(Expr) = .empty;
             var proj_cols: std.ArrayList(SchemaCol) = .empty;
 
             for (stmt.columns) |sel_col| {
-                const src_idx = switch (sel_col) {
+                switch (sel_col) {
                     .star => unreachable, // handled by the len == 0 path above
-                    .name => |n| try self.resolveColName(n, scan_schema),
-                    .qual_name => |q| try self.resolveQualColName(q.table, q.col, scan_schema),
-                };
-                try col_indices.append(self.alloc(), src_idx);
-                for (scan_schema.columns) |sc| {
-                    if (sc.index == src_idx) {
+                    .name => |n| {
+                        const src_idx = try self.resolveColName(n, scan_schema);
+                        try exprs.append(self.alloc(), .{ .col_idx = src_idx });
+                        for (scan_schema.columns) |sc| {
+                            if (sc.index == src_idx) {
+                                try proj_cols.append(self.alloc(), .{
+                                    .name = try self.alloc().dupe(u8, sc.name),
+                                    .table = try self.alloc().dupe(u8, sc.table),
+                                    .col_type = sc.col_type,
+                                    .nullable = sc.nullable,
+                                    .index = src_idx,
+                                });
+                                break;
+                            }
+                        }
+                    },
+                    .qual_name => |q| {
+                        const src_idx = try self.resolveQualColName(q.table, q.col, scan_schema);
+                        try exprs.append(self.alloc(), .{ .col_idx = src_idx });
+                        for (scan_schema.columns) |sc| {
+                            if (sc.index == src_idx) {
+                                try proj_cols.append(self.alloc(), .{
+                                    .name = try self.alloc().dupe(u8, sc.name),
+                                    .table = try self.alloc().dupe(u8, sc.table),
+                                    .col_type = sc.col_type,
+                                    .nullable = sc.nullable,
+                                    .index = src_idx,
+                                });
+                                break;
+                            }
+                        }
+                    },
+                    .expr => |e| {
+                        const resolved = try self.resolveExpr(e, scan_schema);
+                        try exprs.append(self.alloc(), resolved);
+                        // Use function name (or a generic label) as the output column name.
+                        const col_name = switch (e) {
+                            .func_call => |f| f.name,
+                            else => "?",
+                        };
                         try proj_cols.append(self.alloc(), .{
-                            .name = try self.alloc().dupe(u8, sc.name),
-                            .table = try self.alloc().dupe(u8, sc.table),
-                            .col_type = sc.col_type,
-                            .nullable = sc.nullable,
-                            .index = src_idx,
+                            .name = try self.alloc().dupe(u8, col_name),
+                            .table = "",
+                            .col_type = .int,
+                            .nullable = true,
+                            .index = std.math.maxInt(usize),
                         });
-                        break;
-                    }
+                    },
                 }
             }
 
@@ -254,7 +297,7 @@ pub const LogicalPlanner = struct {
             const project = try self.alloc().create(Project);
             project.* = .{
                 .input = try self.box(current),
-                .col_indices = try col_indices.toOwnedSlice(self.alloc()),
+                .exprs = try exprs.toOwnedSlice(self.alloc()),
                 .schema = proj_schema,
             };
             current = .{ .project = project };
@@ -450,6 +493,19 @@ pub const LogicalPlanner = struct {
                     .operand = try self.resolveExpr(u.operand, schema),
                 };
                 break :blk .{ .unary = node };
+            },
+            .func_call => |f| blk: {
+                // Look up the function in the registry at plan time — same pattern
+                // as vtable resolution.  The pointer into REGISTRY is stored in the
+                // plan and used directly by the evaluator, with no string comparison
+                // at execution time.
+                const func = sf.find(f.name) orelse return PlanError.UnknownFunction;
+                if (f.args.len < func.min_args or f.args.len > func.max_args) return PlanError.WrongArgCount;
+                const resolved_args = try self.alloc().alloc(Expr, f.args.len);
+                for (f.args, 0..) |arg, i| resolved_args[i] = try self.resolveExpr(arg, schema);
+                const node = try self.alloc().create(Expr.FuncCall);
+                node.* = .{ .func = func, .args = resolved_args };
+                break :blk .{ .func_call = node };
             },
             // DEFAULT should have been rewritten to the column's default expression
             // during INSERT/UPDATE planning. It must not reach this stage.

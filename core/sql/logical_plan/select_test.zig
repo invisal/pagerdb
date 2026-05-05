@@ -67,9 +67,9 @@ test "plan SELECT columns produces Project" {
     defer parsed.deinit();
 
     const project = (try planner.plan(parsed.stmt)).project;
-    try std.testing.expectEqual(@as(usize, 2), project.col_indices.len);
-    try std.testing.expectEqual(@as(usize, 0), project.col_indices[0]);
-    try std.testing.expectEqual(@as(usize, 2), project.col_indices[1]);
+    try std.testing.expectEqual(@as(usize, 2), project.exprs.len);
+    try std.testing.expectEqual(@as(usize, 0), project.exprs[0].col_idx);
+    try std.testing.expectEqual(@as(usize, 2), project.exprs[1].col_idx);
     try std.testing.expectEqualStrings("a", project.schema.columns[0].name);
     try std.testing.expectEqualStrings("c", project.schema.columns[1].name);
     try std.testing.expectEqual(std.meta.Tag(LogicalPlan).seq_scan, std.meta.activeTag(project.input.*));

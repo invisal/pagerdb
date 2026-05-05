@@ -81,3 +81,22 @@ test "SELECT with main. schema prefix resolves table" {
 
     try std.testing.expectError(PlanError.TableNotFound, execute(h.db, "SELECT * FROM other.users", alloc));
 }
+
+test "SELECT abs() evaluates correctly end-to-end" {
+    const alloc = std.testing.allocator;
+    const PlanError = @import("../../sql/logical_plan.zig").PlanError;
+    const h = try makeMemoryDb(alloc, .{ .schema = &.{"CREATE TABLE t (n INT NOT NULL)"} });
+    defer h.deinit();
+
+    try exec(h.db, "INSERT INTO t VALUES (-10)", alloc);
+    try exec(h.db, "INSERT INTO t VALUES (5)", alloc);
+
+    var r = try execute(h.db, "SELECT abs(n) FROM t", alloc);
+    defer r.deinit();
+    try std.testing.expectEqual(@as(usize, 2), r.result_set.rows.len);
+    try std.testing.expectEqual(@as(i64, 10), r.result_set.rows[0].values[0].int);
+    try std.testing.expectEqual(@as(i64, 5), r.result_set.rows[1].values[0].int);
+
+    // Unknown function should be rejected at plan time.
+    try std.testing.expectError(PlanError.UnknownFunction, execute(h.db, "SELECT upper(n) FROM t", alloc));
+}

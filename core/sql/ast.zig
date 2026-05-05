@@ -34,14 +34,16 @@ pub const Expr = union(enum) {
     qual_col_ref: QualifiedColRef, // table.col reference, arena-owned
     default_value: void, // using column default value
 
-    // Binary and unary nodes are heap-allocated so the Expr union stays small
-    // (two pointers).  This keeps stack frames shallow during deep recursion
-    // in the parser, and makes moving Expr values cheap (no deep copy).
+    // Binary, unary, and func_call nodes are heap-allocated so the Expr union
+    // stays small (two pointers).  This keeps stack frames shallow during deep
+    // recursion in the parser, and makes moving Expr values cheap (no deep copy).
     binary: *Binary,
     unary: *Unary,
+    func_call: *FuncCall,
 
     pub const Binary = struct { op: BinaryOp, left: Expr, right: Expr };
     pub const Unary = struct { op: UnaryOp, operand: Expr };
+    pub const FuncCall = struct { name: []const u8, args: []Expr };
 
     /// Deep-clone the expression to a different allocator.
     /// Used when transferring expressions from the parser's arena to the catalog.
@@ -75,6 +77,16 @@ pub const Expr = union(enum) {
                 break :blk .{ .unary = node };
             },
             .default_value => .{ .default_value = {} },
+            .func_call => |f| blk: {
+                const node = try allocator.create(FuncCall);
+                const cloned_args = try allocator.alloc(Expr, f.args.len);
+                for (f.args, 0..) |arg, i| cloned_args[i] = try arg.clone(allocator);
+                node.* = .{
+                    .name = try allocator.dupe(u8, f.name),
+                    .args = cloned_args,
+                };
+                break :blk .{ .func_call = node };
+            },
         };
     }
 
@@ -96,6 +108,12 @@ pub const Expr = union(enum) {
                 u.operand.deinit(allocator);
                 allocator.destroy(u);
             },
+            .func_call => |f| {
+                allocator.free(f.name);
+                for (f.args) |arg| arg.deinit(allocator);
+                allocator.free(f.args);
+                allocator.destroy(f);
+            },
             else => {},
         }
     }
@@ -105,6 +123,7 @@ pub const SelectCol = union(enum) {
     star,
     name: []const u8, // arena-owned: bare column name
     qual_name: QualifiedColRef, // arena-owned: table.col
+    expr: Expr, // computed expression, e.g. abs(n) or n + 1
 };
 
 pub const TableFunc = struct {
