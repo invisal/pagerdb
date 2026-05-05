@@ -150,7 +150,6 @@ pub const PlanError = error{
     ArgCountMismatch,
     OutOfMemory,
     NoDefaultValue,
-    JoinOnNonTable, // INNER JOIN currently only supports plain table refs
 };
 
 pub const LogicalPlanner = struct {
@@ -185,79 +184,24 @@ pub const LogicalPlanner = struct {
     // ── SELECT ─────────────────────────────────────────────────────────────────
 
     fn planSelect(self: *LogicalPlanner, stmt: ast.SelectStmt) PlanError!LogicalPlan {
-        // Build the leaf scan node and its schema from the table reference.
-        var scan_schema: Schema = undefined;
-        var current: LogicalPlan = switch (stmt.table_ref) {
-            .name => |qualified| blk: {
-                const table_name = qualified.name;
-
-                if (std.ascii.eqlIgnoreCase(qualified.schema orelse "main", "main")) {
-                    if (self.cat.getTable(table_name)) |meta| {
-                        scan_schema = try self.buildSchema(meta);
-                        break :blk LogicalPlan{ .seq_scan = .{ .table = scan_schema.table, .schema = scan_schema } };
-                    }
-                }
-
-                // Not a user table — try the vtab registry (zero-arg access).
-                const vt = vtab_mod.find(qualified.schema orelse "main", table_name) orelse return PlanError.TableNotFound;
-                if (vt.min_args > 0) return PlanError.ArgCountMismatch;
-
-                scan_schema = try self.buildVTabSchema(table_name, vt);
-                break :blk LogicalPlan{ .vtab_scan = .{
-                    .name = scan_schema.table,
-                    .args = &.{},
-                    .schema = scan_schema,
-                    .vtab = vt,
-                } };
-            },
-            .func => |f| blk: {
-                // For now, only support "main" schema (or default/null) for TVFs
-                if (f.schema) |schema| {
-                    if (!std.ascii.eqlIgnoreCase(schema, "main")) {
-                        return PlanError.TableNotFound;
-                    }
-                }
-                const vt = vtab_mod.find(f.schema orelse "main", f.name) orelse return PlanError.TableNotFound;
-                if (f.args.len < vt.min_args or f.args.len > vt.max_args)
-                    return PlanError.ArgCountMismatch;
-                const resolved_args = try self.resolveVTabArgs(f.args);
-                scan_schema = try self.buildVTabSchema(f.name, vt);
-                break :blk LogicalPlan{ .vtab_scan = .{
-                    .name = scan_schema.table,
-                    .args = resolved_args,
-                    .schema = scan_schema,
-                    .vtab = vt,
-                } };
-            },
-        };
+        const first = try self.buildScan(stmt.table_ref);
+        var scan_schema = first.schema;
+        var current = first.plan;
 
         // Build Join nodes for each INNER JOIN clause.  Each join merges the
         // accumulated schema on the left with the new table schema on the right,
         // offsetting right-side column indices so they don't collide with left-
         // side indices in the combined values array produced by JoinCursor.
         for (stmt.joins) |join_clause| {
-            const right_table_name = switch (join_clause.table_ref) {
-                .name => |q| q.name,
-                .func => return PlanError.JoinOnNonTable,
-            };
-            const right_meta = self.cat.getTable(right_table_name) orelse return PlanError.TableNotFound;
-            const right_schema_raw = try self.buildSchema(right_meta);
+            const right = try self.buildScan(join_clause.table_ref);
 
-            // Offset right-side column indices by the current left column count
-            // so each col_idx in the merged schema uniquely identifies a position
-            // in the combined values slice (left_vals ++ right_vals).
             const left_count = scan_schema.columns.len;
-            const merged_schema = try self.mergeSchemas(scan_schema, right_schema_raw, left_count);
-            const right_plan = LogicalPlan{ .seq_scan = .{
-                .table = right_schema_raw.table,
-                .schema = right_schema_raw,
-            } };
-
+            const merged_schema = try self.mergeSchemas(scan_schema, right.schema, left_count);
             const condition = try self.resolveExpr(join_clause.condition, merged_schema);
             const join_node = try self.alloc().create(Join);
             join_node.* = .{
                 .left = try self.box(current),
-                .right = try self.box(right_plan),
+                .right = try self.box(right.plan),
                 .condition = condition,
                 .schema = merged_schema,
             };
@@ -326,7 +270,7 @@ pub const LogicalPlanner = struct {
         const meta = self.cat.getTable(stmt.table) orelse
             return PlanError.TableNotFound;
 
-        const schema = try self.buildSchema(meta);
+        const schema = try self.buildSchema(meta, null);
         const col_count = meta.columns.len;
 
         const row_values = try self.alloc().alloc(Expr, col_count);
@@ -398,7 +342,7 @@ pub const LogicalPlanner = struct {
 
     fn planUpdate(self: *LogicalPlanner, stmt: ast.UpdateStmt) PlanError!LogicalPlan {
         const meta = self.cat.getTable(stmt.table) orelse return PlanError.TableNotFound;
-        const schema = try self.buildSchema(meta);
+        const schema = try self.buildSchema(meta, null);
 
         var input: LogicalPlan = .{ .seq_scan = .{ .table = schema.table, .schema = schema } };
 
@@ -433,7 +377,7 @@ pub const LogicalPlanner = struct {
 
     fn planDelete(self: *LogicalPlanner, stmt: ast.DeleteStmt) PlanError!LogicalPlan {
         const meta = self.cat.getTable(stmt.table) orelse return PlanError.TableNotFound;
-        const schema = try self.buildSchema(meta);
+        const schema = try self.buildSchema(meta, null);
 
         var input: LogicalPlan = .{ .seq_scan = .{ .table = schema.table, .schema = schema } };
 
@@ -568,8 +512,61 @@ pub const LogicalPlanner = struct {
         return resolved;
     }
 
-    fn buildSchema(self: *LogicalPlanner, meta: *catalog.TableMeta) PlanError!Schema {
-        const duped_name = try self.alloc().dupe(u8, meta.name);
+    // Turn a TableRef into a leaf scan node and its schema.  Used for both the
+    // FROM clause and each INNER JOIN right-hand side.
+    // SchemaCol.table is set to the alias (when present) so qualified column
+    // references resolve against the alias rather than the real table name.
+    // SeqScan.table always holds the real catalog name for execution.
+    const ScanResult = struct { plan: LogicalPlan, schema: Schema };
+    fn buildScan(self: *LogicalPlanner, ref: ast.TableRef) PlanError!ScanResult {
+        return switch (ref) {
+            .name => |q| blk: {
+                const effective = q.alias orelse q.name;
+                if (std.ascii.eqlIgnoreCase(q.schema orelse "main", "main")) {
+                    if (self.cat.getTable(q.name)) |meta| {
+                        const s = try self.buildSchema(meta, q.alias);
+                        break :blk ScanResult{
+                            .plan = .{ .seq_scan = .{
+                                .table = try self.alloc().dupe(u8, meta.name),
+                                .schema = s,
+                            } },
+                            .schema = s,
+                        };
+                    }
+                }
+                // Not a user table — try the vtab registry (zero-arg access).
+                const vt = vtab_mod.find(q.schema orelse "main", q.name) orelse return PlanError.TableNotFound;
+                if (vt.min_args > 0) return PlanError.ArgCountMismatch;
+                const s = try self.buildVTabSchema(effective, vt);
+                break :blk ScanResult{
+                    .plan = .{ .vtab_scan = .{ .name = s.table, .args = &.{}, .schema = s, .vtab = vt } },
+                    .schema = s,
+                };
+            },
+            .func => |f| blk: {
+                if (f.schema) |schema_name| {
+                    if (!std.ascii.eqlIgnoreCase(schema_name, "main")) return PlanError.TableNotFound;
+                }
+                const vt = vtab_mod.find(f.schema orelse "main", f.name) orelse return PlanError.TableNotFound;
+                if (f.args.len < vt.min_args or f.args.len > vt.max_args) return PlanError.ArgCountMismatch;
+                const resolved_args = try self.resolveVTabArgs(f.args);
+                const effective = f.alias orelse f.name;
+                const s = try self.buildVTabSchema(effective, vt);
+                break :blk ScanResult{
+                    .plan = .{ .vtab_scan = .{ .name = s.table, .args = resolved_args, .schema = s, .vtab = vt } },
+                    .schema = s,
+                };
+            },
+        };
+    }
+
+    // alias overrides the table name used in SchemaCol.table for qualified column
+    // resolution (e.g. SELECT u.id FROM users AS u).  Pass null for no alias.
+    // Note: SeqScan.table must still hold the real catalog name for execution;
+    // callers are responsible for setting that field from meta.name directly.
+    fn buildSchema(self: *LogicalPlanner, meta: *catalog.TableMeta, alias: ?[]const u8) PlanError!Schema {
+        const effective_name = alias orelse meta.name;
+        const duped_name = try self.alloc().dupe(u8, effective_name);
         const cols = try self.alloc().alloc(SchemaCol, meta.columns.len);
         for (meta.columns, 0..) |c, i| {
             cols[i] = .{
