@@ -111,11 +111,13 @@ pub const TableFunc = struct {
     schema: ?[]const u8, // arena-owned; null means default schema (main)
     name: []const u8, // arena-owned
     args: []Expr, // positional integer/string args
+    alias: ?[]const u8, // arena-owned; AS alias, or null if none
 };
 
 pub const QualifiedName = struct {
     schema: ?[]const u8, // arena-owned; null means default schema (main)
     name: []const u8, // arena-owned
+    alias: ?[]const u8, // arena-owned; AS alias, or null if none
 };
 
 pub const TableRef = union(enum) {

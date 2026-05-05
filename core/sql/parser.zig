@@ -156,7 +156,7 @@ pub const Parser = struct {
         _ = try self.expect(.kw_from);
         const qualified_name = try self.parseQualifiedName();
 
-        // Parse optional TVF args: FROM name(arg, ...) or schema.name(arg, ...)
+        // Parse optional TVF args and optional AS alias for the FROM table.
         const table_ref: ast.TableRef = if (self.peek().kind == .lparen) blk: {
             _ = self.advance();
             var args: std.ArrayList(ast.Expr) = .empty;
@@ -172,16 +172,43 @@ pub const Parser = struct {
                 .schema = qualified_name.schema,
                 .name = qualified_name.name,
                 .args = try args.toOwnedSlice(self.alloc()),
+                .alias = try self.parseOptionalAlias(),
             } };
-        } else .{ .name = qualified_name };
+        } else .{ .name = .{
+            .schema = qualified_name.schema,
+            .name = qualified_name.name,
+            .alias = try self.parseOptionalAlias(),
+        } };
 
-        // Parse optional INNER JOIN clauses
+        // Parse optional INNER JOIN clauses. Each right-hand side can be a plain
+        // table or a TVF, both with an optional AS alias.
         var joins: std.ArrayList(ast.JoinClause) = .empty;
         while (self.peek().kind == .kw_inner) {
             _ = self.advance(); // consume INNER
             _ = try self.expect(.kw_join);
-            const join_table_name = try self.parseQualifiedName();
-            const join_table_ref: ast.TableRef = .{ .name = join_table_name };
+            const join_qname = try self.parseQualifiedName();
+            const join_table_ref: ast.TableRef = if (self.peek().kind == .lparen) blk: {
+                _ = self.advance();
+                var args: std.ArrayList(ast.Expr) = .empty;
+                if (self.peek().kind != .rparen) {
+                    while (true) {
+                        try args.append(self.alloc(), try self.parseExpr());
+                        if (self.peek().kind != .comma) break;
+                        _ = self.advance();
+                    }
+                }
+                _ = try self.expect(.rparen);
+                break :blk .{ .func = .{
+                    .schema = join_qname.schema,
+                    .name = join_qname.name,
+                    .args = try args.toOwnedSlice(self.alloc()),
+                    .alias = try self.parseOptionalAlias(),
+                } };
+            } else .{ .name = .{
+                .schema = join_qname.schema,
+                .name = join_qname.name,
+                .alias = try self.parseOptionalAlias(),
+            } };
             _ = try self.expect(.kw_on);
             const condition = try self.parseExpr();
             try joins.append(self.alloc(), .{ .table_ref = join_table_ref, .condition = condition });
@@ -202,7 +229,8 @@ pub const Parser = struct {
     }
 
     // Parse a qualified name: identifier or identifier.identifier
-    // Returns the qualified name with optional schema (null if not specified)
+    // Returns the qualified name with optional schema (null if not specified).
+    // Alias is always null here; callers parse AS separately.
     fn parseQualifiedName(self: *Parser) ParseError!ast.QualifiedName {
         const first_tok = try self.expect(.identifier);
         const first_name = try self.alloc().dupe(u8, self.tokenText(first_tok));
@@ -215,6 +243,7 @@ pub const Parser = struct {
             return ast.QualifiedName{
                 .schema = first_name, // first identifier is schema
                 .name = second_name, // second identifier is table
+                .alias = null,
             };
         }
 
@@ -222,7 +251,19 @@ pub const Parser = struct {
         return ast.QualifiedName{
             .schema = null,
             .name = first_name,
+            .alias = null,
         };
+    }
+
+    // Consume an optional AS alias: [ AS ] identifier.
+    // Returns the alias string, or null if no alias follows.
+    fn parseOptionalAlias(self: *Parser) ParseError!?[]const u8 {
+        if (self.peek().kind == .kw_as) _ = self.advance();
+        if (self.peek().kind == .identifier) {
+            const tok = self.advance();
+            return try self.alloc().dupe(u8, self.tokenText(tok));
+        }
+        return null;
     }
 
     // ── INSERT ────────────────────────────────────────────────────────────────
