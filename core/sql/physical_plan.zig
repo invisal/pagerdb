@@ -24,7 +24,7 @@ pub const PhysicalFilter = struct {
 
 pub const PhysicalProject = struct {
     input: PhysicalPlan,
-    col_indices: []usize,
+    exprs: []lp.Expr,
     schema: lp.Schema,
 };
 
@@ -157,7 +157,7 @@ pub const PhysicalPlanner = struct {
         const proj = try self.alloc().create(PhysicalProject);
         proj.* = .{
             .input = phys_input.*,
-            .col_indices = node.col_indices,
+            .exprs = node.exprs,
             .schema = node.schema,
         };
         return .{ .project = proj };
@@ -326,7 +326,7 @@ test "rowid equality filter becomes PointLookup" {
     try std.testing.expectEqualStrings("t", pp.point_lookup.table);
 }
 
-test "Project carries through col_indices" {
+test "Project carries through exprs" {
     const io = std.testing.io;
     const path = "/tmp/test_pp_project.db";
     defer Dir.deleteFile(.cwd(), io, path) catch {};
@@ -348,9 +348,9 @@ test "Project carries through col_indices" {
 
     const pp = try makePlan("SELECT a, c FROM t", alloc, &lplanner, &pplanner);
     try std.testing.expectEqual(std.meta.Tag(PhysicalPlan).project, std.meta.activeTag(pp));
-    try std.testing.expectEqual(@as(usize, 2), pp.project.col_indices.len);
-    try std.testing.expectEqual(@as(usize, 0), pp.project.col_indices[0]);
-    try std.testing.expectEqual(@as(usize, 2), pp.project.col_indices[1]);
+    try std.testing.expectEqual(@as(usize, 2), pp.project.exprs.len);
+    try std.testing.expectEqual(@as(usize, 0), pp.project.exprs[0].col_idx);
+    try std.testing.expectEqual(@as(usize, 2), pp.project.exprs[1].col_idx);
 }
 
 test "INSERT physical plan preserves values" {

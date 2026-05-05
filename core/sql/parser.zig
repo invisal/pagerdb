@@ -136,18 +136,17 @@ pub const Parser = struct {
             _ = self.advance();
             // empty list signals SELECT *
         } else {
+            // Parse each SELECT column as a full expression, then classify:
+            // plain col_ref  → .name, qual_col_ref → .qual_name, anything
+            // else (func_call, binary, etc.) → .expr for computed columns.
             while (true) {
-                const tok = try self.expect(.identifier);
-                const name = try self.alloc().dupe(u8, self.tokenText(tok));
-                // Handle table.col qualified references in SELECT list
-                if (self.peek().kind == .dot) {
-                    _ = self.advance();
-                    const col_tok = try self.expect(.identifier);
-                    const col_name = try self.alloc().dupe(u8, self.tokenText(col_tok));
-                    try columns.append(self.alloc(), .{ .qual_name = .{ .table = name, .col = col_name } });
-                } else {
-                    try columns.append(self.alloc(), .{ .name = name });
-                }
+                const e = try self.parseExpr();
+                const col = switch (e) {
+                    .col_ref => |n| ast.SelectCol{ .name = n },
+                    .qual_col_ref => |q| ast.SelectCol{ .qual_name = q },
+                    else => ast.SelectCol{ .expr = e },
+                };
+                try columns.append(self.alloc(), col);
                 if (self.peek().kind != .comma) break;
                 _ = self.advance();
             }
@@ -587,6 +586,22 @@ pub const Parser = struct {
             .identifier => {
                 _ = self.advance();
                 const name = try self.alloc().dupe(u8, self.tokenText(tok));
+                // Function call: name(arg, ...)
+                if (self.peek().kind == .lparen) {
+                    _ = self.advance();
+                    var args: std.ArrayList(ast.Expr) = .empty;
+                    if (self.peek().kind != .rparen) {
+                        try args.append(self.alloc(), try self.parseExpr());
+                        while (self.peek().kind == .comma) {
+                            _ = self.advance();
+                            try args.append(self.alloc(), try self.parseExpr());
+                        }
+                    }
+                    _ = try self.expect(.rparen);
+                    const node = try self.alloc().create(ast.Expr.FuncCall);
+                    node.* = .{ .name = name, .args = try args.toOwnedSlice(self.alloc()) };
+                    return .{ .func_call = node };
+                }
                 // Handle table.col qualified references in expressions
                 if (self.peek().kind == .dot) {
                     _ = self.advance();

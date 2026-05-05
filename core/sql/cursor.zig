@@ -99,14 +99,17 @@ pub const FilterCursor = struct {
 
 pub const ProjectCursor = struct {
     input: *Cursor,
-    col_indices: []usize,
+    exprs: []lp.Expr,
 
     pub fn next(self: *ProjectCursor, a: Allocator) !?[]Row {
         const batch = try self.input.next(a) orelse return null;
         const out = try a.alloc(Row, batch.len);
         for (batch, 0..) |r, i| {
-            const projected = try a.alloc(row_mod.Value, self.col_indices.len);
-            for (self.col_indices, 0..) |idx, j| projected[j] = r.values[idx];
+            const projected = try a.alloc(row_mod.Value, self.exprs.len);
+            for (self.exprs, 0..) |expr, j| {
+                const v = try eval.evalExpr(expr, r.values, a);
+                projected[j] = evalValueToRowValue(v);
+            }
             out[i] = .{ .rowid = r.rowid, .values = projected };
         }
         return out;
@@ -117,6 +120,16 @@ pub const ProjectCursor = struct {
         a.destroy(self.input);
     }
 };
+
+fn evalValueToRowValue(v: eval.EvalValue) row_mod.Value {
+    return switch (v) {
+        .int => |n| .{ .int = n },
+        .real => |f| .{ .real = f },
+        .text => |s| .{ .text = s },
+        .bool_ => |b| .{ .int = if (b) 1 else 0 },
+        .null_ => .null,
+    };
+}
 
 // ── Join cursor ────────────────────────────────────────────────────────────────
 
@@ -218,7 +231,7 @@ pub const Cursor = union(enum) {
                 const pc = try a.create(ProjectCursor);
                 pc.input = try a.create(Cursor);
                 pc.input.* = try open(n.input, db, a);
-                pc.col_indices = n.col_indices;
+                pc.exprs = n.exprs;
                 break :blk .{ .project = pc };
             },
             .join => |n| blk: {

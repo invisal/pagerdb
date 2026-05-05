@@ -1,23 +1,17 @@
 const std = @import("std");
 const row = @import("../row.zig");
 const lp = @import("logical_plan.zig");
+const sf = @import("scalar_func.zig");
+const types = @import("types.zig");
 
-pub const EvalValue = union(enum) {
-    int: i64,
-    real: f64,
-    text: []const u8, // not owned — points into row data or a literal
-    bool_: bool,
-    null_: void,
-};
-
-pub const EvalError = error{ TypeMismatch, DivisionByZero };
+pub const EvalValue = types.EvalValue;
+pub const EvalError = types.EvalError;
 
 pub fn evalExpr(
     expr: lp.Expr,
     row_values: []const row.Value,
     alloc: std.mem.Allocator,
 ) EvalError!EvalValue {
-    _ = alloc;
     return switch (expr) {
         .int_lit => |v| .{ .int = v },
         .float_lit => |v| .{ .real = v },
@@ -27,6 +21,7 @@ pub fn evalExpr(
         .col_idx => |i| rowValToEval(row_values[i]),
         .binary => |b| try evalBinary(b, row_values),
         .unary => |u| try evalUnary(u, row_values),
+        .func_call => |f| try evalFunc(f, row_values, alloc),
     };
 }
 
@@ -119,6 +114,20 @@ fn evalUnary(
             else => EvalError.TypeMismatch,
         },
     };
+}
+
+fn evalFunc(
+    f: *lp.Expr.FuncCall,
+    row_values: []const row.Value,
+    alloc: std.mem.Allocator,
+) EvalError!EvalValue {
+    // Evaluate each argument expression, then hand the values to the function
+    // implementation.  A small stack buffer covers the common case of low-arity
+    // functions without heap allocation.
+    var buf: [8]EvalValue = undefined;
+    const evaled = buf[0..f.args.len];
+    for (f.args, 0..) |arg, i| evaled[i] = try evalExpr(arg, row_values, alloc);
+    return f.func.eval(evaled);
 }
 
 fn compareValues(a: EvalValue, b: EvalValue) std.math.Order {
@@ -235,5 +244,34 @@ test "evalExpr NULL propagation" {
     const vals = [_]row.Value{.null};
     var b = lp.Expr.Binary{ .op = .eq, .left = .{ .col_idx = 0 }, .right = .{ .int_lit = 5 } };
     const result = try evalExpr(.{ .binary = &b }, &vals, alloc);
+    try std.testing.expect(result == .null_);
+}
+
+test "abs() on integers" {
+    const alloc = std.testing.allocator;
+    const vals: []const row.Value = &.{};
+    var args_neg = [_]lp.Expr{.{ .int_lit = -42 }};
+    var args_pos = [_]lp.Expr{.{ .int_lit = 7 }};
+    var f_neg = lp.Expr.FuncCall{ .func = sf.find("abs").?, .args = &args_neg };
+    var f_pos = lp.Expr.FuncCall{ .func = sf.find("abs").?, .args = &args_pos };
+    try std.testing.expectEqual(@as(i64, 42), (try evalExpr(.{ .func_call = &f_neg }, vals, alloc)).int);
+    try std.testing.expectEqual(@as(i64, 7), (try evalExpr(.{ .func_call = &f_pos }, vals, alloc)).int);
+}
+
+test "abs() on reals" {
+    const alloc = std.testing.allocator;
+    const vals: []const row.Value = &.{};
+    var args = [_]lp.Expr{.{ .float_lit = -3.14 }};
+    var f = lp.Expr.FuncCall{ .func = sf.find("abs").?, .args = &args };
+    const result = try evalExpr(.{ .func_call = &f }, vals, alloc);
+    try std.testing.expectApproxEqAbs(@as(f64, 3.14), result.real, 1e-9);
+}
+
+test "abs() on NULL" {
+    const alloc = std.testing.allocator;
+    const vals: []const row.Value = &.{};
+    var args = [_]lp.Expr{.{ .null_lit = {} }};
+    var f = lp.Expr.FuncCall{ .func = sf.find("abs").?, .args = &args };
+    const result = try evalExpr(.{ .func_call = &f }, vals, alloc);
     try std.testing.expect(result == .null_);
 }
