@@ -38,7 +38,7 @@ fn cursorNext(ptr: *anyopaque, alloc: std.mem.Allocator) anyerror!?[]root.Value 
     return vals;
 }
 
-pub fn open(cat: *Catalog, args: []const i64, alloc: std.mem.Allocator) anyerror!root.VTabCursor {
+pub fn open(cat: *Catalog, args: []const root.Value, alloc: std.mem.Allocator) anyerror!root.VTabCursor {
     _ = args;
     const cur = try alloc.create(PagesCursor);
     cur.* = .{ .cat = cat, .page_id = 0 };

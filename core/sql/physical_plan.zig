@@ -49,7 +49,7 @@ pub const PhysicalDelete = struct {
 
 pub const PhysicalVTabScan = struct {
     vtab: *const vtab_mod.VTab,
-    args: []const i64,
+    args: []const vtab_mod.Value,
     schema: lp.Schema,
 };
 
