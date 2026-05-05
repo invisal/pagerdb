@@ -19,6 +19,7 @@ test {
     _ = @import("pager/disk.zig");
     _ = @import("pager/memory.zig");
     _ = @import("page0.zig");
+    _ = @import("undo_log.zig");
     _ = @import("row.zig");
     _ = @import("btree.zig");
     _ = @import("overflow.zig");

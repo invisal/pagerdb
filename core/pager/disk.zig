@@ -34,12 +34,19 @@ pub const DiskPager = struct {
     tick: u64,
     fault_after: ?u32 = null,
     fault_write_count: u32 = 0,
+    // No-steal: when true, dirty frames are not evicted during pool pressure.
+    // This keeps data pages in the buffer pool until commit, so the database
+    // file always reflects only committed state.
+    txn_active: bool = false,
 
     const vtable = Pager.VTable{
         .readPage = diskReadPage,
         .writePage = diskWritePage,
         .flush = diskFlush,
         .close = diskClose,
+        .flushPage = diskFlushPage,
+        .beginTxn = diskBeginTxn,
+        .endTxn = diskEndTxn,
     };
 
     pub fn create(allocator: Allocator, io: Io, path: []const u8, config: Config) !Pager {
@@ -56,6 +63,7 @@ pub const DiskPager = struct {
             .free_list_head = 0,
             .sys_tables_root = 0,
             .sys_columns_root = 0,
+            .undo_head = 0,
         };
         const blank = [_]u8{0} ** t.PAGE_SIZE;
         try file.writeStreamingAll(io, &blank);
@@ -79,12 +87,14 @@ pub const DiskPager = struct {
             .free_list_head = 0,
             .sys_tables_root = 0,
             .sys_columns_root = 0,
+            .undo_head = 0,
         };
         const h = try page0.readHeader(&pager);
         try page0.validateHeader(h);
         pager.free_list_head = h.free_list_head;
         pager.sys_tables_root = h.sys_tables_root;
         pager.sys_columns_root = h.sys_columns_root;
+        pager.undo_head = h.undo_head;
         return pager;
     }
 
@@ -116,16 +126,22 @@ pub const DiskPager = struct {
     //   2) With small pool sizes, a linear scan is O(n) and simpler than a heap
     //   3) Tick comparison is branch-predictor friendly on modern CPUs
     // If the chosen frame is dirty, its contents are written back to disk.
+    //
+    // No-steal: when txn_active is true, dirty frames are skipped.  This keeps
+    // all data page changes in the buffer pool until commit, so the database
+    // file always reflects the last committed state.
     fn poolEvict(self: *DiskPager) !*Frame {
-        var oldest: *Frame = &self.pool[0];
-        for (self.pool[1..]) |*frame| {
-            if (frame.lru_tick < oldest.lru_tick) oldest = frame;
+        var oldest: ?*Frame = null;
+        for (self.pool) |*frame| {
+            if (self.txn_active and frame.dirty) continue;
+            if (oldest == null or frame.lru_tick < oldest.?.lru_tick) oldest = frame;
         }
-        if (oldest.dirty) {
-            try self.writePageRaw(oldest.page_id, &oldest.data);
-            oldest.dirty = false;
+        const f = oldest orelse return error.BufferPoolFull;
+        if (f.dirty) {
+            try self.writePageRaw(f.page_id, &f.data);
+            f.dirty = false;
         }
-        return oldest;
+        return f;
     }
 
     fn readPageRaw(self: *DiskPager, page_id: u32, buf: *[t.PAGE_SIZE]u8) !void {
@@ -186,6 +202,29 @@ pub const DiskPager = struct {
             }
         }
         try self.file.sync(self.io);
+    }
+
+    // Write a single dirty frame directly to disk without flushing the whole pool.
+    // Used by the undo log to make each record durable before any data page changes.
+    fn diskFlushPage(ptr: *anyopaque, page_id: u32) anyerror!void {
+        const self: *DiskPager = @ptrCast(@alignCast(ptr));
+        if (self.poolFind(page_id)) |frame| {
+            if (frame.dirty) {
+                try self.writePageRaw(frame.page_id, &frame.data);
+                frame.dirty = false;
+            }
+        }
+        // If not in pool the page is already on disk; nothing to do.
+    }
+
+    fn diskBeginTxn(ptr: *anyopaque) void {
+        const self: *DiskPager = @ptrCast(@alignCast(ptr));
+        self.txn_active = true;
+    }
+
+    fn diskEndTxn(ptr: *anyopaque) void {
+        const self: *DiskPager = @ptrCast(@alignCast(ptr));
+        self.txn_active = false;
     }
 
     fn diskClose(ptr: *anyopaque) void {

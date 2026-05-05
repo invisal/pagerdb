@@ -17,6 +17,9 @@ pub const InMemoryPager = struct {
         .writePage = memWritePage,
         .flush = memFlush,
         .close = memClose,
+        .flushPage = memFlushPage,
+        .beginTxn = memBeginTxn,
+        .endTxn = memEndTxn,
     };
 
     pub fn create(allocator: Allocator) !Pager {
@@ -32,6 +35,7 @@ pub const InMemoryPager = struct {
             .free_list_head = 0,
             .sys_tables_root = 0,
             .sys_columns_root = 0,
+            .undo_head = 0,
         };
     }
 
@@ -49,6 +53,19 @@ pub const InMemoryPager = struct {
     fn memFlush(ptr: *anyopaque, p: *Pager) anyerror!void {
         _ = ptr;
         _ = p;
+    }
+
+    fn memFlushPage(ptr: *anyopaque, page_id: u32) anyerror!void {
+        _ = ptr;
+        _ = page_id;
+    }
+
+    fn memBeginTxn(ptr: *anyopaque) void {
+        _ = ptr;
+    }
+
+    fn memEndTxn(ptr: *anyopaque) void {
+        _ = ptr;
     }
 
     fn memClose(ptr: *anyopaque) void {

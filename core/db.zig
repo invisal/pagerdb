@@ -7,6 +7,7 @@ const row = @import("row.zig");
 const catalog = @import("catalog.zig");
 const overflow = @import("overflow.zig");
 const txn_mod = @import("txn.zig");
+const undo_log_mod = @import("undo_log.zig");
 
 // Database handle.  Must be heap-allocated (via init() or load()) because
 // catalog.pager is a pointer that must remain valid for the lifetime of the
@@ -34,6 +35,8 @@ pub const Db = struct {
     }
 
     // Load the catalog from a pager that already contains database pages.
+    // If pager.undo_head is non-zero the previous process crashed mid-transaction;
+    // recoverIfNeeded() frees the orphaned undo pages before the catalog is read.
     pub fn load(pager: Pager, allocator: std.mem.Allocator) !*Db {
         const db = try allocator.create(Db);
         errdefer allocator.destroy(db);
@@ -41,8 +44,20 @@ pub const Db = struct {
         db.pager = pager;
         db.cat = catalog.Catalog.init(allocator, &db.pager);
         db.txn = null;
+        try db.recoverIfNeeded();
         try db.cat.load();
         return db;
+    }
+
+    // If the previous session crashed mid-transaction, undo_head points to an
+    // orphaned undo page chain.  With the no-steal policy, data pages were never
+    // flushed during the transaction, so the database file is already in its last
+    // committed state — only the undo pages need to be freed and the header reset.
+    fn recoverIfNeeded(self: *Db) !void {
+        if (self.pager.undo_head == 0) return;
+        var ul = undo_log_mod.UndoLog.fromHead(&self.pager, self.pager.undo_head);
+        try ul.discard();
+        try self.pager.flush();
     }
 
     // Flush dirty pages, close the file, free catalog memory, and destroy self.
@@ -57,22 +72,29 @@ pub const Db = struct {
 
     // Begin an explicit transaction.  DML operations will be buffered in the
     // undo log and the pager will not be flushed until commit() is called.
+    // An undo log page chain is started and force-flushed to disk so that a
+    // crash before commit() is detectable on next open (pager.undo_head != 0).
     pub fn begin(self: *Db) !void {
         if (self.txn != null) return error.TransactionAlreadyActive;
         self.txn = txn_mod.Transaction.init(self.allocator);
+        self.txn.?.log_file = try undo_log_mod.UndoLog.begin(&self.pager);
+        // Pin dirty frames so data pages cannot reach disk before commit.
+        self.pager.beginTxn();
     }
 
-    // Commit the active transaction: flush all dirty pages to disk and discard
-    // the undo log.
+    // Commit the active transaction: free the undo log pages (setting undo_head=0)
+    // then flush all dirty data pages and the updated header together.
     pub fn commit(self: *Db) !void {
         if (self.txn == null) return error.NoActiveTransaction;
+        if (self.txn.?.log_file) |*lf| try lf.discard();
+        self.pager.endTxn();
         try self.pager.flush();
         self.txn.?.deinit();
         self.txn = null;
     }
 
-    // Roll back the active transaction by replaying the undo log in reverse,
-    // then flush the reverted state to disk.
+    // Roll back the active transaction by replaying the in-memory undo log in
+    // reverse, then free the disk undo pages and flush the reverted state.
     pub fn rollback(self: *Db) !void {
         if (self.txn == null) return error.NoActiveTransaction;
 
@@ -100,6 +122,8 @@ pub const Db = struct {
             }
         }
 
+        if (self.txn.?.log_file) |*lf| try lf.discard();
+        self.pager.endTxn();
         try self.pager.flush();
         self.txn.?.deinit();
         self.txn = null;

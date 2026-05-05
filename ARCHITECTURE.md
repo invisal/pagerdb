@@ -49,9 +49,14 @@ Key operations:
 | `open(path)` | Reads the header, restores `total_pages` and catalog roots |
 | `readPage(id, buf)` | LRU cache read; loads from disk on miss |
 | `writePage(id, buf)` | Writes into cache, marks frame dirty |
+| `flushPage(id)` | Writes a single dirty frame directly to disk (used for undo pages) |
 | `allocPage()` | Returns page ID from free list or new tail |
 | `freePage(id)` | Pushes page onto free list |
 | `flush()` | Writes all dirty frames to disk, re-writes the header, calls `fsync` |
+| `beginTxn()` | Marks a transaction active; enables the no-steal eviction policy |
+| `endTxn()` | Clears the active-transaction flag; re-enables normal eviction |
+
+**No-steal policy**: While a transaction is active, dirty frames are not evicted from the buffer pool. This guarantees the database file always reflects a committed state — dirty pages from an in-progress transaction never reach disk before commit. If the process crashes, the file is self-consistent at the last commit point, so crash recovery only needs to free orphaned undo pages rather than replay any data changes.
 
 ### Database Header (`src/page0.zig`)
 
@@ -68,10 +73,13 @@ Offset  Size  Field
 16      4     free_list_head  (0 = empty)
 20      4     sys_tables_root  (root page of __tables B-tree)
 24      4     sys_columns_root (root page of __columns B-tree)
-28      36    reserved
+28      4     undo_head  (0 = clean; non-zero = crash recovery needed)
+32      32    reserved
 ```
 
 `flush()` always rewrites this header so catalog roots are always recoverable after a clean shutdown.
+
+`undo_head` is the key crash-recovery signal: a non-zero value on open means the previous process was mid-transaction when it died. See the Transaction System section for how this is handled.
 
 ---
 
@@ -157,6 +165,56 @@ OverflowPage layout (8,192 bytes):
 
 ---
 
+## Undo Pages (`core/undo_log.zig`)
+
+Undo records are stored in a linked chain of `UndoPage` pages inside the database file — the same layout as overflow pages but with page type `undo = 5`.
+
+```
+UndoPage layout (8,192 bytes):
+  PageHeader (16 bytes)
+  next_page  (u32)   — ID of next undo page, or 0 if last
+  data_len   (u16)   — bytes of valid record data written so far
+  _pad       (u16)
+  data       (8,168 bytes)
+```
+
+The head page ID is stored in `pager.undo_head` and written to the database header at `begin()`. A value of zero means no active transaction; non-zero signals that crash recovery is needed.
+
+### Record Wire Format
+
+Records are packed sequentially into `data[]`. All integers are little-endian:
+
+```
+type:          u8   (1=insert, 2=delete, 3=update)
+table_len:     u16
+table:         [table_len]u8
+rowid:         u64
+row_bytes_len: u32  (0 for insert)
+row_bytes:     [row_bytes_len]u8
+```
+
+### Force-Flush Protocol
+
+Every undo record is flushed to disk via `flushPage()` *before* the corresponding B-tree mutation is applied. This ensures undo records survive a crash even though data pages are pinned in the buffer pool (no-steal) and won't reach disk until commit:
+
+```
+Per DML operation:
+  1. undo_log.append(entry)  →  serialize + flushPage  (durable)
+  2. btree operation          →  writePage  (stays in buffer pool, pinned)
+```
+
+### `UndoLog` API
+
+| Method | Description |
+|---|---|
+| `begin(pager)` | Allocates the first undo page, force-flushes it, writes `undo_head` to the header and flushes page 0 |
+| `append(entry)` | Serializes and appends a record; allocates a new undo page if the current one is full; force-flushes |
+| `fromHead(pager, head)` | Reconstructs an `UndoLog` from an existing page chain (crash recovery) |
+| `readAll(alloc)` | Deserializes all records from the chain into a heap slice |
+| `discard()` | Frees all undo pages and sets `undo_head = 0`; caller must call `pager.flush()` afterwards |
+
+---
+
 ## Row Encoding (`src/row.zig`)
 
 Rows are encoded into a compact binary format before being handed to the B-tree.
@@ -231,9 +289,9 @@ When no explicit transaction is open (`txn == null`), every DML call flushes the
 
 ---
 
-## Transaction System (`core/txn.zig`)
+## Transaction System (`core/txn.zig`, `core/undo_log.zig`)
 
-PagerDB uses a **logical undo log** to provide atomicity. Before each mutation, the inverse operation is recorded in memory. If the transaction is rolled back, the log is replayed in reverse to restore the previous state.
+PagerDB uses a **logical undo log** stored on disk to provide atomicity and crash recovery. Before each mutation, the inverse operation is serialized into an undo page chain inside the database file. On rollback or crash recovery, the log is replayed in reverse to restore the previous state.
 
 ### Undo Log Entries
 
@@ -244,26 +302,57 @@ UndoEntry (union):
   update  → { table, rowid, old_row_bytes } undo = delete + re-insert old bytes
 ```
 
-All strings and byte slices captured for undo live in a per-transaction `ArenaAllocator`. On commit or rollback the entire arena is freed in one call — no per-entry cleanup.
+Entries are kept in both an in-memory list (for rollback replay within the same session) and the on-disk undo page chain (for crash recovery on next open). The in-memory copies live in a per-transaction `ArenaAllocator` and are freed atomically on commit or rollback.
 
 ### Transaction Lifecycle
 
 ```
-begin()   — error if already active; initialise Transaction{arena, log}
+begin()
+  │   allocate first undo page → force-flush to disk
+  │   write undo_head to header → force-flush page 0
+  │   pager.beginTxn() — enable no-steal eviction policy
   │
-  ├─ insert() → btree.insert; log UndoEntry.insert
-  ├─ delete() → lookup old bytes; btree.delete; log UndoEntry.delete
-  └─ update() → lookup old bytes; btree.delete + btree.insert; log UndoEntry.update
+  ├─ insert() → undo_log.append(UndoEntry.insert) → btree.insert
+  ├─ delete() → lookup old bytes → undo_log.append(UndoEntry.delete) → btree.delete
+  └─ update() → lookup old bytes → undo_log.append(UndoEntry.update) → btree delete+insert
   │
-  ├─ commit()   — pager.flush(); arena.deinit(); txn = null
-  └─ rollback() — iterate log in reverse; apply inverse btree ops;
-                  pager.flush(); arena.deinit(); txn = null
+  ├─ commit()
+  │     undo_log.discard()   — free undo pages, set undo_head = 0
+  │     pager.endTxn()       — disable no-steal; allow dirty evictions again
+  │     pager.flush()        — write data pages + updated header in one fsync
+  │     arena.deinit()
+  │
+  └─ rollback()
+        replay in-memory log in reverse → apply inverse btree ops
+        undo_log.discard()   — free undo pages, set undo_head = 0
+        pager.endTxn()
+        pager.flush()        — write restored pages + header in one fsync
+        arena.deinit()
 ```
+
+### Crash Recovery
+
+When `Db.load()` opens a database and finds `pager.undo_head != 0`, the previous session crashed mid-transaction. Recovery is straightforward because of the no-steal guarantee:
+
+1. Data pages from the crashed transaction were never evicted, so the database file is still in the state of the last *committed* transaction.
+2. The only cleanup needed is freeing the orphaned undo page chain and resetting `undo_head = 0`.
+
+```
+Db.load()
+  └─ recoverIfNeeded()
+       if undo_head == 0: return (already clean)
+       ul = UndoLog.fromHead(undo_head)
+       ul.discard()    — free undo pages, undo_head = 0
+       pager.flush()   — persist the clean state
+```
+
+No data replay is required — crash recovery is O(undo page count), not O(transaction size).
 
 ### Design Choices
 
-- **Logical undo, not physical**: entries record row-level inverses (re-insert old bytes) rather than byte-level page diffs. This keeps the log small and implementation simple, at the cost of requiring the B-tree to be in a consistent state during replay.
-- **In-memory only**: the undo log is not written to disk. A crash during an uncommitted transaction leaves the database in an inconsistent state — pages flushed mid-transaction may not be rolled back on next open. Durability requires WAL (redo log), which is the planned next step.
+- **Logical undo, not physical**: entries record row-level inverses (re-insert old bytes) rather than byte-level page diffs. This keeps the log compact and the implementation simple, at the cost of requiring the B-tree to be in a consistent state during replay.
+- **No-steal + force-flush**: dirty data pages never reach disk before commit (no-steal); undo pages are flushed to disk before any data change (force). Together these two invariants make crash recovery trivially simple — no redo pass is ever needed.
+- **Atomic commit**: `undo_log.discard()` resets `undo_head = 0` in memory; a single subsequent `pager.flush()` writes data pages, the updated free list, and the zero `undo_head` to disk in one `fsync`. There is no window between "data written" and "undo cleared."
 - **rowid counter is not rolled back**: after a rolled-back INSERT the rowid counter stays advanced. Gaps in rowid sequences are acceptable.
 - **Auto-commit**: when `txn == null`, each DML op calls `pager.flush()` immediately, preserving the original one-op-per-fsync behaviour.
 
@@ -389,7 +478,8 @@ To add a new virtual table: implement a `scan` function, add a `VTab` descriptor
 |---|---|
 | Pager buffer pool | Fixed 64-frame array, stack allocated inside `Pager` |
 | Catalog strings | Heap-allocated via `allocator.dupe()`, freed on `close()` |
-| Transaction undo log | `ArenaAllocator` per transaction; freed atomically on commit or rollback |
+| Transaction undo log (in-memory) | `ArenaAllocator` per transaction; freed atomically on commit or rollback |
+| Transaction undo log (on-disk) | `UndoPage` chain in the database file; freed by `UndoLog.discard()` at commit/rollback/recovery |
 | Parse / plan pass | `ArenaAllocator`, freed immediately after query execution |
 | Result set | `ArenaAllocator` inside `ResultSet`, freed by `deinit()` |
 
@@ -403,7 +493,7 @@ No garbage collection. Every allocation is paired with a deterministic free.
 PAGE_SIZE          = 8_192
 OVERFLOW_THRESHOLD = 2_048   // PAGE_SIZE / 4
 
-PageType: enum(u8) { btree_internal=1, btree_leaf=2, overflow=3, free=4 }
+PageType: enum(u8) { btree_internal=1, btree_leaf=2, overflow=3, free=4, undo=5 }
 ColType:  enum(u8) { int=0, real=1, text=2, blob=3 }
 ```
 
@@ -413,11 +503,12 @@ All on-disk structures use `extern struct` for a fixed, predictable layout.
 
 ## Known Limitations
 
-1. **No WAL / crash recovery** — the undo log is in-memory only. A crash mid-transaction can leave dirty pages on disk with no way to roll them back on reopen. Durability requires a redo log (WAL), which is the planned next step.
-2. **No nested transactions** — `BEGIN` inside an active transaction returns `error.TransactionAlreadyActive`. Savepoints are not supported.
-3. **DDL is not transactional** — `CREATE TABLE` calls `pager.flush()` immediately regardless of whether a transaction is open.
-4. **No root internal-node split** — B-trees cannot grow past a single level of internal nodes (`NotImplementedYet` error).
-5. **No secondary indexes** — all searches are by rowid; range and equality scans on non-rowid columns require a full table scan.
-6. **No aggregates** — `COUNT`, `SUM`, `AVG`, etc. are not implemented.
-7. **No `ORDER BY`, `GROUP BY`, or `JOIN`** — single-table queries only.
-8. **No function calls in SQL** — only `_rowid_` pseudo-column is special-cased.
+1. **No MVCC / concurrent readers** — there is no multi-version concurrency control. Only one writer and no concurrent readers are supported; all reads happen against the current committed state.
+2. **No WAL / redo log** — the undo log provides atomicity and crash recovery (via no-steal), but not durability for *committed* writes beyond what `fsync` on commit provides. There is no redo path; if `fsync` itself fails, the committed write may be lost.
+3. **No nested transactions** — `BEGIN` inside an active transaction returns `error.TransactionAlreadyActive`. Savepoints are not supported.
+4. **DDL is not transactional** — `CREATE TABLE` calls `pager.flush()` immediately regardless of whether a transaction is open.
+5. **No root internal-node split** — B-trees cannot grow past a single level of internal nodes (`NotImplementedYet` error).
+6. **No secondary indexes** — all searches are by rowid; range and equality scans on non-rowid columns require a full table scan.
+7. **No aggregates** — `COUNT`, `SUM`, `AVG`, etc. are not implemented.
+8. **No `ORDER BY`, `GROUP BY`, or `JOIN`** — single-table queries only.
+9. **No function calls in SQL** — only `_rowid_` pseudo-column is special-cased.

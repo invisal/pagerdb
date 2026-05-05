@@ -1,33 +1,31 @@
 const std = @import("std");
+const undo_log_mod = @import("undo_log.zig");
 
-// Each entry records what is needed to reverse one DML operation.
-// Strings and byte slices point into the transaction's own arena
-// and are freed atomically when the transaction ends.
-pub const UndoEntry = union(enum) {
-    // Undo an INSERT: delete the row that was inserted.
-    insert: struct { table: []const u8, rowid: u64 },
-    // Undo a DELETE: re-insert the original row bytes at the same rowid.
-    delete: struct { table: []const u8, rowid: u64, row_bytes: []const u8 },
-    // Undo an UPDATE: discard the new row, restore the original bytes.
-    update: struct { table: []const u8, rowid: u64, old_row_bytes: []const u8 },
-};
+// Re-export so callers that already import txn.zig keep working.
+pub const UndoEntry = undo_log_mod.UndoEntry;
+pub const UndoLog = undo_log_mod.UndoLog;
 
 // In-memory transaction context.  All allocations (log entries, strings,
 // captured row bytes) live in `arena` and are freed together on commit
-// or rollback.  Swapping to a disk-backed log later only requires
-// changing these methods, not any caller code in db.zig.
+// or rollback.
+//
+// `log_file` shadows the in-memory log on disk: every entry is appended to the
+// undo log page chain before it is pushed to the in-memory array.  In-process
+// rollback replays the in-memory array (fast, no disk reads).  If the process
+// crashes, Db.load() detects pager.undo_head != 0 and runs crash recovery.
 pub const Transaction = struct {
     arena: std.heap.ArenaAllocator,
     log: std.ArrayListUnmanaged(UndoEntry),
+    log_file: ?UndoLog,
 
     pub fn init(backing: std.mem.Allocator) Transaction {
         return .{
             .arena = std.heap.ArenaAllocator.init(backing),
             .log = .empty,
+            .log_file = null,
         };
     }
 
-    // Free the arena and every allocation it owns (log array, strings, row bytes).
     pub fn deinit(self: *Transaction) void {
         self.arena.deinit();
     }
@@ -35,34 +33,34 @@ pub const Transaction = struct {
     // Record that a row was inserted (undo = delete it).
     pub fn logInsert(self: *Transaction, table: []const u8, rowid: u64) !void {
         const a = self.arena.allocator();
-        try self.log.append(a, .{
-            .insert = .{ .table = try a.dupe(u8, table), .rowid = rowid },
-        });
+        const entry = UndoEntry{ .insert = .{ .table = try a.dupe(u8, table), .rowid = rowid } };
+        if (self.log_file) |*lf| try lf.append(entry);
+        try self.log.append(a, entry);
     }
 
     // Record that a row was deleted (undo = re-insert original bytes).
     // row_bytes is copied into the transaction arena.
     pub fn logDelete(self: *Transaction, table: []const u8, rowid: u64, row_bytes: []const u8) !void {
         const a = self.arena.allocator();
-        try self.log.append(a, .{
-            .delete = .{
-                .table = try a.dupe(u8, table),
-                .rowid = rowid,
-                .row_bytes = try a.dupe(u8, row_bytes),
-            },
-        });
+        const entry = UndoEntry{ .delete = .{
+            .table = try a.dupe(u8, table),
+            .rowid = rowid,
+            .row_bytes = try a.dupe(u8, row_bytes),
+        } };
+        if (self.log_file) |*lf| try lf.append(entry);
+        try self.log.append(a, entry);
     }
 
     // Record that a row was updated (undo = replace current row with old bytes).
     // old_row_bytes is copied into the transaction arena.
     pub fn logUpdate(self: *Transaction, table: []const u8, rowid: u64, old_row_bytes: []const u8) !void {
         const a = self.arena.allocator();
-        try self.log.append(a, .{
-            .update = .{
-                .table = try a.dupe(u8, table),
-                .rowid = rowid,
-                .old_row_bytes = try a.dupe(u8, old_row_bytes),
-            },
-        });
+        const entry = UndoEntry{ .update = .{
+            .table = try a.dupe(u8, table),
+            .rowid = rowid,
+            .old_row_bytes = try a.dupe(u8, old_row_bytes),
+        } };
+        if (self.log_file) |*lf| try lf.append(entry);
+        try self.log.append(a, entry);
     }
 };

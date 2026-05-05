@@ -7,4 +7,5 @@ test {
     _ = @import("transaction_test.zig");
     _ = @import("vtable_test.zig");
     _ = @import("join_test.zig");
+    _ = @import("crash_recovery_test.zig");
 }
