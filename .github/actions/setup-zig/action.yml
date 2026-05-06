@@ -13,17 +13,18 @@ runs:
       id: cache-zig
       uses: actions/cache@v4
       with:
-        path: zig-x86_64-linux-${{ inputs.version }}
+        path: ${{ runner.tool_cache }}/zig/${{ inputs.version }}
         key: zig-${{ inputs.version }}-x86_64-linux
 
     - name: Install Zig ${{ inputs.version }}
       if: steps.cache-zig.outputs.cache-hit != 'true'
       shell: bash
       run: |
+        mkdir -p ${{ runner.tool_cache }}/zig/${{ inputs.version }}
         curl -fsSL "https://ziglang.org/download/${{ inputs.version }}/zig-x86_64-linux-${{ inputs.version }}.tar.xz" -o zig.tar.xz
-        tar xf zig.tar.xz
+        tar xf zig.tar.xz --strip-components=1 -C ${{ runner.tool_cache }}/zig/${{ inputs.version }}
         rm zig.tar.xz
 
     - name: Add Zig to PATH
       shell: bash
-      run: echo "$PWD/zig-x86_64-linux-${{ inputs.version }}" >> $GITHUB_PATH
+      run: echo "${{ runner.tool_cache }}/zig/${{ inputs.version }}" >> $GITHUB_PATH
