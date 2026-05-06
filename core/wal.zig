@@ -22,7 +22,8 @@ pub const WAL_MAGIC: u32 = 0x57414C47; // "WALG"
 pub const WAL_VERSION: u16 = 1;
 
 pub const RecordType = enum(u8) {
-    page_image = 1,
+    // Stores only the changed byte range within a page, not the full page.
+    page_delta = 1,
     commit = 2,
     checkpoint = 3,
 };
@@ -38,7 +39,7 @@ pub const WalHeader = extern struct {
     _reserved: [32]u8,
 };
 
-// 8+4+4+1+7 = 24 bytes, followed by PAGE_SIZE bytes for page_image records.
+// 8+4+4+1+7 = 24 bytes, followed by a DeltaHeader + delta bytes for page_delta records.
 pub const RedoHeader = extern struct {
     lsn: u64,
     txn_id: u32,
@@ -47,16 +48,27 @@ pub const RedoHeader = extern struct {
     _pad: [7]u8,
 };
 
+// 2+2 = 4 bytes, immediately follows RedoHeader for page_delta records.
+// Describes which byte range within the page was modified.
+pub const DeltaHeader = extern struct {
+    offset: u16, // first changed byte within the page
+    length: u16, // number of changed bytes
+};
+
 comptime {
     std.debug.assert(@sizeOf(WalHeader) == 64);
     std.debug.assert(@sizeOf(RedoHeader) == 24);
+    std.debug.assert(@sizeOf(DeltaHeader) == 4);
 }
 
 // A redo record deserialized during recovery.
 pub const RedoRecord = struct {
     header: RedoHeader,
-    // Non-null only for page_image records.
-    page_data: ?[t.PAGE_SIZE]u8,
+    // For page_delta records: byte range that changed.
+    // delta_data[0..delta_length] holds the new bytes.
+    delta_offset: u16,
+    delta_length: u16,
+    delta_data: [t.PAGE_SIZE]u8,
 };
 
 pub const Wal = struct {
@@ -132,10 +144,11 @@ pub const Wal = struct {
         };
     }
 
-    // Append a page image record and return the assigned LSN.
-    // Must be called before the corresponding buffer pool frame is modified
-    // (WAL rule: log before data).
-    pub fn appendPageImage(self: *Wal, txn_id: u32, page_id: u32, data: *const [t.PAGE_SIZE]u8) !u64 {
+    // Append a page delta record and return the assigned LSN.
+    // Only the changed byte range [offset, offset+data.len) is written to the WAL,
+    // which is far smaller than a full page image for typical row-level mutations.
+    // Must be called before the buffer pool frame is updated (WAL rule: log before data).
+    pub fn appendPageDelta(self: *Wal, txn_id: u32, page_id: u32, offset: u16, data: []const u8) !u64 {
         const lsn = self.next_lsn;
         self.next_lsn += 1;
 
@@ -143,13 +156,19 @@ pub const Wal = struct {
             .lsn = lsn,
             .txn_id = txn_id,
             .page_id = page_id,
-            .record_type = @intFromEnum(RecordType.page_image),
+            .record_type = @intFromEnum(RecordType.page_delta),
             ._pad = std.mem.zeroes([7]u8),
+        };
+        const dhdr = DeltaHeader{
+            .offset = offset,
+            .length = @intCast(data.len),
         };
         try self.file.writePositionalAll(self.io, std.mem.asBytes(&hdr), self.write_offset);
         self.write_offset += @sizeOf(RedoHeader);
+        try self.file.writePositionalAll(self.io, std.mem.asBytes(&dhdr), self.write_offset);
+        self.write_offset += @sizeOf(DeltaHeader);
         try self.file.writePositionalAll(self.io, data, self.write_offset);
-        self.write_offset += t.PAGE_SIZE;
+        self.write_offset += data.len;
         return lsn;
     }
 
@@ -212,17 +231,35 @@ pub const Wal = struct {
             offset += @sizeOf(RedoHeader);
 
             const rec_type: RecordType = @enumFromInt(hdr.record_type);
-            if (rec_type == .page_image) {
+            if (rec_type == .page_delta) {
+                var dhdr_buf: [@sizeOf(DeltaHeader)]u8 align(@alignOf(DeltaHeader)) = undefined;
+                const dn = try self.file.readPositionalAll(self.io, &dhdr_buf, offset);
+                if (dn != @sizeOf(DeltaHeader)) break;
+                const dhdr: *const DeltaHeader = @ptrCast(&dhdr_buf);
+                offset += @sizeOf(DeltaHeader);
+
+                if (dhdr.length > t.PAGE_SIZE) break; // corrupted record
+
                 if (hdr.lsn >= start_lsn) {
-                    var page_data: [t.PAGE_SIZE]u8 = undefined;
-                    const m = try self.file.readPositionalAll(self.io, &page_data, offset);
-                    if (m != t.PAGE_SIZE) break;
-                    try records.append(allocator, .{ .header = hdr.*, .page_data = page_data });
+                    var rec = RedoRecord{
+                        .header = hdr.*,
+                        .delta_offset = dhdr.offset,
+                        .delta_length = dhdr.length,
+                        .delta_data = undefined,
+                    };
+                    const m = try self.file.readPositionalAll(self.io, rec.delta_data[0..dhdr.length], offset);
+                    if (m != dhdr.length) break;
+                    try records.append(allocator, rec);
                 }
-                offset += t.PAGE_SIZE;
+                offset += dhdr.length;
             } else {
                 if (hdr.lsn >= start_lsn) {
-                    try records.append(allocator, .{ .header = hdr.*, .page_data = null });
+                    try records.append(allocator, .{
+                        .header = hdr.*,
+                        .delta_offset = 0,
+                        .delta_length = 0,
+                        .delta_data = undefined,
+                    });
                 }
             }
         }

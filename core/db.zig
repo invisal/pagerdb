@@ -493,8 +493,10 @@ fn analysisPass(wal: *Wal, allocator: std.mem.Allocator) !std.AutoHashMap(u32, v
     return committed;
 }
 
-// Pass 2: replay all WAL page images from checkpoint_lsn into the buffer pool.
+// Pass 2: replay all WAL page deltas into the buffer pool.
 // WAL bypass is on so the writes don't produce new WAL records.
+// Each delta is applied on top of whatever is currently in the buffer pool
+// (or zeros for pages that don't yet exist in the data file).
 // After this, the buffer pool reflects the latest committed on-disk state.
 fn redoPass(db: *Db, wal: *Wal, allocator: std.mem.Allocator) !void {
     db.pager.setWalBypass(true);
@@ -505,9 +507,24 @@ fn redoPass(db: *Db, wal: *Wal, allocator: std.mem.Allocator) !void {
 
     for (records) |rec| {
         const rec_type: wal_mod.RecordType = @enumFromInt(rec.header.record_type);
-        if (rec_type != .page_image) continue;
-        const data = rec.page_data orelse continue;
-        try db.pager.writePage(rec.header.page_id, &data);
+        if (rec_type != .page_delta) continue;
+        if (rec.delta_length == 0) continue;
+
+        // Read current page content (pool hit → fast; miss → disk read).
+        // For brand-new pages beyond the data file, use zeros as the base.
+        var page_buf: [t.PAGE_SIZE]u8 = std.mem.zeroes([t.PAGE_SIZE]u8);
+        db.pager.readPage(rec.header.page_id, &page_buf) catch |err| switch (err) {
+            // Page not yet in data file (allocated during the crashed transaction).
+            error.IncompleteRead => {},
+            else => return err,
+        };
+
+        // Patch the changed byte range and write the updated page back.
+        @memcpy(
+            page_buf[rec.delta_offset..][0..rec.delta_length],
+            rec.delta_data[0..rec.delta_length],
+        );
+        try db.pager.writePage(rec.header.page_id, &page_buf);
     }
 }
 

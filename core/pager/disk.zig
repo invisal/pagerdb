@@ -210,21 +210,38 @@ pub const DiskPager = struct {
         buf.* = frame.data;
     }
 
-    // Write a page: record the after-image in the WAL (unless wal_bypass is
-    // set), then update the buffer pool frame.  The WAL record is written to
-    // the OS page cache here; callers must call wal.flush() before relying on
-    // durability.
+    // Write a page: record a delta WAL record (unless wal_bypass is set), then
+    // update the buffer pool frame.  The delta covers only the first..last
+    // changed bytes, which is far smaller than a full page image for typical
+    // row mutations.  Falls back to a full-page delta when the page is not in
+    // the pool (no old content available to diff against).
     fn diskWritePage(ptr: *anyopaque, page_id: u32, buf: *const [t.PAGE_SIZE]u8) anyerror!void {
         const self: *DiskPager = @ptrCast(@alignCast(ptr));
         self.tick += 1;
 
-        // Write WAL record before touching the buffer pool (WAL rule).
-        const lsn: u64 = if (!self.wal_bypass)
-            try self.wal.appendPageImage(self.current_txn_id, page_id, buf)
-        else
-            0;
+        // Look up old content once — used for both delta computation and frame update.
+        const existing = self.poolFind(page_id);
 
-        if (self.poolFind(page_id)) |frame| {
+        // Write WAL delta record before touching the buffer pool (WAL rule).
+        const lsn: u64 = if (!self.wal_bypass) blk: {
+            var first: usize = 0;
+            var last: usize = t.PAGE_SIZE;
+            if (existing) |f| {
+                // Narrow to the actual changed range.
+                while (first < t.PAGE_SIZE and f.data[first] == buf[first]) : (first += 1) {}
+                while (last > first and f.data[last - 1] == buf[last - 1]) : (last -= 1) {}
+            }
+            // If page not in pool we have no old content, so first=0 last=PAGE_SIZE
+            // and we record the full page — always correct, just larger.
+            break :blk try self.wal.appendPageDelta(
+                self.current_txn_id,
+                page_id,
+                @intCast(first),
+                buf[first..last],
+            );
+        } else 0;
+
+        if (existing) |frame| {
             frame.data = buf.*;
             frame.dirty = true;
             frame.lru_tick = self.tick;
