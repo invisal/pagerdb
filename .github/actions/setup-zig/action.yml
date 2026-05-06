@@ -1,31 +1,25 @@
 name: Setup Zig
-description: Download and add Zig to PATH
-
-inputs:
-  version:
-    description: Zig version to install
-    required: true
+description: Download and add Zig 0.16.0 to PATH
 
 runs:
   using: composite
   steps:
-    - name: Cache Zig ${{ inputs.version }}
+    - name: Cache Zig 0.16.0
       id: cache-zig
       uses: actions/cache@v4
       with:
-        path: ${{ runner.tool_cache }}/zig/${{ inputs.version }}
-        key: zig-${{ inputs.version }}-x86_64-linux
+        path: ${{ runner.tool_cache }}/zig/0.16.0
+        key: zig-0.16.0-x86_64-linux
 
-    - name: Install Zig ${{ inputs.version }}
+    - name: Install Zig 0.16.0
       if: steps.cache-zig.outputs.cache-hit != 'true'
       shell: bash
       run: |
-        url=$(curl -fsSL https://ziglang.org/download/index.json | jq -r '.["${{ inputs.version }}"]["x86_64-linux"].tarball')
-        mkdir -p ${{ runner.tool_cache }}/zig/${{ inputs.version }}
-        curl -fsSL "$url" -o zig.tar.xz
-        tar xf zig.tar.xz --strip-components=1 -C ${{ runner.tool_cache }}/zig/${{ inputs.version }}
+        mkdir -p ${{ runner.tool_cache }}/zig/0.16.0
+        curl -fsSL "https://ziglang.org/download/0.16.0/zig-x86_64-linux-0.16.0.tar.xz" -o zig.tar.xz
+        tar xf zig.tar.xz --strip-components=1 -C ${{ runner.tool_cache }}/zig/0.16.0
         rm zig.tar.xz
 
     - name: Add Zig to PATH
       shell: bash
-      run: echo "${{ runner.tool_cache }}/zig/${{ inputs.version }}" >> $GITHUB_PATH
+      run: echo "${{ runner.tool_cache }}/zig/0.16.0" >> $GITHUB_PATH

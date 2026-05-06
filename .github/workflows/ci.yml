@@ -9,9 +9,6 @@ on:
   pull_request:
     branches: [main, master]
 
-env:
-  ZIG_VERSION: "0.16.0"
-
 jobs:
   build:
     name: Build
@@ -20,8 +17,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/setup-zig
-        with:
-          version: ${{ env.ZIG_VERSION }}
       - name: Build
         run: zig build
 
@@ -33,8 +28,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/setup-zig
-        with:
-          version: ${{ env.ZIG_VERSION }}
       - name: Install sqlite3
         run: sudo apt-get install -y libsqlite3-dev
       - name: Run benchmark
@@ -48,7 +41,5 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/setup-zig
-        with:
-          version: ${{ env.ZIG_VERSION }}
       - name: Run DST
         run: zig build dst -- --seeds 500 --ops 100
