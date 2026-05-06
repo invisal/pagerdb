@@ -14,6 +14,7 @@ pub const btree = @import("btree.zig");
 // Debug utilities for printing query results.
 // Usage: PagerDB.debug.print(result);
 pub const debug = @import("debug.zig");
+pub const Wal = @import("wal.zig").Wal;
 
 test {
     _ = @import("pager/disk.zig");
