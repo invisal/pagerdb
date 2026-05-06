@@ -20,8 +20,9 @@ runs:
       if: steps.cache-zig.outputs.cache-hit != 'true'
       shell: bash
       run: |
+        url=$(curl -fsSL https://ziglang.org/download/index.json | jq -r '.["${{ inputs.version }}"]["x86_64-linux"].tarball')
         mkdir -p ${{ runner.tool_cache }}/zig/${{ inputs.version }}
-        curl -fsSL "https://ziglang.org/download/${{ inputs.version }}/zig-x86_64-linux-${{ inputs.version }}.tar.xz" -o zig.tar.xz
+        curl -fsSL "$url" -o zig.tar.xz
         tar xf zig.tar.xz --strip-components=1 -C ${{ runner.tool_cache }}/zig/${{ inputs.version }}
         rm zig.tar.xz
 
