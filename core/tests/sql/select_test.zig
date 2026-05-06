@@ -82,6 +82,96 @@ test "SELECT with main. schema prefix resolves table" {
     try std.testing.expectError(PlanError.TableNotFound, execute(h.db, "SELECT * FROM other.users", alloc));
 }
 
+test "SELECT table.* expands all columns from that table" {
+    const alloc = std.testing.allocator;
+    const h = try makeMemoryDb(alloc, .{ .schema = &.{"CREATE TABLE t (a INT NOT NULL, b TEXT NOT NULL)"} });
+    defer h.deinit();
+
+    try exec(h.db, "INSERT INTO t VALUES (1, 'x')", alloc);
+
+    var result = try execute(h.db, "SELECT t.* FROM t", alloc);
+    defer result.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), result.result_set.rows.len);
+    // t.* expands to both columns
+    try std.testing.expectEqual(@as(usize, 2), result.result_set.rows[0].values.len);
+    try std.testing.expectEqual(@as(i64, 1), result.result_set.rows[0].values[0].int);
+    try std.testing.expectEqualStrings("x", result.result_set.rows[0].values[1].text);
+}
+
+test "SELECT table.* in JOIN returns only that table's columns" {
+    const alloc = std.testing.allocator;
+    const h = try makeMemoryDb(alloc, .{
+        .schema = &.{
+            "CREATE TABLE orders (id INT NOT NULL, user_id INT NOT NULL)",
+            "CREATE TABLE users (id INT NOT NULL, name TEXT NOT NULL)",
+        },
+    });
+    defer h.deinit();
+
+    try exec(h.db, "INSERT INTO users VALUES (1, 'alice')", alloc);
+    try exec(h.db, "INSERT INTO orders VALUES (10, 1)", alloc);
+
+    var result = try execute(
+        h.db,
+        "SELECT orders.* FROM orders INNER JOIN users ON orders.user_id = users.id",
+        alloc,
+    );
+    defer result.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), result.result_set.rows.len);
+    // orders.* = id, user_id — not users columns
+    try std.testing.expectEqual(@as(usize, 2), result.result_set.rows[0].values.len);
+    try std.testing.expectEqual(@as(i64, 10), result.result_set.rows[0].values[0].int);
+    try std.testing.expectEqual(@as(i64, 1), result.result_set.rows[0].values[1].int);
+}
+
+test "SELECT mixed table.* and column in JOIN" {
+    const alloc = std.testing.allocator;
+    const h = try makeMemoryDb(alloc, .{
+        .schema = &.{
+            "CREATE TABLE orders (id INT NOT NULL, user_id INT NOT NULL)",
+            "CREATE TABLE users (id INT NOT NULL, name TEXT NOT NULL)",
+        },
+    });
+    defer h.deinit();
+
+    try exec(h.db, "INSERT INTO users VALUES (1, 'alice')", alloc);
+    try exec(h.db, "INSERT INTO orders VALUES (10, 1)", alloc);
+
+    var result = try execute(
+        h.db,
+        "SELECT orders.*, users.name FROM orders INNER JOIN users ON orders.user_id = users.id",
+        alloc,
+    );
+    defer result.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), result.result_set.rows.len);
+    // orders.* = id, user_id; users.name = "alice"
+    try std.testing.expectEqual(@as(usize, 3), result.result_set.rows[0].values.len);
+    try std.testing.expectEqual(@as(i64, 10), result.result_set.rows[0].values[0].int);
+    try std.testing.expectEqual(@as(i64, 1), result.result_set.rows[0].values[1].int);
+    try std.testing.expectEqualStrings("alice", result.result_set.rows[0].values[2].text);
+}
+
+test "SELECT unknown_table.* returns TableNotFound" {
+    const alloc = std.testing.allocator;
+    const PlanError = @import("../../sql/logical_plan.zig").PlanError;
+    const h = try makeMemoryDb(alloc, .{ .schema = &.{"CREATE TABLE t (a INT NOT NULL)"} });
+    defer h.deinit();
+
+    try std.testing.expectError(PlanError.TableNotFound, execute(h.db, "SELECT nope.* FROM t", alloc));
+}
+
+test "table.* in WHERE clause returns WildcardInExpression" {
+    const alloc = std.testing.allocator;
+    const PlanError = @import("../../sql/logical_plan.zig").PlanError;
+    const h = try makeMemoryDb(alloc, .{ .schema = &.{"CREATE TABLE t (a INT NOT NULL)"} });
+    defer h.deinit();
+
+    try std.testing.expectError(PlanError.WildcardInExpression, execute(h.db, "SELECT a FROM t WHERE t.*", alloc));
+}
+
 test "SELECT abs() evaluates correctly end-to-end" {
     const alloc = std.testing.allocator;
     const PlanError = @import("../../sql/logical_plan.zig").PlanError;

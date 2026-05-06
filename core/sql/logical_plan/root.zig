@@ -153,6 +153,8 @@ pub const LogicalPlan = union(enum) {
 pub const PlanError = error{
     TableNotFound,
     ColumnNotFound,
+    // table.* used where a scalar expression is required (e.g. WHERE clause)
+    WildcardInExpression,
     TypeMismatch,
     ColumnCountMismatch,
     ArgCountMismatch,
@@ -232,13 +234,26 @@ pub const LogicalPlanner = struct {
         }
 
         // Wrap in Project if specific columns were requested (not SELECT *).
-        if (stmt.columns.len > 0) {
+        // A single .star column means SELECT * — pass all columns through unchanged.
+        const is_select_star = stmt.columns.len == 1 and stmt.columns[0] == .star;
+        if (!is_select_star) {
             var exprs: std.ArrayList(Expr) = .empty;
             var proj_cols: std.ArrayList(SchemaCol) = .empty;
 
             for (stmt.columns) |sel_col| {
                 switch (sel_col) {
-                    .star => unreachable, // handled by the len == 0 path above
+                    .star => {
+                        for (scan_schema.columns) |sc| {
+                            try exprs.append(self.alloc(), .{ .col_idx = sc.index });
+                            try proj_cols.append(self.alloc(), .{
+                                .name = try self.alloc().dupe(u8, sc.name),
+                                .table = try self.alloc().dupe(u8, sc.table),
+                                .col_type = sc.col_type,
+                                .nullable = sc.nullable,
+                                .index = sc.index,
+                            });
+                        }
+                    },
                     .name => |n| {
                         const src_idx = try self.resolveColName(n, scan_schema);
                         try exprs.append(self.alloc(), .{ .col_idx = src_idx });
@@ -256,18 +271,38 @@ pub const LogicalPlanner = struct {
                         }
                     },
                     .qual_name => |q| {
-                        const src_idx = try self.resolveQualColName(q.table, q.col, scan_schema);
-                        try exprs.append(self.alloc(), .{ .col_idx = src_idx });
-                        for (scan_schema.columns) |sc| {
-                            if (sc.index == src_idx) {
-                                try proj_cols.append(self.alloc(), .{
-                                    .name = try self.alloc().dupe(u8, sc.name),
-                                    .table = try self.alloc().dupe(u8, sc.table),
-                                    .col_type = sc.col_type,
-                                    .nullable = sc.nullable,
-                                    .index = src_idx,
-                                });
-                                break;
+                        if (q.col == null) {
+                            // Handle SELECT table_name.*
+                            var matched = false;
+                            for (scan_schema.columns) |sc| {
+                                if (std.ascii.eqlIgnoreCase(sc.table, q.table)) {
+                                    matched = true;
+                                    try exprs.append(self.alloc(), .{ .col_idx = sc.index });
+                                    try proj_cols.append(self.alloc(), .{
+                                        .name = try self.alloc().dupe(u8, sc.name),
+                                        .table = try self.alloc().dupe(u8, sc.table),
+                                        .col_type = sc.col_type,
+                                        .nullable = sc.nullable,
+                                        .index = sc.index,
+                                    });
+                                }
+                            }
+                            if (!matched) return PlanError.TableNotFound;
+                        } else {
+                            // Handle SELECT table_name.column_name
+                            const src_idx = try self.resolveQualColName(q.table, q.col.?, scan_schema);
+                            try exprs.append(self.alloc(), .{ .col_idx = src_idx });
+                            for (scan_schema.columns) |sc| {
+                                if (sc.index == src_idx) {
+                                    try proj_cols.append(self.alloc(), .{
+                                        .name = try self.alloc().dupe(u8, sc.name),
+                                        .table = try self.alloc().dupe(u8, sc.table),
+                                        .col_type = sc.col_type,
+                                        .nullable = sc.nullable,
+                                        .index = src_idx,
+                                    });
+                                    break;
+                                }
                             }
                         }
                     },
@@ -476,7 +511,7 @@ pub const LogicalPlanner = struct {
             .bool_lit => |v| .{ .bool_lit = v },
             .null_lit => .{ .null_lit = {} },
             .col_ref => |n| .{ .col_idx = try self.resolveColName(n, schema) },
-            .qual_col_ref => |q| .{ .col_idx = try self.resolveQualColName(q.table, q.col, schema) },
+            .qual_col_ref => |q| if (q.col) |col| .{ .col_idx = try self.resolveQualColName(q.table, col, schema) } else return PlanError.WildcardInExpression,
             .binary => |b| blk: {
                 const node = try self.alloc().create(Expr.Binary);
                 node.* = .{

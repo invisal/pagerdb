@@ -11,7 +11,9 @@ test "parse SELECT *" {
     const s = res.stmt.select;
     try std.testing.expectEqualStrings("users", s.table_ref.name.name);
     try std.testing.expect(s.table_ref.name.schema == null);
-    try std.testing.expectEqual(@as(usize, 0), s.columns.len);
+    // SELECT * is now represented as a single .star entry
+    try std.testing.expectEqual(@as(usize, 1), s.columns.len);
+    try std.testing.expect(s.columns[0] == .star);
     try std.testing.expect(s.where == null);
 }
 
