@@ -132,24 +132,27 @@ pub const Parser = struct {
 
         var columns: std.ArrayList(ast.SelectCol) = .empty;
 
-        if (self.peek().kind == .op_star) {
-            _ = self.advance();
-            // empty list signals SELECT *
-        } else {
-            // Parse each SELECT column as a full expression, then classify:
-            // plain col_ref  → .name, qual_col_ref → .qual_name, anything
-            // else (func_call, binary, etc.) → .expr for computed columns.
-            while (true) {
-                const e = try self.parseExpr();
-                const col = switch (e) {
-                    .col_ref => |n| ast.SelectCol{ .name = n },
-                    .qual_col_ref => |q| ast.SelectCol{ .qual_name = q },
-                    else => ast.SelectCol{ .expr = e },
-                };
-                try columns.append(self.alloc(), col);
-                if (self.peek().kind != .comma) break;
-                _ = self.advance();
+        // Parse column list
+        while (true) {
+            switch (self.peek().kind) {
+                .op_star => {
+                    // Handle SELECT *
+                    _ = self.advance();
+                    try columns.append(self.alloc(), .star);
+                },
+                else => {
+                    const e = try self.parseExpr();
+                    const col = switch (e) {
+                        .col_ref => |n| ast.SelectCol{ .name = n },
+                        .qual_col_ref => |q| ast.SelectCol{ .qual_name = q },
+                        else => ast.SelectCol{ .expr = e },
+                    };
+                    try columns.append(self.alloc(), col);
+                },
             }
+
+            if (self.peek().kind != .comma) break;
+            _ = self.advance();
         }
 
         _ = try self.expect(.kw_from);
@@ -605,9 +608,15 @@ pub const Parser = struct {
                 // Handle table.col qualified references in expressions
                 if (self.peek().kind == .dot) {
                     _ = self.advance();
-                    const col_tok = try self.expect(.identifier);
-                    const col_name = try self.alloc().dupe(u8, self.tokenText(col_tok));
-                    return .{ .qual_col_ref = .{ .table = name, .col = col_name } };
+
+                    if (self.peek().kind == .op_star) {
+                        _ = self.advance();
+                        return .{ .qual_col_ref = .{ .table = name, .col = null } };
+                    } else {
+                        const col_tok = try self.expect(.identifier);
+                        const col_name = try self.alloc().dupe(u8, self.tokenText(col_tok));
+                        return .{ .qual_col_ref = .{ .table = name, .col = col_name } };
+                    }
                 }
                 return .{ .col_ref = name };
             },

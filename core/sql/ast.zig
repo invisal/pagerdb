@@ -21,7 +21,7 @@ pub const UnaryOp = enum { not, neg };
 // A column reference qualified by table name: tbl.col
 pub const QualifiedColRef = struct {
     table: []const u8, // arena-owned
-    col: []const u8, // arena-owned
+    col: ?[]const u8, // arena-owned. NULL means table.*
 };
 
 pub const Expr = union(enum) {
@@ -57,7 +57,7 @@ pub const Expr = union(enum) {
             .col_ref => |n| .{ .col_ref = try allocator.dupe(u8, n) },
             .qual_col_ref => |q| .{ .qual_col_ref = .{
                 .table = try allocator.dupe(u8, q.table),
-                .col = try allocator.dupe(u8, q.col),
+                .col = if (q.col) |col| try allocator.dupe(u8, col) else null,
             } },
             .binary => |b| blk: {
                 const node = try allocator.create(Binary);
