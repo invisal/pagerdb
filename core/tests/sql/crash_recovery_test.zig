@@ -170,6 +170,86 @@ test "clean rollback leaves undo_head at zero" {
     }
 }
 
+test "crash after COMMIT before checkpoint: row present after redo recovery" {
+    const io = std.testing.io;
+    const alloc = std.testing.allocator;
+    const path = "/tmp/test_redo_committed.db";
+    defer Dir.deleteFile(.cwd(), io, path) catch {};
+    defer Dir.deleteFile(.cwd(), io, path ++ ".wal") catch {};
+
+    // Session 1: create schema.
+    {
+        const h = try th.makeDiskDb(alloc, io, path, .{ .schema = &.{"CREATE TABLE t (v INT)"} });
+        h.db.close();
+    }
+
+    // Session 2: commit a row but do NOT checkpoint (data stays in buffer pool / WAL only).
+    {
+        const db = try Db.load(try DiskPager.open(alloc, io, path, .{}), alloc);
+        try db.begin();
+        _ = try db.insert("t", &.{.{ .int = 42 }});
+        try db.commit();
+        // Simulate crash: close without flush — data pages may not be in the data file.
+        abandonDb(db, alloc);
+    }
+
+    // Session 3: reopen — redo pass must apply the committed WAL records.
+    {
+        const db = try Db.load(try DiskPager.open(alloc, io, path, .{}), alloc);
+        defer db.close();
+        try std.testing.expectEqual(@as(u32, 0), db.pager.undo_head);
+        var it = try db.scanOpen("t");
+        const entry = try it.next(alloc);
+        try std.testing.expect(entry != null);
+        try std.testing.expectEqual(@as(i64, 42), entry.?.values[0].int);
+        alloc.free(entry.?.values);
+    }
+}
+
+test "crash recovery: committed rows present, uncommitted rows absent" {
+    const io = std.testing.io;
+    const alloc = std.testing.allocator;
+    const path = "/tmp/test_redo_mixed.db";
+    defer Dir.deleteFile(.cwd(), io, path) catch {};
+    defer Dir.deleteFile(.cwd(), io, path ++ ".wal") catch {};
+
+    // Session 1: create schema.
+    {
+        const h = try th.makeDiskDb(alloc, io, path, .{ .schema = &.{"CREATE TABLE t (v INT)"} });
+        h.db.close();
+    }
+
+    // Session 2: commit txn 1 (v=1), then start txn 2 (v=2) and crash.
+    {
+        const db = try Db.load(try DiskPager.open(alloc, io, path, .{}), alloc);
+        try db.begin();
+        _ = try db.insert("t", &.{.{ .int = 1 }});
+        try db.commit();
+
+        try db.begin();
+        _ = try db.insert("t", &.{.{ .int = 2 }});
+        abandonDb(db, alloc); // crash with txn 2 uncommitted
+    }
+
+    // Session 3: redo applies txn 1; undo reverts txn 2.
+    {
+        const db = try Db.load(try DiskPager.open(alloc, io, path, .{}), alloc);
+        defer db.close();
+        try std.testing.expectEqual(@as(u32, 0), db.pager.undo_head);
+
+        var count: usize = 0;
+        var found_v1 = false;
+        var it = try db.scanOpen("t");
+        while (try it.next(alloc)) |entry| {
+            count += 1;
+            if (entry.values[0].int == 1) found_v1 = true;
+            alloc.free(entry.values);
+        }
+        try std.testing.expectEqual(@as(usize, 1), count);
+        try std.testing.expect(found_v1);
+    }
+}
+
 test "checkpoint: committed data survives reopen after WAL-only commit" {
     const io = std.testing.io;
     const alloc = std.testing.allocator;

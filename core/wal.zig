@@ -197,8 +197,8 @@ pub const Wal = struct {
     // Read all redo records at or after start_lsn.  Used during crash recovery.
     // Caller owns the returned slice.
     pub fn readFrom(self: *Wal, start_lsn: u64, allocator: Allocator) ![]RedoRecord {
-        var records = std.ArrayList(RedoRecord).init(allocator);
-        errdefer records.deinit();
+        var records: std.ArrayListUnmanaged(RedoRecord) = .empty;
+        errdefer records.deinit(allocator);
 
         const file_size = try self.file.length(self.io);
         var offset: u64 = @sizeOf(WalHeader);
@@ -217,17 +217,17 @@ pub const Wal = struct {
                     var page_data: [t.PAGE_SIZE]u8 = undefined;
                     const m = try self.file.readPositionalAll(self.io, &page_data, offset);
                     if (m != t.PAGE_SIZE) break;
-                    try records.append(.{ .header = hdr.*, .page_data = page_data });
+                    try records.append(allocator, .{ .header = hdr.*, .page_data = page_data });
                 }
                 offset += t.PAGE_SIZE;
             } else {
                 if (hdr.lsn >= start_lsn) {
-                    try records.append(.{ .header = hdr.*, .page_data = null });
+                    try records.append(allocator, .{ .header = hdr.*, .page_data = null });
                 }
             }
         }
 
-        return records.toOwnedSlice();
+        return records.toOwnedSlice(allocator);
     }
 
     pub fn close(self: *Wal) void {

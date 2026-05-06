@@ -57,6 +57,7 @@ pub const DiskPager = struct {
         .flushPage = diskFlushPage,
         .beginTxn = diskBeginTxn,
         .endTxn = diskEndTxn,
+        .getTxnId = diskGetTxnId,
         .commitTxn = diskCommitTxn,
         .setWalBypass = diskSetWalBypass,
         .checkpoint = diskCheckpoint,
@@ -84,6 +85,7 @@ pub const DiskPager = struct {
             .sys_tables_root = 0,
             .sys_columns_root = 0,
             .undo_head = 0,
+            .has_wal = true,
         };
         const blank = [_]u8{0} ** t.PAGE_SIZE;
         try file.writeStreamingAll(io, &blank);
@@ -115,6 +117,7 @@ pub const DiskPager = struct {
             .sys_tables_root = 0,
             .sys_columns_root = 0,
             .undo_head = 0,
+            .has_wal = true,
         };
         const h = try page0.readHeader(&pager);
         try page0.validateHeader(h);
@@ -285,6 +288,11 @@ pub const DiskPager = struct {
         const self: *DiskPager = @ptrCast(@alignCast(ptr));
         self.txn_active = false;
         self.current_txn_id = 0;
+    }
+
+    fn diskGetTxnId(ptr: *anyopaque) u32 {
+        const self: *DiskPager = @ptrCast(@alignCast(ptr));
+        return self.current_txn_id;
     }
 
     // NO-FORCE commit: write a COMMIT record and fsync the WAL.

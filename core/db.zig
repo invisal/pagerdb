@@ -1,6 +1,9 @@
 const std = @import("std");
 const t = @import("types.zig");
 const Pager = @import("pager/pager.zig").Pager;
+const DiskPager = @import("pager/disk.zig").DiskPager;
+const wal_mod = @import("wal.zig");
+const Wal = wal_mod.Wal;
 const page0 = @import("page0.zig");
 const btree = @import("btree.zig");
 const row = @import("row.zig");
@@ -35,8 +38,10 @@ pub const Db = struct {
     }
 
     // Load the catalog from a pager that already contains database pages.
-    // Catalog is loaded first so that recoverIfNeeded() has table metadata
-    // available for undo replay.
+    // For WAL-backed pagers, runs three-pass ARIES-style recovery:
+    //   1. Analysis — collect committed txn_ids from WAL
+    //   2. Redo     — replay all WAL page images into buffer pool
+    //   3. Undo     — revert any uncommitted changes found on disk
     pub fn load(pager: Pager, allocator: std.mem.Allocator) !*Db {
         const db = try allocator.create(Db);
         errdefer allocator.destroy(db);
@@ -44,25 +49,68 @@ pub const Db = struct {
         db.pager = pager;
         db.cat = catalog.Catalog.init(allocator, &db.pager);
         db.txn = null;
-        // Load catalog before recovery: the system tables (__tables, __columns)
-        // are always committed immediately (createTable force-flushes), so they
-        // are safe to read even if user-data pages have stolen uncommitted state.
-        try db.cat.load();
-        try db.recoverIfNeeded();
+
+        if (db.pager.has_wal) {
+            const disk_pager: *DiskPager = @ptrCast(@alignCast(db.pager.ptr));
+
+            // Pass 1: find all txn_ids that have a durable COMMIT record in the WAL.
+            var committed_txns = try analysisPass(&disk_pager.wal, allocator);
+            defer committed_txns.deinit();
+
+            // Pass 2: replay every WAL page image into the buffer pool.  After this
+            // the buffer pool reflects the last consistent committed state.
+            try redoPass(db, &disk_pager.wal, allocator);
+
+            // Sync pager fields (total_pages, undo_head, etc.) from the redo'd page 0.
+            try updatePagerFromPage0(db);
+
+            // Load catalog from the redo'd btree pages so undo replay has correct roots.
+            try db.cat.load();
+
+            // Pass 3: undo uncommitted changes; skip committed transactions.
+            try db.recoverIfNeeded(&committed_txns);
+        } else {
+            // InMemoryPager: no WAL, no crash recovery needed.
+            // Call recoverIfNeeded with an empty committed set (undo_head is always 0).
+            try db.cat.load();
+            var empty = std.AutoHashMap(u32, void).init(allocator);
+            defer empty.deinit();
+            try db.recoverIfNeeded(&empty);
+        }
+
         return db;
     }
 
     // Undo any in-flight transaction left by a crash.
     //
-    // With STEAL, dirty pages from an uncommitted transaction may have reached
-    // the data file before the crash.  We must replay the undo log in reverse to
-    // restore the pre-transaction state, then FORCE-flush the corrected pages.
+    // committed_txns: set of txn_ids that have a durable COMMIT record in the WAL.
+    // If undo_head points to a committed transaction, skip undo and just clean up
+    // the undo chain (the redo pass already restored the committed data).
     //
-    // WAL bypass is enabled so recovery writes do not produce redo log records.
-    fn recoverIfNeeded(self: *Db) !void {
+    // With STEAL, dirty pages from an uncommitted transaction may have reached
+    // the data file before the crash.  For those we replay the undo log in reverse
+    // to restore the pre-transaction state, then FORCE-flush.
+    //
+    // WAL bypass is set so recovery writes do not produce new redo log records.
+    fn recoverIfNeeded(self: *Db, committed_txns: *const std.AutoHashMap(u32, void)) !void {
         if (self.pager.undo_head == 0) return;
 
-        var ul = undo_log_mod.UndoLog.fromHead(&self.pager, self.pager.undo_head);
+        var ul = try undo_log_mod.UndoLog.fromHead(&self.pager, self.pager.undo_head);
+
+        // Bypass WAL during all recovery writes (undo replay + discard cleanup).
+        self.pager.setWalBypass(true);
+        defer self.pager.setWalBypass(false);
+
+        if (committed_txns.contains(ul.txn_id)) {
+            // The transaction committed but the undo chain wasn't cleaned up before
+            // the crash (e.g. crash between COMMIT fsync and page-0 flush).
+            // Discard the chain without replaying it; redo already applied the data.
+            try ul.discard();
+            try self.pager.flush();
+            return;
+        }
+
+        // Uncommitted transaction: replay undo entries in reverse to revert changes.
         const entries = try ul.readAll(self.allocator);
         defer {
             for (entries) |entry| switch (entry) {
@@ -78,10 +126,6 @@ pub const Db = struct {
             };
             self.allocator.free(entries);
         }
-
-        // Bypass WAL during recovery: compensation writes don't need redo records.
-        self.pager.setWalBypass(true);
-        defer self.pager.setWalBypass(false);
 
         var i: usize = entries.len;
         while (i > 0) {
@@ -132,27 +176,39 @@ pub const Db = struct {
     // crash before commit() is detectable on next open (pager.undo_head != 0).
     pub fn begin(self: *Db) !void {
         if (self.txn != null) return error.TransactionAlreadyActive;
-        self.txn = txn_mod.Transaction.init(self.allocator);
-        self.txn.?.log_file = try undo_log_mod.UndoLog.begin(&self.pager);
-        // Pin dirty frames so data pages cannot reach disk before commit.
+        // beginTxn must come first so getTxnId() returns the assigned ID.
         self.pager.beginTxn();
+        const txn_id = self.pager.getTxnId();
+        self.txn = txn_mod.Transaction.init(self.allocator);
+        self.txn.?.log_file = try undo_log_mod.UndoLog.begin(&self.pager, txn_id);
     }
 
-    // Commit the active transaction using NO-FORCE: write a WAL COMMIT record
-    // and fsync the WAL for durability, then update page 0 (undo_head=0) on
-    // disk.  Data pages are NOT flushed — they stay in the buffer pool and
-    // will reach the data file lazily via checkpoint.
+    // Commit the active transaction using NO-FORCE: fsync the WAL COMMIT record
+    // first (making the transaction durable), then flush page 0 with undo_head=0
+    // to disk, then clean up undo log pages.
+    //
+    // Ordering is critical for crash safety:
+    //   1. commitTxn()       — COMMIT record fsynced; transaction is now durable
+    //   2. pager.undo_head=0 + page0.writeHeader + flushPage(0) — undo_head=0 on disk
+    //   3. lf.discard()      — free undo pages (bypass WAL; undo_head already safe)
+    //
+    // If crash between steps 1 and 2, recovery sees undo_head != 0 in the WAL but
+    // finds the txn_id in committed_txns → discards undo chain without replaying.
+    // If crash after step 2, recovery sees undo_head=0 → no recovery needed.
     pub fn commit(self: *Db) !void {
         if (self.txn == null) return error.NoActiveTransaction;
-        // Discard undo pages in memory; clears pager.undo_head.
-        if (self.txn.?.log_file) |*lf| try lf.discard();
-        // Write page 0 with undo_head=0 to the buffer pool (also writes a WAL record).
-        try page0.writeHeader(&self.pager);
-        // Write WAL COMMIT record + fsync WAL.  Data pages stay in the pool.
+        // Step 1: make the commit durable.
         try self.pager.commitTxn();
-        // Flush page 0 only so undo_head=0 is visible to crash recovery.
-        // The WAL was fsynced by commitTxn, so the WAL rule is satisfied.
+        // Step 2: write undo_head=0 to page 0 and flush to disk.
+        self.pager.undo_head = 0;
+        try page0.writeHeader(&self.pager);
         try self.pager.flushPage(0);
+        // Step 3: free undo pages (cleanup; bypass WAL since undo_head=0 is already durable).
+        if (self.txn.?.log_file) |*lf| {
+            self.pager.setWalBypass(true);
+            defer self.pager.setWalBypass(false);
+            try lf.discard();
+        }
         self.pager.endTxn();
         self.txn.?.deinit();
         self.txn = null;
@@ -415,6 +471,57 @@ pub const Db = struct {
         }
     }
 };
+
+// ── Recovery passes ───────────────────────────────────────────────────────────
+
+// Pass 1: scan the WAL from checkpoint_lsn and collect every txn_id that has
+// a durable COMMIT record.  Used by recoverIfNeeded to skip undo for committed txns.
+fn analysisPass(wal: *Wal, allocator: std.mem.Allocator) !std.AutoHashMap(u32, void) {
+    var committed = std.AutoHashMap(u32, void).init(allocator);
+    errdefer committed.deinit();
+
+    const records = try wal.readFrom(wal.checkpoint_lsn, allocator);
+    defer allocator.free(records);
+
+    for (records) |rec| {
+        const rec_type: wal_mod.RecordType = @enumFromInt(rec.header.record_type);
+        if (rec_type == .commit) {
+            try committed.put(rec.header.txn_id, {});
+        }
+    }
+
+    return committed;
+}
+
+// Pass 2: replay all WAL page images from checkpoint_lsn into the buffer pool.
+// WAL bypass is on so the writes don't produce new WAL records.
+// After this, the buffer pool reflects the latest committed on-disk state.
+fn redoPass(db: *Db, wal: *Wal, allocator: std.mem.Allocator) !void {
+    db.pager.setWalBypass(true);
+    defer db.pager.setWalBypass(false);
+
+    const records = try wal.readFrom(wal.checkpoint_lsn, allocator);
+    defer allocator.free(records);
+
+    for (records) |rec| {
+        const rec_type: wal_mod.RecordType = @enumFromInt(rec.header.record_type);
+        if (rec_type != .page_image) continue;
+        const data = rec.page_data orelse continue;
+        try db.pager.writePage(rec.header.page_id, &data);
+    }
+}
+
+// After redoPass, the buffer pool's page 0 holds the recovered header.  Sync
+// the in-memory Pager fields from it so subsequent operations see the right
+// total_pages, free_list_head, undo_head, etc.
+fn updatePagerFromPage0(db: *Db) !void {
+    const h = try page0.readHeader(&db.pager);
+    db.pager.total_pages = h.total_pages;
+    db.pager.free_list_head = h.free_list_head;
+    db.pager.sys_tables_root = h.sys_tables_root;
+    db.pager.sys_columns_root = h.sys_columns_root;
+    db.pager.undo_head = h.undo_head;
+}
 
 // Fill a caller-supplied buffer with ColumnSchema derived from ColumnMeta.
 // Avoids returning a pointer to a local stack array.

@@ -37,14 +37,21 @@ pub const UndoLog = struct {
     head_page: u32,
     cur_page: u32,
     write_offset: u16, // next free byte offset within cur_page.data
+    // The WAL transaction ID that owns this undo log.  Stored in the first
+    // undo page's header.lsn field so crash recovery can check whether the
+    // transaction committed without reading the full WAL.
+    txn_id: u32,
 
     // Allocate the first undo page, force it to disk, and persist undo_head
     // in the database header so a crash after begin() is detectable on reopen.
-    pub fn begin(pager: *Pager) !UndoLog {
+    // txn_id is the WAL transaction ID assigned by the pager at beginTxn().
+    pub fn begin(pager: *Pager, txn_id: u32) !UndoLog {
         const page_id = try pager.allocPage();
         var buf: [t.PAGE_SIZE]u8 align(@alignOf(t.UndoPage)) = std.mem.zeroes([t.PAGE_SIZE]u8);
         const up: *t.UndoPage = @ptrCast(&buf);
-        up.header = .{ .page_type = .undo, .flags = 0, .checksum = 0, .lsn = 0 };
+        // Store txn_id in header.lsn so recovery can identify which WAL
+        // transaction owns this undo chain without scanning the full WAL.
+        up.header = .{ .page_type = .undo, .flags = 0, .checksum = 0, .lsn = txn_id };
         up.next_page = 0;
         up.data_len = 0;
         try pager.writePage(page_id, &buf);
@@ -59,16 +66,23 @@ pub const UndoLog = struct {
             .head_page = page_id,
             .cur_page = page_id,
             .write_offset = 0,
+            .txn_id = txn_id,
         };
     }
 
     // Open an UndoLog from an existing page chain (used during crash recovery).
-    pub fn fromHead(pager: *Pager, head_page: u32) UndoLog {
+    // Reads the head page to extract the txn_id stored in header.lsn.
+    pub fn fromHead(pager: *Pager, head_page: u32) !UndoLog {
+        var buf: [t.PAGE_SIZE]u8 align(@alignOf(t.UndoPage)) = undefined;
+        try pager.readPage(head_page, &buf);
+        const up: *const t.UndoPage = @ptrCast(&buf);
+        const txn_id: u32 = @truncate(up.header.lsn);
         return .{
             .pager = pager,
             .head_page = head_page,
             .cur_page = head_page,
             .write_offset = 0,
+            .txn_id = txn_id,
         };
     }
 

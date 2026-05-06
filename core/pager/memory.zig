@@ -20,6 +20,7 @@ pub const InMemoryPager = struct {
         .flushPage = memFlushPage,
         .beginTxn = memBeginTxn,
         .endTxn = memEndTxn,
+        .getTxnId = memGetTxnId,
         .commitTxn = memCommitTxn,
         .setWalBypass = memSetWalBypass,
         .checkpoint = memCheckpoint,
@@ -39,6 +40,7 @@ pub const InMemoryPager = struct {
             .sys_tables_root = 0,
             .sys_columns_root = 0,
             .undo_head = 0,
+            .has_wal = false,
         };
     }
 
@@ -69,6 +71,11 @@ pub const InMemoryPager = struct {
 
     fn memEndTxn(ptr: *anyopaque) void {
         _ = ptr;
+    }
+
+    fn memGetTxnId(ptr: *anyopaque) u32 {
+        _ = ptr;
+        return 0;
     }
 
     fn memCommitTxn(ptr: *anyopaque) anyerror!void {

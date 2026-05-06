@@ -13,6 +13,9 @@ pub const Pager = struct {
     sys_tables_root: u32,
     sys_columns_root: u32,
     undo_head: u32,
+    // True for DiskPager (has a WAL file); false for InMemoryPager.
+    // Used by Db.load() to decide whether to run redo recovery.
+    has_wal: bool,
 
     pub const VTable = struct {
         readPage: *const fn (*anyopaque, u32, *[t.PAGE_SIZE]u8) anyerror!void,
@@ -24,6 +27,9 @@ pub const Pager = struct {
         flushPage: *const fn (*anyopaque, u32) anyerror!void,
         beginTxn: *const fn (*anyopaque) void,
         endTxn: *const fn (*anyopaque) void,
+        // Returns the WAL transaction ID assigned at the most recent beginTxn().
+        // Returns 0 for auto-commit mode or for pagers without a WAL.
+        getTxnId: *const fn (*anyopaque) u32,
         // NO-FORCE commit: write a WAL COMMIT record and fsync the WAL.
         // Data pages are NOT flushed to the data file — they stay in the
         // buffer pool until the next checkpoint.
@@ -62,6 +68,10 @@ pub const Pager = struct {
 
     pub fn endTxn(self: *Pager) void {
         self.vtable.endTxn(self.ptr);
+    }
+
+    pub fn getTxnId(self: *Pager) u32 {
+        return self.vtable.getTxnId(self.ptr);
     }
 
     pub fn commitTxn(self: *Pager) !void {
