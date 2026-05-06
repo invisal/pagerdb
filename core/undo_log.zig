@@ -117,8 +117,8 @@ pub const UndoLog = struct {
     // Used during crash recovery when steal is implemented.  Caller owns the
     // returned slice and must free each entry's string/byte fields.
     pub fn readAll(self: *UndoLog, allocator: std.mem.Allocator) ![]UndoEntry {
-        var entries = std.ArrayList(UndoEntry).init(allocator);
-        errdefer entries.deinit();
+        var entries: std.ArrayListUnmanaged(UndoEntry) = .empty;
+        errdefer entries.deinit(allocator);
 
         var page_id = self.head_page;
         while (page_id != 0) {
@@ -129,12 +129,12 @@ pub const UndoLog = struct {
 
             var offset: usize = 0;
             while (offset < valid.len) {
-                try entries.append(try deserializeEntry(valid, &offset, allocator));
+                try entries.append(allocator, try deserializeEntry(valid, &offset, allocator));
             }
             page_id = up.next_page;
         }
 
-        return entries.toOwnedSlice();
+        return entries.toOwnedSlice(allocator);
     }
 
     // Free all pages in the chain and clear pager.undo_head.

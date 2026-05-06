@@ -59,10 +59,13 @@ pub const DiskDbHandle = struct {
     io: std.Io,
     path: []const u8,
 
-    /// Close the database and delete the file.
+    /// Close the database and delete both the data file and WAL file.
     pub fn deinit(self: DiskDbHandle) void {
         self.db.close();
         std.Io.Dir.deleteFile(.cwd(), self.io, self.path) catch {};
+        var wal_buf: [4096]u8 = undefined;
+        const wal_path = std.fmt.bufPrint(&wal_buf, "{s}.wal", .{self.path}) catch return;
+        std.Io.Dir.deleteFile(.cwd(), self.io, wal_path) catch {};
     }
 };
 

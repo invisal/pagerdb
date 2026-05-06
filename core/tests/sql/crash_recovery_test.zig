@@ -22,6 +22,7 @@ test "crash after INSERT: row absent after recovery" {
     const alloc = std.testing.allocator;
     const path = "/tmp/test_crash_insert.db";
     defer Dir.deleteFile(.cwd(), io, path) catch {};
+    defer Dir.deleteFile(.cwd(), io, path ++ ".wal") catch {};
 
     // Session 1: create schema cleanly.
     {
@@ -53,6 +54,7 @@ test "crash after DELETE: row present after recovery" {
     const alloc = std.testing.allocator;
     const path = "/tmp/test_crash_delete.db";
     defer Dir.deleteFile(.cwd(), io, path) catch {};
+    defer Dir.deleteFile(.cwd(), io, path ++ ".wal") catch {};
 
     // Session 1: create schema and commit one row; capture the assigned rowid.
     var inserted_rowid: u64 = undefined;
@@ -88,6 +90,7 @@ test "crash after UPDATE: old value present after recovery" {
     const alloc = std.testing.allocator;
     const path = "/tmp/test_crash_update.db";
     defer Dir.deleteFile(.cwd(), io, path) catch {};
+    defer Dir.deleteFile(.cwd(), io, path ++ ".wal") catch {};
 
     // Session 1: create schema and commit one row with v=1; capture the assigned rowid.
     var inserted_rowid: u64 = undefined;
@@ -128,6 +131,7 @@ test "clean commit leaves undo_head at zero" {
     const alloc = std.testing.allocator;
     const path = "/tmp/test_clean_commit.db";
     defer Dir.deleteFile(.cwd(), io, path) catch {};
+    defer Dir.deleteFile(.cwd(), io, path ++ ".wal") catch {};
 
     {
         const h = try th.makeDiskDb(alloc, io, path, .{ .schema = &.{"CREATE TABLE t (v INT)"} });
@@ -149,6 +153,7 @@ test "clean rollback leaves undo_head at zero" {
     const alloc = std.testing.allocator;
     const path = "/tmp/test_clean_rollback.db";
     defer Dir.deleteFile(.cwd(), io, path) catch {};
+    defer Dir.deleteFile(.cwd(), io, path ++ ".wal") catch {};
 
     {
         const h = try th.makeDiskDb(alloc, io, path, .{ .schema = &.{"CREATE TABLE t (v INT)"} });
@@ -162,5 +167,38 @@ test "clean rollback leaves undo_head at zero" {
         const db = try Db.load(try DiskPager.open(alloc, io, path, .{}), alloc);
         defer db.close();
         try std.testing.expectEqual(@as(u32, 0), db.pager.undo_head);
+    }
+}
+
+test "checkpoint: committed data survives reopen after WAL-only commit" {
+    const io = std.testing.io;
+    const alloc = std.testing.allocator;
+    const path = "/tmp/test_checkpoint.db";
+    defer Dir.deleteFile(.cwd(), io, path) catch {};
+    defer Dir.deleteFile(.cwd(), io, path ++ ".wal") catch {};
+
+    // Session 1: commit a row (NO-FORCE: data pages stay in buffer pool),
+    // then checkpoint (flushes dirty pages to data file, rotates WAL).
+    {
+        const h = try th.makeDiskDb(alloc, io, path, .{ .schema = &.{"CREATE TABLE t (v INT)"} });
+        try h.db.begin();
+        _ = try h.db.insert("t", &.{.{ .int = 42 }});
+        try h.db.commit();
+        // At this point the row is committed in the WAL but may not be in the data file.
+        // Checkpoint flushes everything and rotates the WAL.
+        try h.db.checkpoint();
+        h.db.close();
+    }
+
+    // Session 2: reopen without recovery needed; the row must be present.
+    {
+        const db = try Db.load(try DiskPager.open(alloc, io, path, .{}), alloc);
+        defer db.close();
+        try std.testing.expectEqual(@as(u32, 0), db.pager.undo_head);
+        var it = try db.scanOpen("t");
+        const entry = try it.next(alloc);
+        try std.testing.expect(entry != null);
+        try std.testing.expectEqual(@as(i64, 42), entry.?.values[0].int);
+        alloc.free(entry.?.values);
     }
 }

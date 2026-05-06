@@ -8,7 +8,6 @@ const catalog = @import("catalog.zig");
 const overflow = @import("overflow.zig");
 const txn_mod = @import("txn.zig");
 const undo_log_mod = @import("undo_log.zig");
-const page0_mod = @import("page0.zig");
 
 // Database handle.  Must be heap-allocated (via init() or load()) because
 // catalog.pager is a pointer that must remain valid for the lifetime of the
@@ -36,8 +35,8 @@ pub const Db = struct {
     }
 
     // Load the catalog from a pager that already contains database pages.
-    // If pager.undo_head is non-zero the previous process crashed mid-transaction;
-    // recoverIfNeeded() frees the orphaned undo pages before the catalog is read.
+    // Catalog is loaded first so that recoverIfNeeded() has table metadata
+    // available for undo replay.
     pub fn load(pager: Pager, allocator: std.mem.Allocator) !*Db {
         const db = try allocator.create(Db);
         errdefer allocator.destroy(db);
@@ -45,18 +44,65 @@ pub const Db = struct {
         db.pager = pager;
         db.cat = catalog.Catalog.init(allocator, &db.pager);
         db.txn = null;
-        try db.recoverIfNeeded();
+        // Load catalog before recovery: the system tables (__tables, __columns)
+        // are always committed immediately (createTable force-flushes), so they
+        // are safe to read even if user-data pages have stolen uncommitted state.
         try db.cat.load();
+        try db.recoverIfNeeded();
         return db;
     }
 
-    // If the previous session crashed mid-transaction, undo_head points to an
-    // orphaned undo page chain.  With the no-steal policy, data pages were never
-    // flushed during the transaction, so the database file is already in its last
-    // committed state — only the undo pages need to be freed and the header reset.
+    // Undo any in-flight transaction left by a crash.
+    //
+    // With STEAL, dirty pages from an uncommitted transaction may have reached
+    // the data file before the crash.  We must replay the undo log in reverse to
+    // restore the pre-transaction state, then FORCE-flush the corrected pages.
+    //
+    // WAL bypass is enabled so recovery writes do not produce redo log records.
     fn recoverIfNeeded(self: *Db) !void {
         if (self.pager.undo_head == 0) return;
+
         var ul = undo_log_mod.UndoLog.fromHead(&self.pager, self.pager.undo_head);
+        const entries = try ul.readAll(self.allocator);
+        defer {
+            for (entries) |entry| switch (entry) {
+                .insert => |e| self.allocator.free(e.table),
+                .delete => |e| {
+                    self.allocator.free(e.table);
+                    self.allocator.free(e.row_bytes);
+                },
+                .update => |e| {
+                    self.allocator.free(e.table);
+                    self.allocator.free(e.old_row_bytes);
+                },
+            };
+            self.allocator.free(entries);
+        }
+
+        // Bypass WAL during recovery: compensation writes don't need redo records.
+        self.pager.setWalBypass(true);
+        defer self.pager.setWalBypass(false);
+
+        var i: usize = entries.len;
+        while (i > 0) {
+            i -= 1;
+            switch (entries[i]) {
+                .insert => |e| {
+                    const meta = self.cat.getTable(e.table) orelse continue;
+                    _ = try btree.delete(&self.pager, meta.btree_root, e.rowid);
+                },
+                .delete => |e| {
+                    const meta = self.cat.getTable(e.table) orelse continue;
+                    try btree.insert(&self.pager, meta.btree_root, e.rowid, e.row_bytes, true);
+                },
+                .update => |e| {
+                    const meta = self.cat.getTable(e.table) orelse continue;
+                    _ = try btree.delete(&self.pager, meta.btree_root, e.rowid);
+                    try btree.insert(&self.pager, meta.btree_root, e.rowid, e.old_row_bytes, true);
+                },
+            }
+        }
+
         try ul.discard();
         try self.pager.flush();
     }
@@ -69,6 +115,15 @@ pub const Db = struct {
         self.pager.close();
         self.cat.deinit();
         self.allocator.destroy(self);
+    }
+
+    // Flush all dirty buffer pool pages to the data file and rotate the WAL.
+    // After a checkpoint, crash recovery only needs to replay WAL records
+    // written after this point, keeping recovery time bounded.
+    // Must not be called while a transaction is active.
+    pub fn checkpoint(self: *Db) !void {
+        if (self.txn != null) return error.TransactionAlreadyActive;
+        try self.pager.checkpoint();
     }
 
     // Begin an explicit transaction.  DML operations will be buffered in the
