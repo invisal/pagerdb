@@ -20,6 +20,9 @@ pub const InMemoryPager = struct {
         .flushPage = memFlushPage,
         .beginTxn = memBeginTxn,
         .endTxn = memEndTxn,
+        .commitTxn = memCommitTxn,
+        .setWalBypass = memSetWalBypass,
+        .checkpoint = memCheckpoint,
     };
 
     pub fn create(allocator: Allocator) !Pager {
@@ -66,6 +69,20 @@ pub const InMemoryPager = struct {
 
     fn memEndTxn(ptr: *anyopaque) void {
         _ = ptr;
+    }
+
+    fn memCommitTxn(ptr: *anyopaque) anyerror!void {
+        _ = ptr;
+    }
+
+    fn memSetWalBypass(ptr: *anyopaque, bypass: bool) void {
+        _ = ptr;
+        _ = bypass;
+    }
+
+    fn memCheckpoint(ptr: *anyopaque, p: *Pager) anyerror!void {
+        _ = ptr;
+        _ = p;
     }
 
     fn memClose(ptr: *anyopaque) void {

@@ -8,6 +8,7 @@ const catalog = @import("catalog.zig");
 const overflow = @import("overflow.zig");
 const txn_mod = @import("txn.zig");
 const undo_log_mod = @import("undo_log.zig");
+const page0_mod = @import("page0.zig");
 
 // Database handle.  Must be heap-allocated (via init() or load()) because
 // catalog.pager is a pointer that must remain valid for the lifetime of the
@@ -82,21 +83,37 @@ pub const Db = struct {
         self.pager.beginTxn();
     }
 
-    // Commit the active transaction: free the undo log pages (setting undo_head=0)
-    // then flush all dirty data pages and the updated header together.
+    // Commit the active transaction using NO-FORCE: write a WAL COMMIT record
+    // and fsync the WAL for durability, then update page 0 (undo_head=0) on
+    // disk.  Data pages are NOT flushed — they stay in the buffer pool and
+    // will reach the data file lazily via checkpoint.
     pub fn commit(self: *Db) !void {
         if (self.txn == null) return error.NoActiveTransaction;
+        // Discard undo pages in memory; clears pager.undo_head.
         if (self.txn.?.log_file) |*lf| try lf.discard();
+        // Write page 0 with undo_head=0 to the buffer pool (also writes a WAL record).
+        try page0.writeHeader(&self.pager);
+        // Write WAL COMMIT record + fsync WAL.  Data pages stay in the pool.
+        try self.pager.commitTxn();
+        // Flush page 0 only so undo_head=0 is visible to crash recovery.
+        // The WAL was fsynced by commitTxn, so the WAL rule is satisfied.
+        try self.pager.flushPage(0);
         self.pager.endTxn();
-        try self.pager.flush();
         self.txn.?.deinit();
         self.txn = null;
     }
 
     // Roll back the active transaction by replaying the in-memory undo log in
-    // reverse, then free the disk undo pages and flush the reverted state.
+    // reverse, then free the disk undo pages and FORCE-flush the reverted state.
+    // Undo replay uses wal_bypass so compensation writes don't pollute the WAL.
     pub fn rollback(self: *Db) !void {
         if (self.txn == null) return error.NoActiveTransaction;
+
+        // Bypass WAL for undo operations: we are reverting changes, not making
+        // new committed mutations.  FORCE flush at the end makes the reverted
+        // state durable without needing WAL records for the compensation writes.
+        self.pager.setWalBypass(true);
+        defer self.pager.setWalBypass(false);
 
         const log = self.txn.?.log.items;
         var i: usize = log.len;
@@ -124,6 +141,8 @@ pub const Db = struct {
 
         if (self.txn.?.log_file) |*lf| try lf.discard();
         self.pager.endTxn();
+        // FORCE flush: write all reverted pages to disk so any previously-stolen
+        // dirty pages are overwritten with the pre-transaction state.
         try self.pager.flush();
         self.txn.?.deinit();
         self.txn = null;

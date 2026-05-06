@@ -22,9 +22,18 @@ pub const Pager = struct {
         // Force a single page to disk immediately, bypassing normal flush batching.
         // Used by the undo log to guarantee records are durable before data pages change.
         flushPage: *const fn (*anyopaque, u32) anyerror!void,
-        // No-steal support: prevent dirty data frames from being evicted mid-transaction.
         beginTxn: *const fn (*anyopaque) void,
         endTxn: *const fn (*anyopaque) void,
+        // NO-FORCE commit: write a WAL COMMIT record and fsync the WAL.
+        // Data pages are NOT flushed to the data file — they stay in the
+        // buffer pool until the next checkpoint.
+        commitTxn: *const fn (*anyopaque) anyerror!void,
+        // Enable/disable WAL bypass for rollback undo replay.  When bypass is
+        // true, writePage skips WAL recording so compensation writes don't
+        // pollute the redo log.
+        setWalBypass: *const fn (*anyopaque, bool) void,
+        // Flush all dirty pages to the data file and rotate the WAL.
+        checkpoint: *const fn (*anyopaque, *Pager) anyerror!void,
     };
 
     pub fn readPage(self: *Pager, page_id: u32, buf: *[t.PAGE_SIZE]u8) !void {
@@ -53,6 +62,18 @@ pub const Pager = struct {
 
     pub fn endTxn(self: *Pager) void {
         self.vtable.endTxn(self.ptr);
+    }
+
+    pub fn commitTxn(self: *Pager) !void {
+        return self.vtable.commitTxn(self.ptr);
+    }
+
+    pub fn setWalBypass(self: *Pager, bypass: bool) void {
+        self.vtable.setWalBypass(self.ptr, bypass);
+    }
+
+    pub fn checkpoint(self: *Pager) !void {
+        return self.vtable.checkpoint(self.ptr, self);
     }
 
     pub fn freePage(self: *Pager, page_id: u32) !void {
