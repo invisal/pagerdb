@@ -2,6 +2,7 @@ const std = @import("std");
 const t = @import("../types.zig");
 const btree = @import("../btree.zig");
 const DiskPager = @import("../pager/disk.zig").DiskPager;
+const PageWriter = @import("../page_writer.zig").PageWriter;
 
 const Dir = std.Io.Dir;
 
@@ -15,9 +16,9 @@ test "scan returns rows in rowid order" {
     defer pager.close();
 
     const root_id = try pager.allocPage();
-    var root_buf: [t.PAGE_SIZE]u8 = undefined;
-    btree.initLeafPage(&root_buf, true);
-    try pager.writePage(root_id, &root_buf);
+    var root_pw = PageWriter.init(&pager, root_id);
+    btree.initLeafPage(&root_pw, true);
+    try root_pw.commit();
 
     const row = [_]u8{0x01};
     for ([_]u64{ 10, 5, 20, 1 }) |rowid| {
@@ -44,9 +45,9 @@ test "delete existing row" {
     defer pager.close();
 
     const root_id = try pager.allocPage();
-    var root_buf: [t.PAGE_SIZE]u8 = undefined;
-    btree.initLeafPage(&root_buf, true);
-    try pager.writePage(root_id, &root_buf);
+    var root_pw = PageWriter.init(&pager, root_id);
+    btree.initLeafPage(&root_pw, true);
+    try root_pw.commit();
 
     const row = [_]u8{0x01};
     for (1..11) |i| {
@@ -74,9 +75,9 @@ test "delete non-existent row returns false" {
     defer pager.close();
 
     const root_id = try pager.allocPage();
-    var root_buf: [t.PAGE_SIZE]u8 = undefined;
-    btree.initLeafPage(&root_buf, true);
-    try pager.writePage(root_id, &root_buf);
+    var root_pw = PageWriter.init(&pager, root_id);
+    btree.initLeafPage(&root_pw, true);
+    try root_pw.commit();
 
     const row = [_]u8{0x01};
     try btree.insert(&pager, root_id, 1, &row, true);
@@ -94,9 +95,9 @@ test "delete all rows in a page frees the page" {
     defer pager.close();
 
     const root_id = try pager.allocPage();
-    var root_buf: [t.PAGE_SIZE]u8 = undefined;
-    btree.initLeafPage(&root_buf, true);
-    try pager.writePage(root_id, &root_buf);
+    var root_pw = PageWriter.init(&pager, root_id);
+    btree.initLeafPage(&root_pw, true);
+    try root_pw.commit();
 
     var row: [200]u8 = undefined;
     @memset(&row, 0);
@@ -128,9 +129,9 @@ test "insert and lookup large row via btree" {
     defer pager.close();
 
     const root_id = try pager.allocPage();
-    var root_buf: [t.PAGE_SIZE]u8 = undefined;
-    btree.initLeafPage(&root_buf, true);
-    try pager.writePage(root_id, &root_buf);
+    var root_pw = PageWriter.init(&pager, root_id);
+    btree.initLeafPage(&root_pw, true);
+    try root_pw.commit();
 
     const big_row = try alloc.alloc(u8, 5000);
     defer alloc.free(big_row);
@@ -154,9 +155,9 @@ test "delete overflowed row frees overflow chain" {
     defer pager.close();
 
     const root_id = try pager.allocPage();
-    var root_buf: [t.PAGE_SIZE]u8 = undefined;
-    btree.initLeafPage(&root_buf, true);
-    try pager.writePage(root_id, &root_buf);
+    var root_pw = PageWriter.init(&pager, root_id);
+    btree.initLeafPage(&root_pw, true);
+    try root_pw.commit();
 
     const big_row = try alloc.alloc(u8, 5000);
     defer alloc.free(big_row);

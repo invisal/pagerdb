@@ -2,6 +2,7 @@ const std = @import("std");
 const t = @import("types.zig");
 const ast = @import("sql/ast.zig");
 const Pager = @import("pager/pager.zig").Pager;
+const PageWriter = @import("page_writer.zig").PageWriter;
 const btree = @import("btree.zig");
 const row = @import("row.zig");
 const page0 = @import("page0.zig");
@@ -183,11 +184,12 @@ pub const Catalog = struct {
             const columns_root = try self.pager.allocPage();
             self.pager.sys_tables_root = tables_root;
             self.pager.sys_columns_root = columns_root;
-            var buf: [t.PAGE_SIZE]u8 = undefined;
-            btree.initLeafPage(&buf, true);
-            try self.pager.writePage(tables_root, &buf);
-            btree.initLeafPage(&buf, true);
-            try self.pager.writePage(columns_root, &buf);
+            var tables_pw = PageWriter.init(self.pager, tables_root);
+            btree.initLeafPage(&tables_pw, true);
+            try tables_pw.commit();
+            var columns_pw = PageWriter.init(self.pager, columns_root);
+            btree.initLeafPage(&columns_pw, true);
+            try columns_pw.commit();
             try page0.writeHeader(self.pager);
         }
 
@@ -196,9 +198,9 @@ pub const Catalog = struct {
 
         // Allocate and initialise the new table's root page.
         const root_page = try self.pager.allocPage();
-        var pg_buf: [t.PAGE_SIZE]u8 = undefined;
-        btree.initLeafPage(&pg_buf, true);
-        try self.pager.writePage(root_page, &pg_buf);
+        var root_pw = PageWriter.init(self.pager, root_page);
+        btree.initLeafPage(&root_pw, true);
+        try root_pw.commit();
 
         // Insert catalog rows.
         try self.insertTablesRow(new_table_id, name, @intCast(root_page));

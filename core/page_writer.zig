@@ -43,27 +43,32 @@ pub const PageWriter = struct {
 
     pub fn writeAt(self: *PageWriter, offset: u16, data: []const u8) void {
         @memcpy(self.buf[offset .. offset + data.len], data);
-
-        std.debug.assert(self.delta_count < MAX_DELTAS);
-        self.deltas[self.delta_count] = .{ .len = @intCast(data.len), .offset = @intCast(offset) };
-        self.delta_count += 1;
+        self.recordDelta(offset, @intCast(data.len));
     }
 
     pub fn writeInt(self: *PageWriter, comptime T: type, offset: u16, value: T, endian: std.builtin.Endian) void {
         std.mem.writeInt(T, self.buf[offset..][0..@sizeOf(T)], value, endian);
-
-        std.debug.assert(self.delta_count < MAX_DELTAS);
-        self.deltas[self.delta_count] = .{ .offset = offset, .len = @sizeOf(T) };
-        self.delta_count += 1;
+        self.recordDelta(offset, @sizeOf(T));
     }
 
     // Fill a range with a byte value. Records a single delta covering the range.
     pub fn fill(self: *PageWriter, offset: u16, byte: u8, len: u16) void {
         @memset(self.buf[offset .. offset + len], byte);
+        self.recordDelta(offset, len);
+    }
 
-        std.debug.assert(self.delta_count < MAX_DELTAS);
-        self.deltas[self.delta_count] = .{ .offset = offset, .len = len };
-        self.delta_count += 1;
+    // Once the delta log fills up, collapse to a single full-page delta
+    // (delta_count = MAX_DELTAS + 1) and stop recording. Subsequent writes
+    // still update buf correctly; commit() flushes the whole page either way.
+    fn recordDelta(self: *PageWriter, offset: u16, len: u16) void {
+        if (self.delta_count < MAX_DELTAS) {
+            self.deltas[self.delta_count] = .{ .offset = offset, .len = len };
+            self.delta_count += 1;
+        } else if (self.delta_count == MAX_DELTAS) {
+            self.deltas[0] = .{ .offset = 0, .len = t.PAGE_SIZE };
+            self.delta_count = MAX_DELTAS + 1;
+        }
+        // delta_count > MAX_DELTAS: full-page mode, nothing left to record.
     }
 
     pub fn commit(self: *PageWriter) !void {
