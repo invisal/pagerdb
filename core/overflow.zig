@@ -1,12 +1,37 @@
+// Overflow pages are regular database pages used to store row data
+// that does not fit inline inside a B-tree cell.
+//
+// Overflow chain layout:
+//
+//   first_page
+//        |
+//        v
+//
+//   +-----------+     +-----------+     +-----------+
+//   | Page #12  | --> | Page #18  | --> | Page #24  | --> NULL
+//   | next = 18 |     | next = 24 |     | next = 0  |
+//   | data...   |     | data...   |     | data...   |
+//   +-----------+     +-----------+     +-----------+
+//
+// Each overflow page stores:
+//
+//   [PageHeader | next_page_id | data_len | data...]
+//
+// The first overflow page ID is stored inside the owning B-tree cell.
+// Pages are linked using `next_page_id`, where 0 marks end-of-chain.
+//
+// We keep the first overflow page number in the B-tree cell so that the
+// original row length can be reconstructed during readChain.
+
+// During writes, pages are committed one page late so the previous
+// page can patch its next-page pointer before flushing.
+
 const std = @import("std");
 const t = @import("types.zig");
 const Pager = @import("pager/pager.zig").Pager;
+const PageWriter = @import("page_writer.zig").PageWriter;
 const DiskPager = @import("pager/disk.zig").DiskPager;
 
-// Overflow pages store large row data that doesn't fit inline in a B-tree cell.
-// Each overflow page holds a chunk of data plus a pointer to the next page.
-// We keep the first overflow page number in the B-tree cell so that the
-// original row length can be reconstructed during readChain.
 pub const DATA_CAP: usize = t.PAGE_SIZE - 24;
 const NEXT_PAGE_OFF: usize = @sizeOf(t.PageHeader); // 16
 const DATA_LEN_OFF: usize = @sizeOf(t.PageHeader) + 4; // 20
@@ -17,36 +42,41 @@ comptime {
     std.debug.assert(DATA_OFF + DATA_CAP == t.PAGE_SIZE);
 }
 
+/// Build a linked chain of overflow pages.
+/// Returns the first overflow page ID.
 pub fn buildChain(pager: *Pager, row_data: []const u8) !u32 {
     var remaining: []const u8 = row_data;
     var first_page: u32 = 0;
-    var prev_page: u32 = 0;
+
+    // Overflow pages are committed one page late so the previous
+    // page can patch its next-page pointer.
+    var prev: ?PageWriter = null;
 
     while (remaining.len > 0) {
         const chunk_len = @min(remaining.len, DATA_CAP);
         const page_id = try pager.allocPage();
 
-        // Patch next_page of the previous overflow page before writing this one.
-        if (prev_page != 0) {
-            var prev_buf: [t.PAGE_SIZE]u8 = undefined;
-            try pager.readPage(prev_page, &prev_buf);
-            std.mem.writeInt(u32, prev_buf[NEXT_PAGE_OFF..][0..4], page_id, .little);
-            try pager.writePage(prev_page, &prev_buf);
+        if (prev) |*p| {
+            // Previous page can now be finalized because the next page ID
+            // is known and its next-page pointer can be patched.
+            p.writeInt(u32, @intCast(NEXT_PAGE_OFF), page_id, .little);
+            try p.commit();
         } else {
             first_page = page_id;
         }
 
-        var buf = std.mem.zeroes([t.PAGE_SIZE]u8);
+        // Write as much remaining row data as fits in this overflow page.
         const ph = t.PageHeader{ .page_type = .overflow, .flags = 0, .checksum = 0, .lsn = 0 };
-        @memcpy(buf[0..@sizeOf(t.PageHeader)], std.mem.asBytes(&ph));
-        // next_page stays 0 (filled in by next iteration)
-        std.mem.writeInt(u16, buf[DATA_LEN_OFF..][0..2], @intCast(chunk_len), .little);
-        @memcpy(buf[DATA_OFF..][0..chunk_len], remaining[0..chunk_len]);
-        try pager.writePage(page_id, &buf);
+        var pw = PageWriter.init(pager, page_id);
+        pw.writeAt(0, std.mem.asBytes(&ph));
+        pw.writeInt(u16, @intCast(DATA_LEN_OFF), @intCast(chunk_len), .little);
+        pw.writeAt(@intCast(DATA_OFF), remaining[0..chunk_len]);
 
-        prev_page = page_id;
+        prev = pw;
         remaining = remaining[chunk_len..];
     }
+
+    if (prev) |*p| try p.commit();
     return first_page;
 }
 

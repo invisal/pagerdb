@@ -1,5 +1,6 @@
 const std = @import("std");
 const t = @import("types.zig");
+const PageWriter = @import("page_writer.zig").PageWriter;
 const Pager = @import("pager/pager.zig").Pager;
 const DiskPager = @import("pager/disk.zig").DiskPager;
 const overflow = @import("overflow.zig");
