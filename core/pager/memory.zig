@@ -1,6 +1,7 @@
 const std = @import("std");
 const t = @import("../types.zig");
 const Pager = @import("pager.zig").Pager;
+const Delta = @import("../page_writer.zig").Delta;
 
 const Allocator = std.mem.Allocator;
 
@@ -45,7 +46,7 @@ pub const InMemoryPager = struct {
         buf.* = page;
     }
 
-    fn memWritePage(ptr: *anyopaque, page_id: u32, buf: *const [t.PAGE_SIZE]u8) anyerror!void {
+    fn memWritePage(ptr: *anyopaque, page_id: u32, buf: *const [t.PAGE_SIZE]u8, _: []Delta) anyerror!void {
         const self: *InMemoryPager = @ptrCast(@alignCast(ptr));
         try self.pages.put(page_id, buf.*);
     }

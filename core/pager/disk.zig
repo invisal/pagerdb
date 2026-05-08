@@ -2,6 +2,8 @@ const std = @import("std");
 const t = @import("../types.zig");
 const page0 = @import("../page0.zig");
 const Pager = @import("pager.zig").Pager;
+const WAL = @import("wal.zig").WAL;
+const Delta = @import("../page_writer.zig").Delta;
 
 const Io = std.Io;
 const Dir = std.Io.Dir;
@@ -38,6 +40,15 @@ pub const DiskPager = struct {
     // This keeps data pages in the buffer pool until commit, so the database
     // file always reflects only committed state.
     txn_active: bool = false,
+
+    wal: ?WAL,
+
+    // Writes the WAL LSN into the PageHeader.lsn field of a page image.
+    // Called after copying buf into a frame so recovery can skip already-applied records.
+    fn stampLsn(data: *[t.PAGE_SIZE]u8, lsn: u64) void {
+        const off = @offsetOf(t.PageHeader, "lsn");
+        std.mem.writeInt(u64, data[off..][0..8], lsn, .little);
+    }
 
     const vtable = Pager.VTable{
         .readPage = diskReadPage,
@@ -105,6 +116,8 @@ pub const DiskPager = struct {
         self.tick = 0;
         self.fault_after = null;
         self.fault_write_count = 0;
+        self.txn_active = false;
+        self.wal = null;
         self.pool = try allocator.alloc(Frame, pool_size);
         for (self.pool) |*frame| {
             frame.page_id = std.math.maxInt(u32);
@@ -176,20 +189,33 @@ pub const DiskPager = struct {
         buf.* = frame.data;
     }
 
-    fn diskWritePage(ptr: *anyopaque, page_id: u32, buf: *const [t.PAGE_SIZE]u8) anyerror!void {
+    fn diskWritePage(ptr: *anyopaque, page_id: u32, buf: *const [t.PAGE_SIZE]u8, deltas: []Delta) anyerror!void {
         const self: *DiskPager = @ptrCast(@alignCast(ptr));
         self.tick += 1;
+
+        var latest_lsn: ?u64 = null;
+
+        // |*wal| gives a pointer into self.wal so current_lsn increments persist.
+        if (self.wal) |*wal| {
+            for (deltas) |d| {
+                latest_lsn = try wal.append(page_id, d.offset, buf[d.offset .. d.offset + d.len]);
+            }
+        }
+
         if (self.poolFind(page_id)) |frame| {
             frame.data = buf.*;
             frame.dirty = true;
             frame.lru_tick = self.tick;
+            if (latest_lsn) |lsn| stampLsn(&frame.data, lsn);
             return;
         }
+
         const frame = try self.poolEvict();
         frame.page_id = page_id;
         frame.data = buf.*;
         frame.dirty = true;
         frame.lru_tick = self.tick;
+        if (latest_lsn) |lsn| stampLsn(&frame.data, lsn);
     }
 
     fn diskFlush(ptr: *anyopaque, pager: *Pager) anyerror!void {
@@ -251,7 +277,7 @@ test "create, write, read page" {
     var buf = [_]u8{0} ** t.PAGE_SIZE;
     buf[0] = 0xAB;
     buf[t.PAGE_SIZE - 1] = 0xCD;
-    try pager.writePage(1, &buf);
+    try pager.writePage(1, &buf, &.{});
 
     var read_buf = [_]u8{0} ** t.PAGE_SIZE;
     try pager.readPage(1, &read_buf);
@@ -285,7 +311,7 @@ test "buffer pool hit avoids disk read" {
 
     var buf = std.mem.zeroes([t.PAGE_SIZE]u8);
     buf[0] = 42;
-    try pager.writePage(1, &buf);
+    try pager.writePage(1, &buf, &.{});
 
     var buf2 = std.mem.zeroes([t.PAGE_SIZE]u8);
     try pager.readPage(1, &buf2);

@@ -47,7 +47,7 @@ pub const UndoLog = struct {
         up.header = .{ .page_type = .undo, .flags = 0, .checksum = 0, .lsn = 0 };
         up.next_page = 0;
         up.data_len = 0;
-        try pager.writePage(page_id, &buf);
+        try pager.writePage(page_id, &buf, &.{});
         try pager.flushPage(page_id);
 
         pager.undo_head = page_id;
@@ -88,7 +88,7 @@ pub const UndoLog = struct {
             // Current page is full; link in a fresh one.
             const new_page_id = try self.pager.allocPage();
             up.next_page = new_page_id;
-            try self.pager.writePage(self.cur_page, &buf);
+            try self.pager.writePage(self.cur_page, &buf, &.{});
             try self.pager.flushPage(self.cur_page);
 
             var new_buf: [t.PAGE_SIZE]u8 align(@alignOf(t.UndoPage)) = std.mem.zeroes([t.PAGE_SIZE]u8);
@@ -96,7 +96,7 @@ pub const UndoLog = struct {
             new_up.header = .{ .page_type = .undo, .flags = 0, .checksum = 0, .lsn = 0 };
             new_up.next_page = 0;
             new_up.data_len = 0;
-            try self.pager.writePage(new_page_id, &new_buf);
+            try self.pager.writePage(new_page_id, &new_buf, &.{});
             try self.pager.flushPage(new_page_id);
 
             self.cur_page = new_page_id;
@@ -109,7 +109,7 @@ pub const UndoLog = struct {
         serializeEntryInto(entry, up.data[self.write_offset..]);
         self.write_offset += @intCast(size);
         up.data_len = self.write_offset;
-        try self.pager.writePage(self.cur_page, &buf);
+        try self.pager.writePage(self.cur_page, &buf, &.{});
         try self.pager.flushPage(self.cur_page);
     }
 

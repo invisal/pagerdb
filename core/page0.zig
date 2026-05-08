@@ -20,7 +20,7 @@ pub fn writeHeader(pager: *Pager) !void {
     };
 
     @memcpy(buf[0..@sizeOf(t.DbHeader)], std.mem.asBytes(&header));
-    try pager.writePage(0, &buf);
+    try pager.writePage(0, &buf, &.{});
 }
 
 pub fn readHeader(pager: *Pager) !t.DbHeader {
