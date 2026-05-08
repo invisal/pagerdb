@@ -55,7 +55,6 @@ pub const DiskPager = struct {
         .writePage = diskWritePage,
         .flush = diskFlush,
         .close = diskClose,
-        .flushPage = diskFlushPage,
         .beginTxn = diskBeginTxn,
         .endTxn = diskEndTxn,
     };
@@ -74,7 +73,6 @@ pub const DiskPager = struct {
             .free_list_head = 0,
             .sys_tables_root = 0,
             .sys_columns_root = 0,
-            .undo_head = 0,
         };
         const blank = [_]u8{0} ** t.PAGE_SIZE;
         try file.writeStreamingAll(io, &blank);
@@ -98,14 +96,12 @@ pub const DiskPager = struct {
             .free_list_head = 0,
             .sys_tables_root = 0,
             .sys_columns_root = 0,
-            .undo_head = 0,
         };
         const h = try page0.readHeader(&pager);
         try page0.validateHeader(h);
         pager.free_list_head = h.free_list_head;
         pager.sys_tables_root = h.sys_tables_root;
         pager.sys_columns_root = h.sys_columns_root;
-        pager.undo_head = h.undo_head;
         return pager;
     }
 
@@ -228,19 +224,6 @@ pub const DiskPager = struct {
             }
         }
         try self.file.sync(self.io);
-    }
-
-    // Write a single dirty frame directly to disk without flushing the whole pool.
-    // Used by the undo log to make each record durable before any data page changes.
-    fn diskFlushPage(ptr: *anyopaque, page_id: u32) anyerror!void {
-        const self: *DiskPager = @ptrCast(@alignCast(ptr));
-        if (self.poolFind(page_id)) |frame| {
-            if (frame.dirty) {
-                try self.writePageRaw(frame.page_id, &frame.data);
-                frame.dirty = false;
-            }
-        }
-        // If not in pool the page is already on disk; nothing to do.
     }
 
     fn diskBeginTxn(ptr: *anyopaque) void {

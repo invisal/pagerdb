@@ -13,7 +13,6 @@ pub const PageType = enum(u8) {
     btree_leaf = 2,
     overflow = 3,
     free = 4,
-    undo = 5,
 };
 
 // Page headers use extern layout to guarantee byte offsets for on-disk format.
@@ -44,7 +43,7 @@ pub const ColType = enum(u8) {
 
 pub const DB_MAGIC: u32 = 0x50474442; // "PGDB"
 
-// 4+2+2+4+4+4+4+4+4+32 = 64 bytes
+// 4+2+2+4+4+4+4+4+36 = 64 bytes
 pub const DbHeader = extern struct {
     magic: u32,
     version_major: u16,
@@ -54,10 +53,7 @@ pub const DbHeader = extern struct {
     free_list_head: u32,
     sys_tables_root: u32,
     sys_columns_root: u32,
-    // Non-zero means the previous process crashed mid-transaction.
-    // Crash recovery on open walks the chain and frees the orphaned undo pages.
-    undo_head: u32,
-    _reserved: [32]u8,
+    _reserved: [36]u8,
 };
 
 // 2+2+2+2+4+4+4+4 = 24 bytes
@@ -81,17 +77,6 @@ pub const OverflowPage = extern struct {
     data: [PAGE_SIZE - 24]u8,
 };
 
-// Undo log pages use the same 24-byte overhead layout as overflow pages.
-// Records are packed sequentially into data[]; next_page chains to the next
-// page when the current one is full.
-pub const UndoPage = extern struct {
-    header: PageHeader,
-    next_page: u32, // 0 = end of chain
-    data_len: u16, // bytes of valid record data written so far
-    _pad: u16,
-    data: [PAGE_SIZE - 24]u8,
-};
-
 pub const FreePage = extern struct {
     header: PageHeader,
     next_free_page: u32,
@@ -104,5 +89,4 @@ comptime {
     std.debug.assert(@sizeOf(DbHeader) == 64);
     std.debug.assert(@sizeOf(BTreeHeader) == 24);
     std.debug.assert(@sizeOf(OverflowPage) == PAGE_SIZE);
-    std.debug.assert(@sizeOf(UndoPage) == PAGE_SIZE);
 }

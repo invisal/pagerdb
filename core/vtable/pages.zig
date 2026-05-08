@@ -29,7 +29,6 @@ fn cursorNext(ptr: *anyopaque, alloc: std.mem.Allocator) anyerror!?[]root.Value 
         .btree_internal => "btree_internal",
         .overflow => "overflow",
         .free => "free",
-        .undo => "undo",
     };
 
     const vals = try alloc.alloc(root.Value, 2);
