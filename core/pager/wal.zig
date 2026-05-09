@@ -1,4 +1,6 @@
 const std = @import("std");
+const t = @import("../types.zig");
+const Pager = @import("pager.zig").Pager;
 
 pub const RECORD_HEADER_SIZE: u64 = @sizeOf(u32) +
     @sizeOf(u64) +
@@ -28,9 +30,13 @@ pub const WAL = struct {
         return wal;
     }
 
-    // Open an existing WAL file. Caller must run recovery() before use.
+    // Open an existing WAL file, or create it if it doesn't exist.
+    // Caller must run wal.recover() before use if the file already existed.
     pub fn open(io: std.Io, path: []const u8, alloc: std.mem.Allocator) !WAL {
-        const file = try std.Io.Dir.cwd().openFile(io, path, .{ .mode = .read_write });
+        const file = std.Io.Dir.cwd().openFile(io, path, .{ .mode = .read_write }) catch |err| switch (err) {
+            error.FileNotFound => return create(io, path, alloc),
+            else => return err,
+        };
         return WAL{ .file = file, .io = io, .next_lsn = 0, .buffer = .empty, .alloc = alloc, .offset = 0 };
     }
 
@@ -85,6 +91,41 @@ pub const WAL = struct {
         self.next_lsn += RECORD_HEADER_SIZE + @as(u64, @intCast(payload.len));
 
         return current;
+    }
+
+    // Replay WAL records to bring pages up to date after a crash.
+    // Applies records where page LSN < record LSN, then flushes and resets WAL.
+    pub fn recover(self: *WAL, pager: *Pager, alloc: std.mem.Allocator) !void {
+        var wal_reader = self.reader();
+        var buffer: [t.PAGE_SIZE]u8 = undefined;
+
+        // An empty WAL file means no records were ever written; nothing to recover.
+        wal_reader.open() catch |err| switch (err) {
+            error.EndOfStream => return,
+            else => return err,
+        };
+
+        while (try wal_reader.next(alloc)) |record| {
+            defer alloc.free(record.payload);
+
+            try pager.readPage(record.page_id, &buffer);
+            const offset: usize = @intCast(record.offset);
+
+            if (offset + record.payload.len > t.PAGE_SIZE) return error.CorruptWAL;
+
+            const page_lsn = t.PageHeader.readLSN(&buffer);
+
+            if (page_lsn < record.lsn) {
+                @memcpy(buffer[offset .. offset + record.payload.len], record.payload);
+                t.PageHeader.writeLSN(&buffer, record.lsn);
+                try pager.writePage(record.page_id, &buffer, &.{});
+            }
+
+            self.next_lsn = record.lsn + @as(u64, @intCast(record.payload.len)) + RECORD_HEADER_SIZE;
+        }
+
+        try pager.flush();
+        try self.reset();
     }
 };
 

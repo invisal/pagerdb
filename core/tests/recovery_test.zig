@@ -3,7 +3,6 @@ const t = @import("../types.zig");
 const WAL = @import("../pager/wal.zig").WAL;
 const RECORD_HEADER_SIZE = @import("../pager/wal.zig").RECORD_HEADER_SIZE;
 const InMemoryPager = @import("../pager/memory.zig").InMemoryPager;
-const recovery = @import("../recovery.zig").recovery;
 
 const Dir = std.Io.Dir;
 
@@ -50,7 +49,7 @@ test "empty WAL file returns immediately without touching the pager" {
     var pager = try InMemoryPager.create(alloc);
     defer pager.close();
 
-    try recovery(&wal, &pager, alloc);
+    try wal.recover(&pager, alloc);
 
     // Pager is untouched — only the initial page 0 created by InMemoryPager exists.
     try std.testing.expectEqual(@as(u32, 1), pager.total_pages);
@@ -71,7 +70,7 @@ test "recovery with no WAL records leaves next_lsn unchanged" {
     var pager = try InMemoryPager.create(alloc);
     defer pager.close();
 
-    try recovery(&wal, &pager, alloc);
+    try wal.recover(&pager, alloc);
 
     // next_lsn is restored from the WAL header (42) and stays there.
     try std.testing.expectEqual(@as(u64, 42), wal.next_lsn);
@@ -99,7 +98,7 @@ test "recovery applies WAL record to a stale page" {
     _ = try wal.append(1, 16, "hello");
     try wal.flush();
 
-    try recovery(&wal, &pager, alloc);
+    try wal.recover(&pager, alloc);
 
     var result: [t.PAGE_SIZE]u8 = undefined;
     try pager.readPage(1, &result);
@@ -130,7 +129,7 @@ test "recovery skips a page whose LSN is already ahead of the WAL record" {
     _ = try wal.append(1, 16, "hello");
     try wal.flush();
 
-    try recovery(&wal, &pager, alloc);
+    try wal.recover(&pager, alloc);
 
     var result: [t.PAGE_SIZE]u8 = undefined;
     try pager.readPage(1, &result);
@@ -163,7 +162,7 @@ test "recovery patches stale pages and skips fresh ones in the same run" {
     _ = try wal.append(2, 16, "bbbb"); // LSN=32
     try wal.flush();
 
-    try recovery(&wal, &pager, alloc);
+    try wal.recover(&pager, alloc);
 
     var r1: [t.PAGE_SIZE]u8 = undefined;
     var r2: [t.PAGE_SIZE]u8 = undefined;
@@ -194,7 +193,7 @@ test "recovery advances next_lsn past the last WAL record" {
     _ = try wal.append(1, 16, payload);
     try wal.flush();
 
-    try recovery(&wal, &pager, alloc);
+    try wal.recover(&pager, alloc);
 
     // next_lsn = record.lsn(0) + payload.len(4) + RECORD_HEADER_SIZE(18) = 22
     const expected: u64 = 0 + payload.len + RECORD_HEADER_SIZE;
@@ -220,7 +219,7 @@ test "recovery truncates WAL to a header-only file after completing" {
     _ = try wal.append(1, 16, "test");
     try wal.flush();
 
-    try recovery(&wal, &pager, alloc);
+    try wal.recover(&pager, alloc);
 
     // WAL file must contain exactly the 8-byte next_lsn header.
     const file_len = try wal.file.length(wal.io);
@@ -254,7 +253,7 @@ test "recovery returns CorruptWAL when record write range overflows the page" {
     _ = try wal.append(1, 8100, &payload);
     try wal.flush();
 
-    try std.testing.expectError(error.CorruptWAL, recovery(&wal, &pager, alloc));
+    try std.testing.expectError(error.CorruptWAL, wal.recover(&pager, alloc));
 }
 
 test "recovery returns CorruptWAL when the WAL file is truncated mid-record" {
@@ -285,5 +284,5 @@ test "recovery returns CorruptWAL when the WAL file is truncated mid-record" {
     var pager = try InMemoryPager.create(alloc);
     defer pager.close();
 
-    try std.testing.expectError(error.CorruptWAL, recovery(&wal, &pager, alloc));
+    try std.testing.expectError(error.CorruptWAL, wal.recover(&pager, alloc));
 }

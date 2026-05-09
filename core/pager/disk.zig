@@ -4,7 +4,6 @@ const page0 = @import("../page0.zig");
 const Pager = @import("pager.zig").Pager;
 const WAL = @import("wal.zig").WAL;
 const Delta = @import("../page_writer.zig").Delta;
-const recovery_fn = @import("../recovery.zig").recovery;
 
 const Io = std.Io;
 const Dir = std.Io.Dir;
@@ -19,6 +18,7 @@ pub const Config = struct {
     // How many pages to keep in RAM.  Linear scan over the pool is O(pool_size),
     // so values above ~512 may benefit from a hash-map eviction index instead.
     pool_size: usize = DEFAULT_POOL_SIZE,
+    wal: ?*WAL = null,
 };
 
 const Frame = struct {
@@ -42,7 +42,7 @@ pub const DiskPager = struct {
     // file always reflects only committed state.
     txn_active: bool = false,
 
-    wal: ?WAL,
+    wal: ?*WAL,
 
     const vtable = Pager.VTable{
         .readPage = diskReadPage,
@@ -61,10 +61,7 @@ pub const DiskPager = struct {
         try initSelf(self, file, io, allocator, config.pool_size);
         errdefer allocator.free(self.pool);
 
-        const wal_path = try std.fmt.allocPrint(allocator, "{s}.wal", .{path});
-        defer allocator.free(wal_path);
-        self.wal = try WAL.create(io, wal_path, allocator);
-        errdefer self.wal.?.deinit();
+        self.wal = config.wal;
 
         var pager = Pager{
             .ptr = self,
@@ -103,17 +100,7 @@ pub const DiskPager = struct {
         pager.sys_tables_root = h.sys_tables_root;
         pager.sys_columns_root = h.sys_columns_root;
 
-        // Open existing WAL, or create a fresh one if missing (e.g. first open
-        // after migrating from a build without WAL support).
-        const wal_path = try std.fmt.allocPrint(allocator, "{s}.wal", .{path});
-        defer allocator.free(wal_path);
-        self.wal = WAL.open(io, wal_path, allocator) catch |err| switch (err) {
-            error.FileNotFound => try WAL.create(io, wal_path, allocator),
-            else => return err,
-        };
-        errdefer self.wal.?.deinit();
-        try recovery_fn(&self.wal.?, &pager, allocator);
-
+        self.wal = config.wal;
         return pager;
     }
 
@@ -204,7 +191,7 @@ pub const DiskPager = struct {
         var latest_lsn: ?u64 = null;
 
         // |*wal| gives a pointer into self.wal so current_lsn increments persist.
-        if (self.wal) |*wal| {
+        if (self.wal) |wal| {
             for (deltas) |d| {
                 latest_lsn = try wal.append(page_id, d.offset, buf[d.offset .. d.offset + d.len]);
             }
@@ -233,7 +220,7 @@ pub const DiskPager = struct {
         std.debug.assert(!self.txn_active);
         // WAL must reach disk before pages so recovery can replay any records
         // that were not yet applied to the data file at crash time.
-        if (self.wal) |*wal| try wal.flush();
+        if (self.wal) |wal| try wal.flush();
         try page0.writeHeader(pager);
         for (self.pool) |*frame| {
             if (frame.dirty and frame.page_id != std.math.maxInt(u32)) {
@@ -254,9 +241,25 @@ pub const DiskPager = struct {
         self.txn_active = false;
     }
 
+    // Cast a generic Pager handle back to the underlying DiskPager.
+    // Only valid when the Pager was created by DiskPager.create() or DiskPager.open().
+    pub fn asDiskPager(pager: *Pager) *DiskPager {
+        return @ptrCast(@alignCast(pager.ptr));
+    }
+
+    // Discard all dirty in-memory pages and reset fault injection state without
+    // writing anything to disk.  Used by crash simulation tests to mimic a
+    // process crash: the in-memory buffer pool is lost, disk reflects whatever
+    // was written before the simulated fault.
+    pub fn simulateCrash(pager: *Pager) void {
+        const self = asDiskPager(pager);
+        for (self.pool) |*frame| frame.dirty = false;
+        self.fault_after = null;
+        self.fault_write_count = 0;
+    }
+
     fn diskClose(ptr: *anyopaque) void {
         const self: *DiskPager = @ptrCast(@alignCast(ptr));
-        if (self.wal) |*wal| wal.deinit();
         self.file.close(self.io);
         self.allocator.free(self.pool);
         self.allocator.destroy(self);
