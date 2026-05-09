@@ -23,6 +23,16 @@ pub const PageHeader = extern struct {
     flags: u8,
     checksum: u32,
     lsn: u64,
+
+    pub fn writeLSN(buffer: *[PAGE_SIZE]u8, lsn: u64) void {
+        const off = @offsetOf(PageHeader, "lsn");
+        std.mem.writeInt(u64, buffer[off..][0..8], lsn, .little);
+    }
+
+    pub fn readLSN(buffer: *[PAGE_SIZE]u8) u64 {
+        const off = @offsetOf(PageHeader, "lsn");
+        return std.mem.readInt(u64, buffer[off..][0..8], .little);
+    }
 };
 
 pub const ColType = enum(u8) {

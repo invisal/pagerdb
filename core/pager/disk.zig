@@ -43,13 +43,6 @@ pub const DiskPager = struct {
 
     wal: ?WAL,
 
-    // Writes the WAL LSN into the PageHeader.lsn field of a page image.
-    // Called after copying buf into a frame so recovery can skip already-applied records.
-    fn stampLsn(data: *[t.PAGE_SIZE]u8, lsn: u64) void {
-        const off = @offsetOf(t.PageHeader, "lsn");
-        std.mem.writeInt(u64, data[off..][0..8], lsn, .little);
-    }
-
     const vtable = Pager.VTable{
         .readPage = diskReadPage,
         .writePage = diskWritePage,
@@ -202,7 +195,7 @@ pub const DiskPager = struct {
             frame.data = buf.*;
             frame.dirty = true;
             frame.lru_tick = self.tick;
-            if (latest_lsn) |lsn| stampLsn(&frame.data, lsn);
+            if (latest_lsn) |lsn| t.PageHeader.writeLSN(&frame.data, lsn);
             return;
         }
 
@@ -211,11 +204,17 @@ pub const DiskPager = struct {
         frame.data = buf.*;
         frame.dirty = true;
         frame.lru_tick = self.tick;
-        if (latest_lsn) |lsn| stampLsn(&frame.data, lsn);
+        if (latest_lsn) |lsn| t.PageHeader.writeLSN(&frame.data, lsn);
     }
 
     fn diskFlush(ptr: *anyopaque, pager: *Pager) anyerror!void {
         const self: *DiskPager = @ptrCast(@alignCast(ptr));
+        // Flush is only valid at commit time; dirty pages must never reach disk
+        // mid-transaction (no-steal policy).
+        std.debug.assert(!self.txn_active);
+        // WAL must reach disk before pages so recovery can replay any records
+        // that were not yet applied to the data file at crash time.
+        if (self.wal) |*wal| try wal.flush();
         try page0.writeHeader(pager);
         for (self.pool) |*frame| {
             if (frame.dirty and frame.page_id != std.math.maxInt(u32)) {
