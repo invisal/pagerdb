@@ -1,7 +1,6 @@
 const std = @import("std");
 const lib = @import("core");
-const Db = lib.Database;
-const execute = lib.execute;
+const Db = lib.ManagedDatabase;
 const Console = @import("console.zig").Console;
 
 const PROMPT = "pagerdb> ";
@@ -44,7 +43,7 @@ pub fn run(db: *Db, io: std.Io, alloc: std.mem.Allocator) !void {
                 if (trimmed.len == 0) continue;
 
                 if (!in_continuation and trimmed[0] == '.') {
-                    handleMeta(db, trimmed, io, alloc, &out.interface, &err.interface) catch |e| switch (e) {
+                    handleMeta(trimmed, &out.interface, &err.interface) catch |e| switch (e) {
                         error.Exit => return,
                         else => {
                             try err.interface.print("Error: {s}\n", .{@errorName(e)});
@@ -104,14 +103,11 @@ pub fn run(db: *Db, io: std.Io, alloc: std.mem.Allocator) !void {
     }
 }
 
-// Handle dot-commands (meta-commands) like .help, .quit, .tables.
+// Handle dot-commands (meta-commands) like .help, .quit
 // These are not SQL statements; they're client-side directives.
 // We return error.Exit for .quit/.exit so the caller can break the REPL loop.
 fn handleMeta(
-    db: *Db,
     line: []const u8,
-    io: std.Io,
-    alloc: std.mem.Allocator,
     out: *std.Io.Writer,
     err: *std.Io.Writer,
 ) !void {
@@ -122,8 +118,6 @@ fn handleMeta(
         return error.Exit;
     } else if (std.ascii.eqlIgnoreCase(line, ".help")) {
         try printHelp(out);
-    } else if (std.ascii.eqlIgnoreCase(line, ".tables")) {
-        try printTables(db, alloc, io, out);
     } else {
         try out.print("Unknown command: {s}  (try .help)\n", .{line});
     }
@@ -139,29 +133,15 @@ fn execAndPrint(
     err: *std.Io.Writer,
 ) !void {
     _ = err;
-    var result = try execute(db, sql, alloc);
+    var result = try db.execute(sql, alloc);
     defer result.deinit();
     try lib.debug.printTo(result, out);
-}
-
-fn printTables(db: *Db, alloc: std.mem.Allocator, io: std.Io, out: *std.Io.Writer) !void {
-    _ = alloc;
-    _ = io;
-    var it = db.cat.tables.keyIterator();
-    var count: usize = 0;
-    while (it.next()) |key| {
-        if (std.mem.startsWith(u8, key.*, "__")) continue;
-        try out.print("{s}\n", .{key.*});
-        count += 1;
-    }
-    if (count == 0) try out.print("(no tables)\n", .{});
 }
 
 fn printHelp(out: *std.Io.Writer) !void {
     try out.print(
         \\Meta-commands:
         \\  .help     Show this help
-        \\  .tables   List all user tables
         \\  .quit     Exit  (Ctrl-D also works)
         \\
         \\Enter SQL terminated by ';'. Statements can span multiple lines.

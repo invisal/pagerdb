@@ -1,5 +1,6 @@
 // Public API surface for the pagerdb library.
 pub const Database = @import("db.zig").Db;
+pub const ManagedDatabase = @import("managed_db.zig").ManagedDatabase;
 pub const Pager = @import("pager/pager.zig").Pager;
 pub const DiskPager = @import("pager/disk.zig").DiskPager;
 pub const InMemoryPager = @import("pager/memory.zig").InMemoryPager;
