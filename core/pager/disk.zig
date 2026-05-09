@@ -4,6 +4,7 @@ const page0 = @import("../page0.zig");
 const Pager = @import("pager.zig").Pager;
 const WAL = @import("wal.zig").WAL;
 const Delta = @import("../page_writer.zig").Delta;
+const recovery_fn = @import("../recovery.zig").recovery;
 
 const Io = std.Io;
 const Dir = std.Io.Dir;
@@ -59,6 +60,12 @@ pub const DiskPager = struct {
         errdefer allocator.destroy(self);
         try initSelf(self, file, io, allocator, config.pool_size);
         errdefer allocator.free(self.pool);
+
+        const wal_path = try std.fmt.allocPrint(allocator, "{s}.wal", .{path});
+        defer allocator.free(wal_path);
+        self.wal = try WAL.create(io, wal_path, allocator);
+        errdefer self.wal.?.deinit();
+
         var pager = Pager{
             .ptr = self,
             .vtable = &vtable,
@@ -95,6 +102,18 @@ pub const DiskPager = struct {
         pager.free_list_head = h.free_list_head;
         pager.sys_tables_root = h.sys_tables_root;
         pager.sys_columns_root = h.sys_columns_root;
+
+        // Open existing WAL, or create a fresh one if missing (e.g. first open
+        // after migrating from a build without WAL support).
+        const wal_path = try std.fmt.allocPrint(allocator, "{s}.wal", .{path});
+        defer allocator.free(wal_path);
+        self.wal = WAL.open(io, wal_path, allocator) catch |err| switch (err) {
+            error.FileNotFound => try WAL.create(io, wal_path, allocator),
+            else => return err,
+        };
+        errdefer self.wal.?.deinit();
+        try recovery_fn(&self.wal.?, &pager, allocator);
+
         return pager;
     }
 
@@ -237,6 +256,7 @@ pub const DiskPager = struct {
 
     fn diskClose(ptr: *anyopaque) void {
         const self: *DiskPager = @ptrCast(@alignCast(ptr));
+        if (self.wal) |*wal| wal.deinit();
         self.file.close(self.io);
         self.allocator.free(self.pool);
         self.allocator.destroy(self);
@@ -251,6 +271,7 @@ test "create, write, read page" {
     const io = std.testing.io;
     const path = "/tmp/test_pager.db";
     defer Dir2.deleteFile(.cwd(), io, path) catch {};
+    defer Dir2.deleteFile(.cwd(), io, path ++ ".wal") catch {};
     const alloc = std.testing.allocator;
 
     var pager = try DiskPager.create(alloc, io, path, .{});
@@ -272,6 +293,7 @@ test "allocPage extends file" {
     const io = std.testing.io;
     const path = "/tmp/test_alloc.db";
     defer Dir2.deleteFile(.cwd(), io, path) catch {};
+    defer Dir2.deleteFile(.cwd(), io, path ++ ".wal") catch {};
     const alloc = std.testing.allocator;
 
     var pager = try DiskPager.create(alloc, io, path, .{});
@@ -286,6 +308,7 @@ test "buffer pool hit avoids disk read" {
     const io = std.testing.io;
     const path = "/tmp/test_pool.db";
     defer Dir2.deleteFile(.cwd(), io, path) catch {};
+    defer Dir2.deleteFile(.cwd(), io, path ++ ".wal") catch {};
     const alloc = std.testing.allocator;
 
     var pager = try DiskPager.create(alloc, io, path, .{});
@@ -304,6 +327,7 @@ test "freePage and allocPage reuse" {
     const io = std.testing.io;
     const path = "/tmp/test_free.db";
     defer Dir2.deleteFile(.cwd(), io, path) catch {};
+    defer Dir2.deleteFile(.cwd(), io, path ++ ".wal") catch {};
     const alloc = std.testing.allocator;
 
     var pager = try DiskPager.create(alloc, io, path, .{});

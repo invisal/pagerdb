@@ -20,6 +20,25 @@ pub const WAL = struct {
     alloc: std.mem.Allocator,
     offset: usize,
 
+    // Create a new WAL file and write the initial LSN header.
+    pub fn create(io: std.Io, path: []const u8, alloc: std.mem.Allocator) !WAL {
+        const file = try std.Io.Dir.cwd().createFile(io, path, .{ .read = true });
+        var wal = WAL{ .file = file, .io = io, .next_lsn = 0, .buffer = .empty, .alloc = alloc, .offset = 0 };
+        try wal.reset();
+        return wal;
+    }
+
+    // Open an existing WAL file. Caller must run recovery() before use.
+    pub fn open(io: std.Io, path: []const u8, alloc: std.mem.Allocator) !WAL {
+        const file = try std.Io.Dir.cwd().openFile(io, path, .{ .mode = .read_write });
+        return WAL{ .file = file, .io = io, .next_lsn = 0, .buffer = .empty, .alloc = alloc, .offset = 0 };
+    }
+
+    pub fn deinit(self: *WAL) void {
+        self.file.close(self.io);
+        self.buffer.deinit(self.alloc);
+    }
+
     pub fn reader(self: *WAL) WALReader {
         return .{
             .wal = self,

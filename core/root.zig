@@ -10,6 +10,7 @@ pub const Row = @import("sql/executor.zig").Row;
 pub const row = @import("row.zig");
 pub const catalog = @import("catalog.zig");
 pub const btree = @import("btree.zig");
+pub const WAL = @import("pager/wal.zig").WAL;
 
 // Debug utilities for printing query results.
 // Usage: PagerDB.debug.print(result);

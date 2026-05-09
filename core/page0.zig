@@ -41,6 +41,7 @@ test "create and reopen preserves header" {
     const alloc = std.testing.allocator;
     const path = "/tmp/test_page0.db";
     defer Dir.deleteFile(.cwd(), io, path) catch {};
+    defer Dir.deleteFile(.cwd(), io, path ++ ".wal") catch {};
 
     {
         var pager = try DiskPager.create(alloc, io, path, .{});
@@ -63,6 +64,7 @@ test "catalog roots round-trip through header" {
     const alloc = std.testing.allocator;
     const path = "/tmp/test_page0_roots.db";
     defer Dir.deleteFile(.cwd(), io, path) catch {};
+    defer Dir.deleteFile(.cwd(), io, path ++ ".wal") catch {};
 
     {
         var pager = try DiskPager.create(alloc, io, path, .{});

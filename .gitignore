@@ -1,6 +1,9 @@
 .zig-cache/
 zig-out/
+
 mydb.db
+mydb.db.wal
+
 .claude/
 bench/data/*.db
 
