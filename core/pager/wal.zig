@@ -90,7 +90,9 @@ pub const WALReader = struct {
         const offset = self.readInt(u16) catch return error.CorruptWAL;
 
         const buffer = try alloc.alloc(u8, length);
-        try self.wal.file.readPositionalAll(self.wal.io, buffer, self.offset);
+        errdefer alloc.free(buffer);
+        const n = try self.wal.file.readPositionalAll(self.wal.io, buffer, self.offset);
+        if (n != length) return error.CorruptWAL;
         self.offset += @intCast(length);
 
         return Record{
@@ -103,7 +105,8 @@ pub const WALReader = struct {
 
     fn readInt(self: *WALReader, comptime T: type) !T {
         var buffer: [@sizeOf(T)]u8 = undefined;
-        try self.wal.file.readPositionalAll(self.wal.io, &buffer, self.offset);
+        const n = try self.wal.file.readPositionalAll(self.wal.io, &buffer, self.offset);
+        if (n != @sizeOf(T)) return error.EndOfStream;
         self.offset += @sizeOf(T);
         return std.mem.readInt(T, &buffer, .little);
     }
