@@ -9,14 +9,17 @@
 // A failing seed can be replayed exactly with --seed N.
 //
 // Run:
-//   zig build dst                   # 200 seeds × 50 ops
-//   zig build dst -- --seeds 1000   # more seeds
-//   zig build dst -- --seed 42      # replay one specific seed
+//   zig build dst                        # 200 seeds × 50 ops (correctness)
+//   zig build dst -- --seeds 1000        # more seeds
+//   zig build dst -- --seed 42           # replay one specific seed
+//   zig build dst -- --wal               # WAL crash-recovery simulation
+//   zig build dst -- --wal --seeds 100   # more WAL seeds
 
 const std = @import("std");
 const core = @import("core");
 const checker = @import("checker.zig");
 const workload = @import("workload.zig");
+const wal_sim = @import("wal_sim.zig");
 
 const Database = core.Database;
 const DiskPager = core.DiskPager;
@@ -24,6 +27,7 @@ const Dir = std.Io.Dir;
 
 const DEFAULT_SEEDS: u64 = 200;
 const DEFAULT_OPS: u64 = 50;
+const DEFAULT_WAL_SEEDS: u64 = 50;
 
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
@@ -35,6 +39,7 @@ pub fn main(init: std.process.Init) !void {
     var num_seeds: u64 = DEFAULT_SEEDS;
     var ops_per_seed: u64 = DEFAULT_OPS;
     var single_seed: ?u64 = null;
+    var wal_mode = false;
 
     var i: usize = 1;
     while (i < args.len) : (i += 1) {
@@ -47,7 +52,14 @@ pub fn main(init: std.process.Init) !void {
         } else if (std.mem.eql(u8, args[i], "--seed") and i + 1 < args.len) {
             i += 1;
             single_seed = try std.fmt.parseInt(u64, args[i], 10);
+        } else if (std.mem.eql(u8, args[i], "--wal")) {
+            wal_mode = true;
         }
+    }
+
+    if (wal_mode) {
+        const seeds = if (num_seeds == DEFAULT_SEEDS) DEFAULT_WAL_SEEDS else num_seeds;
+        return wal_sim.run(io, alloc, seeds);
     }
 
     if (single_seed) |s| {
@@ -74,7 +86,12 @@ fn runSeed(io: std.Io, alloc: std.mem.Allocator, seed: u64, n_ops: u64) !void {
 
     var path_buf: [64]u8 = undefined;
     const path = try std.fmt.bufPrint(&path_buf, "/tmp/dst_{d}.db", .{seed});
+
+    var wal_path_buf: [72]u8 = undefined;
+    const wal_path = try std.fmt.bufPrint(&wal_path_buf, "{s}.wal", .{path});
+
     defer Dir.deleteFile(.cwd(), io, path) catch {};
+    defer Dir.deleteFile(.cwd(), io, wal_path) catch {};
 
     const db = try Database.init(try DiskPager.create(alloc, io, path, .{}), alloc);
     defer db.close();

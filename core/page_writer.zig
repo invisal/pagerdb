@@ -72,6 +72,8 @@ pub const PageWriter = struct {
     }
 
     pub fn commit(self: *PageWriter) !void {
-        try self.pager.writePage(self.page_id, &self.buf);
+        // Full-page mode collapses all deltas to deltas[0]; everything else uses delta_count.
+        const n: usize = if (self.delta_count > MAX_DELTAS) 1 else self.delta_count;
+        try self.pager.writePage(self.page_id, &self.buf, self.deltas[0..n]);
     }
 };

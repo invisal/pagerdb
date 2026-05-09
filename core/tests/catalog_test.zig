@@ -10,6 +10,7 @@ test "fresh database has no pages beyond header" {
     const io = std.testing.io;
     const path = "/tmp/test_catalog_fresh.db";
     defer Dir.deleteFile(.cwd(), io, path) catch {};
+    defer Dir.deleteFile(.cwd(), io, path ++ ".wal") catch {};
     const alloc = std.testing.allocator;
 
     var pager = try DiskPager.create(alloc, io, path, .{});
@@ -30,6 +31,7 @@ test "createTable allocates catalog roots lazily" {
     const io = std.testing.io;
     const path = "/tmp/test_catalog_lazy.db";
     defer Dir.deleteFile(.cwd(), io, path) catch {};
+    defer Dir.deleteFile(.cwd(), io, path ++ ".wal") catch {};
     const alloc = std.testing.allocator;
 
     var tables_root: u32 = 0;
@@ -72,6 +74,7 @@ test "createTable persists across reopen" {
     const io = std.testing.io;
     const path = "/tmp/test_catalog_create.db";
     defer Dir.deleteFile(.cwd(), io, path) catch {};
+    defer Dir.deleteFile(.cwd(), io, path ++ ".wal") catch {};
     const alloc = std.testing.allocator;
 
     const cols = [_]ColumnMeta{
@@ -109,6 +112,7 @@ test "next_table_id increments correctly across multiple tables" {
     const io = std.testing.io;
     const path = "/tmp/test_catalog_ids.db";
     defer Dir.deleteFile(.cwd(), io, path) catch {};
+    defer Dir.deleteFile(.cwd(), io, path ++ ".wal") catch {};
     const alloc = std.testing.allocator;
 
     const col = [_]ColumnMeta{.{ .name = "x", .col_type = .int, .nullable = false, .default_src = null, .default_expr = null }};
@@ -144,6 +148,7 @@ test "duplicate table name returns error" {
     const io = std.testing.io;
     const path = "/tmp/test_catalog_dup.db";
     defer Dir.deleteFile(.cwd(), io, path) catch {};
+    defer Dir.deleteFile(.cwd(), io, path ++ ".wal") catch {};
     const alloc = std.testing.allocator;
 
     var pager = try DiskPager.create(alloc, io, path, .{});

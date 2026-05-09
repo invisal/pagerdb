@@ -15,12 +15,11 @@ pub fn writeHeader(pager: *Pager) !void {
         .free_list_head = pager.free_list_head,
         .sys_tables_root = pager.sys_tables_root,
         .sys_columns_root = pager.sys_columns_root,
-        .undo_head = pager.undo_head,
-        ._reserved = std.mem.zeroes([32]u8),
+        ._reserved = std.mem.zeroes([36]u8),
     };
 
     @memcpy(buf[0..@sizeOf(t.DbHeader)], std.mem.asBytes(&header));
-    try pager.writePage(0, &buf);
+    try pager.writePage(0, &buf, &.{});
 }
 
 pub fn readHeader(pager: *Pager) !t.DbHeader {
@@ -42,6 +41,7 @@ test "create and reopen preserves header" {
     const alloc = std.testing.allocator;
     const path = "/tmp/test_page0.db";
     defer Dir.deleteFile(.cwd(), io, path) catch {};
+    defer Dir.deleteFile(.cwd(), io, path ++ ".wal") catch {};
 
     {
         var pager = try DiskPager.create(alloc, io, path, .{});
@@ -64,6 +64,7 @@ test "catalog roots round-trip through header" {
     const alloc = std.testing.allocator;
     const path = "/tmp/test_page0_roots.db";
     defer Dir.deleteFile(.cwd(), io, path) catch {};
+    defer Dir.deleteFile(.cwd(), io, path ++ ".wal") catch {};
 
     {
         var pager = try DiskPager.create(alloc, io, path, .{});
@@ -91,8 +92,7 @@ test "bad magic returns error" {
         .free_list_head = 0,
         .sys_tables_root = 0,
         .sys_columns_root = 0,
-        .undo_head = 0,
-        ._reserved = std.mem.zeroes([32]u8),
+        ._reserved = std.mem.zeroes([36]u8),
     };
     try std.testing.expectError(error.BadMagic, validateHeader(bad));
 }

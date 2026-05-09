@@ -11,6 +11,7 @@ test "scan returns rows in rowid order" {
     const alloc = std.testing.allocator;
     const path = "/tmp/test_btree_scan_order.db";
     defer Dir.deleteFile(.cwd(), io, path) catch {};
+    defer Dir.deleteFile(.cwd(), io, path ++ ".wal") catch {};
 
     var pager = try DiskPager.create(alloc, io, path, .{});
     defer pager.close();
@@ -40,6 +41,7 @@ test "delete existing row" {
     const alloc = std.testing.allocator;
     const path = "/tmp/test_btree_delete_row.db";
     defer Dir.deleteFile(.cwd(), io, path) catch {};
+    defer Dir.deleteFile(.cwd(), io, path ++ ".wal") catch {};
 
     var pager = try DiskPager.create(alloc, io, path, .{});
     defer pager.close();
@@ -70,6 +72,7 @@ test "delete non-existent row returns false" {
     const alloc = std.testing.allocator;
     const path = "/tmp/test_btree_delete_nonexist.db";
     defer Dir.deleteFile(.cwd(), io, path) catch {};
+    defer Dir.deleteFile(.cwd(), io, path ++ ".wal") catch {};
 
     var pager = try DiskPager.create(alloc, io, path, .{});
     defer pager.close();
@@ -90,6 +93,7 @@ test "delete all rows in a page frees the page" {
     const alloc = std.testing.allocator;
     const path = "/tmp/test_btree_delete_freepage.db";
     defer Dir.deleteFile(.cwd(), io, path) catch {};
+    defer Dir.deleteFile(.cwd(), io, path ++ ".wal") catch {};
 
     var pager = try DiskPager.create(alloc, io, path, .{});
     defer pager.close();
@@ -124,6 +128,7 @@ test "insert and lookup large row via btree" {
     const alloc = std.testing.allocator;
     const path = "/tmp/test_btree_overflow.db";
     defer Dir.deleteFile(.cwd(), io, path) catch {};
+    defer Dir.deleteFile(.cwd(), io, path ++ ".wal") catch {};
 
     var pager = try DiskPager.create(alloc, io, path, .{});
     defer pager.close();
@@ -150,6 +155,7 @@ test "delete overflowed row frees overflow chain" {
     const alloc = std.testing.allocator;
     const path = "/tmp/test_btree_overflow_delete.db";
     defer Dir.deleteFile(.cwd(), io, path) catch {};
+    defer Dir.deleteFile(.cwd(), io, path ++ ".wal") catch {};
 
     var pager = try DiskPager.create(alloc, io, path, .{});
     defer pager.close();

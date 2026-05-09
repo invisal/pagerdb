@@ -10,6 +10,7 @@ pub const Row = @import("sql/executor.zig").Row;
 pub const row = @import("row.zig");
 pub const catalog = @import("catalog.zig");
 pub const btree = @import("btree.zig");
+pub const WAL = @import("pager/wal.zig").WAL;
 
 // Debug utilities for printing query results.
 // Usage: PagerDB.debug.print(result);
@@ -19,7 +20,6 @@ test {
     _ = @import("pager/disk.zig");
     _ = @import("pager/memory.zig");
     _ = @import("page0.zig");
-    _ = @import("undo_log.zig");
     _ = @import("row.zig");
     _ = @import("btree.zig");
     _ = @import("overflow.zig");
@@ -28,6 +28,7 @@ test {
     _ = @import("sql/physical_plan.zig");
     _ = @import("sql/logical_plan.zig"); // includes all logical_plan tests
     _ = @import("sql/cursor.zig");
+    _ = @import("tests/recovery_test.zig");
     _ = @import("tests/btree_test.zig");
     _ = @import("tests/catalog_test.zig");
     _ = @import("tests/db_test.zig");
