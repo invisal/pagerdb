@@ -120,6 +120,34 @@ pub fn build(b: *std.Build) void {
         }
     }
 
+    // ── WASM binding ─────────────────────────────────────────────────────────
+    // Build: zig build wasm  →  zig-out/bin/pagerdb.wasm
+    // core/wasm_root.zig exposes only the in-memory subset of the API (no
+    // DiskPager, no WAL) so the module compiles cleanly for wasm32-freestanding.
+    const wasm_target = b.resolveTargetQuery(.{
+        .cpu_arch = .wasm32,
+        .os_tag = .freestanding,
+    });
+    const wasm_core_mod = b.createModule(.{
+        .root_source_file = b.path("core/wasm_root.zig"),
+        .target = wasm_target,
+        .optimize = .ReleaseSmall,
+    });
+    const wasm_mod = b.createModule(.{
+        .root_source_file = b.path("wasm/root.zig"),
+        .target = wasm_target,
+        .optimize = .ReleaseSmall,
+    });
+    wasm_mod.addImport("core", wasm_core_mod);
+    const wasm_exe = b.addExecutable(.{
+        .name = "pagerdb",
+        .root_module = wasm_mod,
+    });
+    wasm_exe.entry = .disabled; // no main() — only exported functions
+    wasm_exe.rdynamic = true; // keep export fn symbols visible in the .wasm output
+    const wasm_step = b.step("wasm", "Build WASM binding for browser/Node.js use");
+    wasm_step.dependOn(&b.addInstallArtifact(wasm_exe, .{}).step);
+
     // ── Tests (rooted at the core library) ───────────────────────────────────
     const test_filter = b.option(
         []const u8,
