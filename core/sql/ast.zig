@@ -33,6 +33,9 @@ pub const Expr = union(enum) {
     col_ref: []const u8, // unqualified column name, arena-owned
     qual_col_ref: QualifiedColRef, // table.col reference, arena-owned
     default_value: void, // using column default value
+    // Wildcard argument in aggregate calls: COUNT(*).  Only valid as the sole
+    // argument to an aggregate function; the planner rejects it elsewhere.
+    star: void,
 
     // Binary, unary, and func_call nodes are heap-allocated so the Expr union
     // stays small (two pointers).  This keeps stack frames shallow during deep
@@ -77,6 +80,7 @@ pub const Expr = union(enum) {
                 break :blk .{ .unary = node };
             },
             .default_value => .{ .default_value = {} },
+            .star => .{ .star = {} },
             .func_call => |f| blk: {
                 const node = try allocator.create(FuncCall);
                 const cloned_args = try allocator.alloc(Expr, f.args.len);
@@ -155,6 +159,7 @@ pub const SelectStmt = struct {
     joins: []JoinClause, // INNER JOIN clauses in order (empty = no joins)
     columns: []SelectCol, // len = 0 means SELECT *
     where: ?Expr,
+    group_by: []Expr = &.{}, // GROUP BY expressions; empty = no grouping
 };
 
 pub const InsertStmt = struct {

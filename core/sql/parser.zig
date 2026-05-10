@@ -222,11 +222,23 @@ pub const Parser = struct {
             where = try self.parseExpr();
         }
 
+        var group_by: std.ArrayList(ast.Expr) = .empty;
+        if (self.peek().kind == .kw_group) {
+            _ = self.advance();
+            _ = try self.expect(.kw_by);
+            while (true) {
+                try group_by.append(self.alloc(), try self.parseExpr());
+                if (self.peek().kind != .comma) break;
+                _ = self.advance();
+            }
+        }
+
         return ast.SelectStmt{
             .table_ref = table_ref,
             .joins = try joins.toOwnedSlice(self.alloc()),
             .columns = try columns.toOwnedSlice(self.alloc()),
             .where = where,
+            .group_by = try group_by.toOwnedSlice(self.alloc()),
         };
     }
 
@@ -594,10 +606,17 @@ pub const Parser = struct {
                     _ = self.advance();
                     var args: std.ArrayList(ast.Expr) = .empty;
                     if (self.peek().kind != .rparen) {
-                        try args.append(self.alloc(), try self.parseExpr());
-                        while (self.peek().kind == .comma) {
+                        // COUNT(*): the lone * inside a function call is a special
+                        // aggregate wildcard, not multiplication.
+                        if (self.peek().kind == .op_star) {
                             _ = self.advance();
+                            try args.append(self.alloc(), .{ .star = {} });
+                        } else {
                             try args.append(self.alloc(), try self.parseExpr());
+                            while (self.peek().kind == .comma) {
+                                _ = self.advance();
+                                try args.append(self.alloc(), try self.parseExpr());
+                            }
                         }
                     }
                     _ = try self.expect(.rparen);

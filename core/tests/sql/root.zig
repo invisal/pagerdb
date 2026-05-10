@@ -8,4 +8,5 @@ test {
     _ = @import("vtable_test.zig");
     _ = @import("join_test.zig");
     _ = @import("alias_test.zig");
+    _ = @import("agg_test.zig");
 }

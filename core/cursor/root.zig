@@ -124,10 +124,9 @@ pub const ProjectCursor = struct {
 
 // AggSpec pairs a resolved aggregate function (pointer into agg_mod.REGISTRY)
 // with the column it operates on.  col_idx == null means COUNT(*).
-pub const AggSpec = struct {
-    func: *const agg_mod.AggFunc,
-    col_idx: ?usize,
-};
+// This is an alias for the type defined in the logical plan so the same
+// struct flows unchanged from planning through physical execution.
+pub const AggSpec = lp.AggCallSpec;
 
 const GroupState = struct {
     key_values: []row_mod.Value,
@@ -344,6 +343,7 @@ pub const Cursor = union(enum) {
     point_lookup: PointLookupCursor,
     filter: *FilterCursor,
     project: *ProjectCursor,
+    aggregate: *AggregateCursor,
     join: *JoinCursor,
 
     pub fn open(plan: pp.PhysicalPlan, db: *Db, a: Allocator) !Cursor {
@@ -371,6 +371,19 @@ pub const Cursor = union(enum) {
                 pc.input.* = try open(n.input, db, a);
                 pc.exprs = n.exprs;
                 break :blk .{ .project = pc };
+            },
+            .aggregate => |n| blk: {
+                const ac = try a.create(AggregateCursor);
+                const input_ptr = try a.create(Cursor);
+                input_ptr.* = try open(n.input.*, db, a);
+                ac.* = .{
+                    .input = input_ptr,
+                    .agg_specs = n.agg_specs,
+                    .group_by = n.group_by,
+                    .result = null,
+                    .pos = 0,
+                };
+                break :blk .{ .aggregate = ac };
             },
             .join => |n| blk: {
                 // Materialize the right side once so each left row can scan it
@@ -402,6 +415,7 @@ pub const Cursor = union(enum) {
             .point_lookup => |*s| s.next(a),
             .filter => |f| f.next(a),
             .project => |p| p.next(a),
+            .aggregate => |ag| ag.next(a),
             .join => |j| j.next(a),
         };
     }
@@ -410,6 +424,7 @@ pub const Cursor = union(enum) {
         switch (self.*) {
             .filter => |f| f.deinit(a),
             .project => |p| p.deinit(a),
+            .aggregate => |ag| ag.deinit(a),
             .join => |j| j.deinit(a),
             else => {},
         }

@@ -264,7 +264,7 @@ pub const REGISTRY = [_]AggFunc{ CountFunc, SumFunc, AvgFunc, MinFunc, MaxFunc }
 
 pub fn find(name: []const u8) ?*const AggFunc {
     for (&REGISTRY) |*f| {
-        if (std.mem.eql(u8, f.name, name)) return f;
+        if (std.ascii.eqlIgnoreCase(f.name, name)) return f;
     }
     return null;
 }
