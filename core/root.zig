@@ -35,4 +35,5 @@ test {
     _ = @import("tests/db_test.zig");
     _ = @import("tests/sql/root.zig");
     _ = @import("tests/parser_test.zig");
+    _ = @import("tests/wal_test.zig");
 }
