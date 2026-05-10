@@ -30,8 +30,6 @@ const std = @import("std");
 const t = @import("types.zig");
 const Pager = @import("pager/pager.zig").Pager;
 const PageWriter = @import("page_writer.zig").PageWriter;
-const DiskPager = @import("pager/disk.zig").DiskPager;
-
 pub const DATA_CAP: usize = t.PAGE_SIZE - 24;
 const NEXT_PAGE_OFF: usize = @sizeOf(t.PageHeader); // 16
 const DATA_LEN_OFF: usize = @sizeOf(t.PageHeader) + 4; // 20
@@ -112,6 +110,7 @@ pub fn freeChain(pager: *Pager, first_page: u32) !void {
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 test "overflow round-trip for large row" {
+    const DiskPager = @import("pager/disk.zig").DiskPager;
     const io = std.testing.io;
     const path = "/tmp/test_overflow_roundtrip.db";
     defer std.Io.Dir.deleteFile(.cwd(), io, path) catch {};
@@ -133,6 +132,7 @@ test "overflow round-trip for large row" {
 }
 
 test "freeChain returns pages to free list" {
+    const DiskPager = @import("pager/disk.zig").DiskPager;
     const io = std.testing.io;
     const path = "/tmp/test_overflow_free.db";
     defer std.Io.Dir.deleteFile(.cwd(), io, path) catch {};
@@ -153,6 +153,7 @@ test "freeChain returns pages to free list" {
 }
 
 test "multi-page chain round-trip" {
+    const DiskPager = @import("pager/disk.zig").DiskPager;
     const io = std.testing.io;
     const path = "/tmp/test_overflow_multipage.db";
     defer std.Io.Dir.deleteFile(.cwd(), io, path) catch {};
