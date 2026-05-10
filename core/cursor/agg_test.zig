@@ -1,7 +1,7 @@
 const std = @import("std");
 const th = @import("../test_helpers.zig");
-const cursor_mod = @import("../sql/cursor.zig");
-const agg_mod = @import("../cursor/agg_func.zig");
+const cursor_mod = @import("root.zig");
+const agg_mod = @import("agg_func.zig");
 
 fn openSeqScanInput(db: anytype, a: std.mem.Allocator, table: []const u8) !*cursor_mod.Cursor {
     const input = try a.create(cursor_mod.Cursor);
