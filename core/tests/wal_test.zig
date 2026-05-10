@@ -69,9 +69,40 @@ test "WAL records can be read after flush" {
     const record_alloc = arena.allocator();
     defer arena.deinit();
 
-    try std.testing.expectEqualDeep(Record{ .lsn = lsn_list[0], .offset = 10, .page_id = 1, .payload = "abc" }, (try reader.next(record_alloc)).?);
-    try std.testing.expectEqualDeep(Record{ .lsn = lsn_list[1], .offset = 18, .page_id = 2, .payload = "cde" }, (try reader.next(record_alloc)).?);
+    try std.testing.expectEqualDeep(Record{ .lsn = lsn_list[0], .offset = 10, .page_id = 1, .payload = "abc" }, (try reader.next(record_alloc)).?.data);
+    try std.testing.expectEqualDeep(Record{ .lsn = lsn_list[1], .offset = 18, .page_id = 2, .payload = "cde" }, (try reader.next(record_alloc)).?.data);
     try std.testing.expect(try reader.next(record_alloc) == null);
+}
+
+test "WAL reader returns InvalidChecksum on corrupted payload" {
+    const io = std.testing.io;
+    const alloc = std.testing.allocator;
+
+    const path = "/tmp/wal_checksum.wal";
+    std.Io.Dir.deleteFile(.cwd(), io, path) catch {};
+
+    {
+        var wal = try WAL.open(io, path, alloc);
+        defer wal.deinit();
+        _ = try wal.append(1, 0, "abc");
+        try wal.flush();
+    }
+
+    // Flip the first byte of the payload on disk.
+    // Layout: [file header: 8 bytes][record header: RECORD_HEADER_SIZE bytes][payload...]
+    const payload_offset = 8 + RECORD_HEADER_SIZE;
+    {
+        const file = try std.Io.Dir.cwd().openFile(io, path, .{ .mode = .read_write });
+        defer file.close(io);
+        try file.writePositionalAll(io, &[_]u8{0xFF}, payload_offset);
+    }
+
+    var wal = try WAL.open(io, path, alloc);
+    defer wal.deinit();
+
+    var reader = wal.reader();
+    _ = try reader.readHeader();
+    try std.testing.expectError(error.InvalidChecksum, reader.next(alloc));
 }
 
 test "WAL reader can read LSN from header" {

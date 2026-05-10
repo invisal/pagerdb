@@ -90,6 +90,7 @@ test "recovery applies WAL record to a stale page" {
     try pager.writePage(1, &pageWithLSN(0), &.{});
 
     _ = try wal.append(1, 16, "hello");
+    try wal.appendCommit();
     try wal.flush();
 
     try wal.recover(&pager, alloc);
@@ -148,6 +149,7 @@ test "recovery patches stale pages and skips fresh ones in the same run" {
 
     _ = try wal.append(1, 16, "aaaa"); // LSN=10
     _ = try wal.append(2, 16, "bbbb"); // LSN=32
+    try wal.appendCommit();
     try wal.flush();
 
     try wal.recover(&pager, alloc);
@@ -176,12 +178,13 @@ test "recovery advances next_lsn past the last WAL record" {
 
     const payload = "abcd"; // 4 bytes; record LSN=0
     _ = try wal.append(1, 16, payload);
+    try wal.appendCommit();
     try wal.flush();
 
     try wal.recover(&pager, alloc);
 
-    // next_lsn = record.lsn(0) + payload.len(4) + RECORD_HEADER_SIZE(18) = 22
-    const expected: u64 = 0 + payload.len + RECORD_HEADER_SIZE;
+    // next_lsn = RECORD_HEADER_SIZE(23) + payload.len(4) + commit byte(1) = 28
+    const expected: u64 = RECORD_HEADER_SIZE + payload.len + 1;
     try std.testing.expectEqual(expected, wal.next_lsn);
 }
 
@@ -230,6 +233,7 @@ test "recovery returns CorruptWAL when record write range overflows the page" {
     // offset=8100 + payload_len=200 = 8300 > PAGE_SIZE(8192)
     const payload = [_]u8{0} ** 200;
     _ = try wal.append(1, 8100, &payload);
+    try wal.appendCommit();
     try wal.flush();
 
     try std.testing.expectError(error.CorruptWAL, wal.recover(&pager, alloc));

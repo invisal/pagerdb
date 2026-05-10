@@ -220,7 +220,10 @@ pub const DiskPager = struct {
         std.debug.assert(!self.txn_active);
         // WAL must reach disk before pages so recovery can replay any records
         // that were not yet applied to the data file at crash time.
-        if (self.wal) |wal| try wal.flush();
+        if (self.wal) |wal| {
+            try wal.appendCommit();
+            try wal.flush();
+        }
         try page0.writeHeader(pager);
         for (self.pool) |*frame| {
             if (frame.dirty and frame.page_id != std.math.maxInt(u32)) {
