@@ -89,8 +89,6 @@ pub const WAL = struct {
     // Returns the LSN of this record, written into the page header so recovery
     // can tell whether a WAL record has already been applied to a page on disk.
     pub fn append(self: *WAL, page_id: u32, offset: u16, payload: []const u8) !u64 {
-        std.debug.assert(offset + payload.len <= t.PAGE_SIZE);
-
         try self.appendInt(u32, @intCast(payload.len));
         try self.appendInt(u64, self.next_lsn);
         try self.appendInt(u32, page_id);

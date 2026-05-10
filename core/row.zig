@@ -9,6 +9,58 @@ pub const Value = union(ValueTag) {
     real: f64,
     text: []const u8,
     blob: []const u8,
+
+    pub fn clone(self: Value, alloc: std.mem.Allocator) !Value {
+        return switch (self) {
+            .null => .null,
+            .int => |n| .{ .int = n },
+            .real => |f| .{ .real = f },
+            .text => |s| .{ .text = try alloc.dupe(u8, s) },
+            .blob => |b| .{ .blob = try alloc.dupe(u8, b) },
+        };
+    }
+
+    pub fn eql(a: Value, b: Value) bool {
+        return switch (a) {
+            .null => switch (b) {
+                .null => true,
+                else => false,
+            },
+            .int => |ai| switch (b) {
+                .int => |bi| ai == bi,
+                else => false,
+            },
+            .real => |af| switch (b) {
+                .real => |bf| @as(u64, @bitCast(af)) == @as(u64, @bitCast(bf)),
+                else => false,
+            },
+            .text => |as| switch (b) {
+                .text => |bs| std.mem.eql(u8, as, bs),
+                else => false,
+            },
+            .blob => |ab| switch (b) {
+                .blob => |bb| std.mem.eql(u8, ab, bb),
+                else => false,
+            },
+        };
+    }
+
+    pub fn hashInto(self: Value, hasher: *std.hash.Wyhash) void {
+        std.hash.autoHash(hasher, @intFromEnum(std.meta.activeTag(self)));
+        switch (self) {
+            .null => {},
+            .int => |n| std.hash.autoHash(hasher, n),
+            .real => |f| std.hash.autoHash(hasher, @as(u64, @bitCast(f))),
+            .text => |s| hasher.update(s),
+            .blob => |b| hasher.update(b),
+        }
+    }
+
+    pub fn hash(self: Value) u64 {
+        var hasher = std.hash.Wyhash.init(0);
+        self.hashInto(&hasher);
+        return hasher.final();
+    }
 };
 
 pub const ColumnSchema = struct {
