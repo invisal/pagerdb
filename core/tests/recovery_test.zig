@@ -7,7 +7,7 @@ const InMemoryPager = @import("../pager/memory.zig").InMemoryPager;
 const Dir = std.Io.Dir;
 
 // Creates a temp-file-backed WAL initialized to initial_lsn and ready to
-// receive records.  Caller must defer { wal.file.close(io); wal.buffer.deinit(alloc); }.
+// receive records.
 fn makeWAL(io: std.Io, path: []const u8, alloc: std.mem.Allocator, initial_lsn: u64) !WAL {
     const file = try Dir.cwd().createFile(io, path, .{ .read = true });
     var wal = WAL{
@@ -62,10 +62,7 @@ test "recovery with no WAL records leaves next_lsn unchanged" {
     defer Dir.deleteFile(.cwd(), io, wal_path) catch {};
 
     var wal = try makeWAL(io, wal_path, alloc, 42);
-    defer {
-        wal.file.close(wal.io);
-        wal.buffer.deinit(alloc);
-    }
+    defer wal.deinit();
 
     var pager = try InMemoryPager.create(alloc);
     defer pager.close();
@@ -84,10 +81,7 @@ test "recovery applies WAL record to a stale page" {
 
     // WAL starts at LSN=10; the first appended record has LSN=10.
     var wal = try makeWAL(io, wal_path, alloc, 10);
-    defer {
-        wal.file.close(wal.io);
-        wal.buffer.deinit(alloc);
-    }
+    defer wal.deinit();
 
     var pager = try InMemoryPager.create(alloc);
     defer pager.close();
@@ -114,10 +108,7 @@ test "recovery skips a page whose LSN is already ahead of the WAL record" {
 
     // Record will have LSN=5; page has LSN=20 — already ahead.
     var wal = try makeWAL(io, wal_path, alloc, 5);
-    defer {
-        wal.file.close(wal.io);
-        wal.buffer.deinit(alloc);
-    }
+    defer wal.deinit();
 
     var pager = try InMemoryPager.create(alloc);
     defer pager.close();
@@ -145,10 +136,7 @@ test "recovery patches stale pages and skips fresh ones in the same run" {
 
     // Records: LSN=10 for page 1, LSN=32 for page 2 (10+18+4).
     var wal = try makeWAL(io, wal_path, alloc, 10);
-    defer {
-        wal.file.close(wal.io);
-        wal.buffer.deinit(alloc);
-    }
+    defer wal.deinit();
 
     var pager = try InMemoryPager.create(alloc);
     defer pager.close();
@@ -180,10 +168,7 @@ test "recovery advances next_lsn past the last WAL record" {
     defer Dir.deleteFile(.cwd(), io, wal_path) catch {};
 
     var wal = try makeWAL(io, wal_path, alloc, 0);
-    defer {
-        wal.file.close(wal.io);
-        wal.buffer.deinit(alloc);
-    }
+    defer wal.deinit();
 
     var pager = try InMemoryPager.create(alloc);
     defer pager.close();
@@ -207,10 +192,7 @@ test "recovery truncates WAL to a header-only file after completing" {
     defer Dir.deleteFile(.cwd(), io, wal_path) catch {};
 
     var wal = try makeWAL(io, wal_path, alloc, 10);
-    defer {
-        wal.file.close(wal.io);
-        wal.buffer.deinit(alloc);
-    }
+    defer wal.deinit();
 
     var pager = try InMemoryPager.create(alloc);
     defer pager.close();
@@ -239,10 +221,7 @@ test "recovery returns CorruptWAL when record write range overflows the page" {
     defer Dir.deleteFile(.cwd(), io, wal_path) catch {};
 
     var wal = try makeWAL(io, wal_path, alloc, 10);
-    defer {
-        wal.file.close(wal.io);
-        wal.buffer.deinit(alloc);
-    }
+    defer wal.deinit();
 
     var pager = try InMemoryPager.create(alloc);
     defer pager.close();
@@ -263,10 +242,7 @@ test "recovery returns CorruptWAL when the WAL file is truncated mid-record" {
     defer Dir.deleteFile(.cwd(), io, wal_path) catch {};
 
     var wal = try makeWAL(io, wal_path, alloc, 0);
-    defer {
-        wal.file.close(wal.io);
-        wal.buffer.deinit(alloc);
-    }
+    defer wal.deinit();
 
     // Write only the length and lsn fields of a record, then stop.
     // This simulates a crash that occurred mid-write.

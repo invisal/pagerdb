@@ -121,14 +121,22 @@ pub fn build(b: *std.Build) void {
     }
 
     // ── Tests (rooted at the core library) ───────────────────────────────────
+    const test_filter = b.option(
+        []const u8,
+        "test-filter",
+        "Filter tests",
+    );
+
     const unit_tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("core/root.zig"),
             .target = target,
             .optimize = optimize,
         }),
+        .filters = if (test_filter) |f| &[_][]const u8{f} else &.{},
     });
     const run_unit_tests = b.addRunArtifact(unit_tests);
+    if (b.args) |args| run_unit_tests.addArgs(args);
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_unit_tests.step);
 }

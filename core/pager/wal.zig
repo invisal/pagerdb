@@ -2,6 +2,14 @@ const std = @import("std");
 const t = @import("../types.zig");
 const Pager = @import("pager.zig").Pager;
 
+const WALError = error{
+    CorruptWAL,
+    ReaderNotInitialized,
+    InvalidHeader,
+    InvalidChecksum,
+    WALClosed,
+};
+
 pub const RECORD_HEADER_SIZE: u64 = @sizeOf(u32) +
     @sizeOf(u64) +
     @sizeOf(u32) +
@@ -81,6 +89,8 @@ pub const WAL = struct {
     // Returns the LSN of this record, written into the page header so recovery
     // can tell whether a WAL record has already been applied to a page on disk.
     pub fn append(self: *WAL, page_id: u32, offset: u16, payload: []const u8) !u64 {
+        std.debug.assert(offset + payload.len <= t.PAGE_SIZE);
+
         try self.appendInt(u32, @intCast(payload.len));
         try self.appendInt(u64, self.next_lsn);
         try self.appendInt(u32, page_id);
@@ -100,10 +110,7 @@ pub const WAL = struct {
         var buffer: [t.PAGE_SIZE]u8 = undefined;
 
         // An empty WAL file means no records were ever written; nothing to recover.
-        wal_reader.open() catch |err| switch (err) {
-            error.EndOfStream => return,
-            else => return err,
-        };
+        self.next_lsn = try wal_reader.readHeader();
 
         while (try wal_reader.next(alloc)) |record| {
             defer alloc.free(record.payload);
@@ -132,12 +139,19 @@ pub const WAL = struct {
 pub const WALReader = struct {
     wal: *WAL,
     offset: usize,
+    initialized: bool = false,
 
-    pub fn open(self: *WALReader) !void {
-        self.wal.next_lsn = try self.readInt(u64);
+    pub fn readHeader(self: *WALReader) !u64 {
+        self.initialized = true;
+        return self.readInt(u64) catch |err| switch (err) {
+            error.EndOfStream => return 0,
+            else => return err,
+        };
     }
 
     pub fn next(self: *WALReader, alloc: std.mem.Allocator) !?Record {
+        if (!self.initialized) return WALError.ReaderNotInitialized;
+
         const length = self.readInt(u32) catch |err| switch (err) {
             error.EndOfStream => return null,
             else => return err,
@@ -145,14 +159,14 @@ pub const WALReader = struct {
 
         // If the file is truncated mid-record (crash during write), treat it as
         // end of valid records rather than a hard error.
-        const lsn = self.readInt(u64) catch return error.CorruptWAL;
-        const page_id = self.readInt(u32) catch return error.CorruptWAL;
-        const offset = self.readInt(u16) catch return error.CorruptWAL;
+        const lsn = self.readInt(u64) catch return WALError.CorruptWAL;
+        const page_id = self.readInt(u32) catch return WALError.CorruptWAL;
+        const offset = self.readInt(u16) catch return WALError.CorruptWAL;
 
         const buffer = try alloc.alloc(u8, length);
         errdefer alloc.free(buffer);
         const n = try self.wal.file.readPositionalAll(self.wal.io, buffer, self.offset);
-        if (n != length) return error.CorruptWAL;
+        if (n != length) return WALError.CorruptWAL;
         self.offset += @intCast(length);
 
         return Record{
