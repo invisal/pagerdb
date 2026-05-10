@@ -118,11 +118,13 @@ pub const Executor = struct {
         try collectRows(n.input.*, self.db, &matches, a);
 
         var count: u64 = 0;
+        const meta = self.db.cat.getTable(n.table) orelse return error.TableNotFound;
         for (matches.items) |r| {
-            const new_vals = try self.alloc.dupe(row_mod.Value, r.values);
+            const real_vals = r.values[0..meta.columns.len];
+            const new_vals = try self.alloc.dupe(row_mod.Value, real_vals);
             defer self.alloc.free(new_vals);
             for (n.assignments) |asgn| {
-                new_vals[asgn.col_idx] = try evalToValue(asgn.value, r.values, self.alloc);
+                new_vals[asgn.col_idx] = try evalToValue(asgn.value, real_vals, self.alloc);
             }
             if (try self.db.update(n.table, r.rowid, new_vals)) count += 1;
         }

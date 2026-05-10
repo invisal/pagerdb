@@ -131,6 +131,9 @@ pub const CellData = struct {
     is_overflow: bool,
     overflow_page: u32,
     overflow_len: usize = 0, // original row length; valid when is_overflow == true
+    // Physical location of this cell in the B-tree file, exposed as __pageid / __slotid.
+    page_id: u32 = 0,
+    slot_idx: u16 = 0,
 };
 
 fn cellSize(cell: CellData) u16 {
@@ -352,9 +355,13 @@ pub const ScanIterator = struct {
         while (true) {
             const h = readBTreeHeader(&self.buf);
             if (self.cell_index < h.cell_count) {
+                const slot = self.cell_index;
                 const off = getCellPtr(&self.buf, self.cell_index);
                 self.cell_index += 1;
-                return readLeafCell(&self.buf, off);
+                var cell = readLeafCell(&self.buf, off);
+                cell.page_id = self.current_page;
+                cell.slot_idx = slot;
+                return cell;
             }
             const next_page = h.next_leaf;
             if (next_page == 0) return null;

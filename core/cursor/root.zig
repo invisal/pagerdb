@@ -30,7 +30,14 @@ pub const SeqScanCursor = struct {
         var n: usize = 0;
         while (n < BATCH_SIZE) {
             const hit = try self.it.next(a) orelse break;
-            buf[n] = .{ .rowid = hit.rowid, .values = hit.values };
+            // Append __rowid, __pageid, __slotid as the last three values so
+            // they align with the synthetic SchemaCol entries injected by buildSchema.
+            const vals = try a.alloc(row_mod.Value, hit.values.len + 3);
+            @memcpy(vals[0..hit.values.len], hit.values);
+            vals[hit.values.len] = .{ .int = @intCast(hit.rowid) };
+            vals[hit.values.len + 1] = .{ .int = @intCast(hit.page_id) };
+            vals[hit.values.len + 2] = .{ .int = @intCast(hit.slot_id) };
+            buf[n] = .{ .rowid = hit.rowid, .values = vals };
             n += 1;
         }
         if (n == 0) return null;
@@ -355,7 +362,14 @@ pub const Cursor = union(enum) {
             },
             .point_lookup => |n| blk: {
                 const vals = try db.getByRowid(n.table, n.rowid, a);
-                const r: ?Row = if (vals) |v| .{ .rowid = n.rowid, .values = v } else null;
+                const r: ?Row = if (vals) |v| blk2: {
+                    const full = try a.alloc(row_mod.Value, v.len + 3);
+                    @memcpy(full[0..v.len], v);
+                    full[v.len] = .{ .int = @intCast(n.rowid) };
+                    full[v.len + 1] = .null;
+                    full[v.len + 2] = .null;
+                    break :blk2 Row{ .rowid = n.rowid, .values = full };
+                } else null;
                 break :blk .{ .point_lookup = .{ .row = r } };
             },
             .filter => |n| blk: {

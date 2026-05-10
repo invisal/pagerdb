@@ -4,7 +4,6 @@
 const root = @import("logical_plan/root.zig");
 
 // Re-export all public items from root.zig
-pub const ROWID_SENTINEL = root.ROWID_SENTINEL;
 pub const SchemaCol = root.SchemaCol;
 pub const Schema = root.Schema;
 pub const Expr = root.Expr;
