@@ -5,6 +5,7 @@ const lp = @import("logical_plan.zig");
 const pp = @import("physical_plan.zig");
 const eval = @import("eval.zig");
 const vtab_mod = @import("../vtable/root.zig");
+const agg_mod = @import("../cursor/agg_func.zig");
 
 const Db = db_mod.Db;
 const Allocator = std.mem.Allocator;
@@ -118,6 +119,143 @@ pub const ProjectCursor = struct {
     pub fn deinit(self: *ProjectCursor, a: Allocator) void {
         self.input.deinit(a);
         a.destroy(self.input);
+    }
+};
+
+// AggSpec pairs a resolved aggregate function (pointer into agg_mod.REGISTRY)
+// with the column it operates on.  col_idx == null means COUNT(*).
+pub const AggSpec = struct {
+    func: *const agg_mod.AggFunc,
+    col_idx: ?usize,
+};
+
+const GroupState = struct {
+    key_values: []row_mod.Value,
+    acc_states: []*anyopaque,
+};
+
+fn hashGroupRow(values: []const row_mod.Value, group_by: []const usize) u64 {
+    var hasher = std.hash.Wyhash.init(0);
+    std.hash.autoHash(&hasher, group_by.len);
+    for (group_by) |col_idx| {
+        values[col_idx].hashInto(&hasher);
+    }
+    return hasher.final();
+}
+
+fn groupKeyMatches(key_values: []const row_mod.Value, row_values: []const row_mod.Value, group_by: []const usize) bool {
+    if (key_values.len != group_by.len) return false;
+    for (group_by, 0..) |col_idx, i| {
+        if (!row_mod.Value.eql(key_values[i], row_values[col_idx])) return false;
+    }
+    return true;
+}
+
+// Aggregate cursor: blocking — consumes all input before emitting any output.
+// For each group (defined by group_by column indices) it maintains one state
+// per AggSpec, allocated from the arena passed to next().
+pub const AggregateCursor = struct {
+    input: *Cursor,
+    agg_specs: []const AggSpec,
+    group_by: []const usize, // column indices; empty = single global group
+    result: ?[]Row, // materialized output, null until first next() call
+    pos: usize, // next unread position within result
+
+    pub fn next(self: *AggregateCursor, a: Allocator) !?[]Row {
+        if (self.result == null) self.result = try self.compute(a);
+        const rows = self.result.?;
+        if (self.pos >= rows.len) return null;
+        const end = @min(self.pos + BATCH_SIZE, rows.len);
+        defer self.pos = end;
+        return rows[self.pos..end];
+    }
+
+    pub fn deinit(self: *AggregateCursor, a: Allocator) void {
+        self.input.deinit(a);
+        a.destroy(self.input);
+    }
+
+    // Pulls all rows from input, groups them, and returns the result slice.
+    // Hashing finds candidate groups quickly; value equality confirms matches
+    // to handle collisions and content-based text/blob comparison.
+    fn compute(self: *AggregateCursor, a: Allocator) ![]Row {
+        var groups: std.ArrayList(GroupState) = .empty;
+        var buckets = std.AutoHashMap(u64, std.ArrayListUnmanaged(usize)).init(a);
+        defer {
+            var it = buckets.valueIterator();
+            while (it.next()) |bucket| bucket.deinit(a);
+            buckets.deinit();
+        }
+
+        while (try self.input.next(a)) |batch| {
+            for (batch) |r| {
+                const h = hashGroupRow(r.values, self.group_by);
+                var group_idx: ?usize = null;
+
+                if (buckets.getPtr(h)) |bucket| {
+                    for (bucket.items) |idx| {
+                        if (groupKeyMatches(groups.items[idx].key_values, r.values, self.group_by)) {
+                            group_idx = idx;
+                            break;
+                        }
+                    }
+                }
+
+                if (group_idx == null) {
+                    const key_values = try a.alloc(row_mod.Value, self.group_by.len);
+                    for (self.group_by, 0..) |col_idx, i| {
+                        key_values[i] = try r.values[col_idx].clone(a);
+                    }
+
+                    const acc_states = try a.alloc(*anyopaque, self.agg_specs.len);
+                    for (self.agg_specs, 0..) |spec, i| {
+                        acc_states[i] = try spec.func.init(a);
+                    }
+
+                    try groups.append(a, .{ .key_values = key_values, .acc_states = acc_states });
+                    const new_idx = groups.items.len - 1;
+
+                    const gop = try buckets.getOrPut(h);
+                    if (!gop.found_existing) gop.value_ptr.* = .empty;
+                    try gop.value_ptr.append(a, new_idx);
+
+                    group_idx = new_idx;
+                }
+
+                const g = &groups.items[group_idx.?];
+                for (self.agg_specs, 0..) |spec, i| {
+                    const v: ?row_mod.Value = if (spec.col_idx) |col_idx| r.values[col_idx] else null;
+                    try spec.func.step(g.acc_states[i], v, a);
+                }
+            }
+        }
+
+        // SQL aggregate semantics without GROUP BY produce a single output row
+        // even when the input has no rows (e.g. SELECT COUNT(*) FROM t WHERE 0).
+        if (groups.items.len == 0 and self.group_by.len == 0) {
+            const acc_states = try a.alloc(*anyopaque, self.agg_specs.len);
+            for (self.agg_specs, 0..) |spec, i| {
+                acc_states[i] = try spec.func.init(a);
+            }
+            try groups.append(a, .{ .key_values = &.{}, .acc_states = acc_states });
+        }
+
+        const out = try a.alloc(Row, groups.items.len);
+        for (groups.items, 0..) |g, row_idx| {
+            const values = try a.alloc(row_mod.Value, self.group_by.len + self.agg_specs.len);
+
+            for (g.key_values, 0..) |k, i| values[i] = k;
+            for (self.agg_specs, 0..) |spec, i| {
+                values[self.group_by.len + i] = try spec.func.finalize(g.acc_states[i], a);
+            }
+
+            out[row_idx] = .{
+                .rowid = @intCast(row_idx + 1),
+                .values = values,
+            };
+        }
+
+        return out;
     }
 };
 
