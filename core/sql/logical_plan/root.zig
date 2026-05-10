@@ -4,6 +4,7 @@ const ast = @import("../ast.zig");
 const catalog = @import("../../catalog.zig");
 const vtab_mod = @import("../../vtable/root.zig");
 const sf = @import("../scalar_func.zig");
+const agg_mod = @import("../../cursor/agg_func.zig");
 
 // Reserved column index that maps to the internal rowid (not a real column).
 // We use maxInt(usize) because:
@@ -50,6 +51,15 @@ pub const Expr = union(enum) {
     // func points directly into scalar_func.REGISTRY, resolved at plan time —
     // the same pattern as VTabScan storing *const VTab.
     pub const FuncCall = struct { func: *const sf.ScalarFunc, args: []Expr };
+};
+
+// ── Aggregate spec ────────────────────────────────────────────────────────────
+//
+// Pairs a resolved aggregate function with its input column.
+// col_idx == null means COUNT(*) — count every row regardless of value.
+pub const AggCallSpec = struct {
+    func: *const agg_mod.AggFunc,
+    col_idx: ?usize,
 };
 
 // ── Plan nodes ─────────────────────────────────────────────────────────────────
@@ -110,6 +120,18 @@ pub const LogicalCreateTable = struct {
     columns: []catalog.ColumnMeta, // arena-owned
 };
 
+// Aggregate node: consumes all input rows, groups by group_by column indices,
+// and computes one aggregate result per group.  Output schema is:
+//   [group_key_cols..., agg_result_cols...]
+// with sequential indices 0, 1, 2, ... matching the values slice produced by
+// AggregateCursor.  A Project node above this maps SELECT column order.
+pub const Aggregate = struct {
+    input: *LogicalPlan,
+    group_by: []const usize, // column indices into input schema
+    agg_specs: []const AggCallSpec,
+    schema: Schema, // [group_key cols, agg result cols]
+};
+
 // Nested-loop inner join.  The schema merges both tables' columns with
 // right-side indices offset by the number of left-side columns.
 pub const Join = struct {
@@ -124,6 +146,7 @@ pub const LogicalPlan = union(enum) {
     vtab_scan: VTabScan,
     filter: *Filter,
     project: *Project,
+    aggregate: *Aggregate,
     join: *Join,
     insert: LogicalInsert,
     update: LogicalUpdate,
@@ -139,6 +162,7 @@ pub const LogicalPlan = union(enum) {
             .vtab_scan => |n| n.schema,
             .filter => |n| n.schema,
             .project => |n| n.schema,
+            .aggregate => |n| n.schema,
             .join => |n| n.schema,
             .insert => |n| n.schema,
             .update => |n| n.schema,
@@ -231,6 +255,12 @@ pub const LogicalPlanner = struct {
                 .schema = scan_schema,
             };
             current = .{ .filter = filter };
+        }
+
+        // If the query has GROUP BY or aggregate function calls in the SELECT list,
+        // route to the aggregate planning path which inserts an Aggregate node.
+        if (needsAggregate(stmt)) {
+            return self.planSelectAgg(stmt, current, scan_schema);
         }
 
         // Wrap in Project if specific columns were requested (not SELECT *).
@@ -501,6 +531,304 @@ pub const LogicalPlanner = struct {
         return .{ .create_table = .{ .table = table, .columns = cols } };
     }
 
+    // ── Aggregate planning ─────────────────────────────────────────────────────
+
+    // Returns true if the SELECT statement requires an Aggregate node: either
+    // GROUP BY is present, or at least one SELECT column expression contains an
+    // aggregate function call.
+    fn needsAggregate(stmt: ast.SelectStmt) bool {
+        if (stmt.group_by.len > 0) return true;
+        for (stmt.columns) |col| {
+            switch (col) {
+                .expr => |e| if (containsAggCall(e)) return true,
+                else => {},
+            }
+        }
+        return false;
+    }
+
+    fn containsAggCall(expr: ast.Expr) bool {
+        return switch (expr) {
+            .func_call => |f| agg_mod.find(f.name) != null or blk: {
+                for (f.args) |arg| if (containsAggCall(arg)) break :blk true;
+                break :blk false;
+            },
+            .binary => |b| containsAggCall(b.left) or containsAggCall(b.right),
+            .unary => |u| containsAggCall(u.operand),
+            else => false,
+        };
+    }
+
+    // Plan a SELECT that requires aggregation.
+    //
+    // Output plan shape:
+    //   Project → Aggregate → (scan / filter / join chain)
+    //
+    // The Aggregate node emits rows in the form:
+    //   [group_key_0, ..., group_key_G-1, agg_result_0, ..., agg_result_N-1]
+    //
+    // The Project re-orders / renames the columns to match the SELECT list.
+    fn planSelectAgg(
+        self: *LogicalPlanner,
+        stmt: ast.SelectStmt,
+        input: LogicalPlan,
+        scan_schema: Schema,
+    ) PlanError!LogicalPlan {
+        // Step 1: resolve GROUP BY expressions to source column indices.
+        const group_by = try self.alloc().alloc(usize, stmt.group_by.len);
+        for (stmt.group_by, 0..) |gb_expr, i| {
+            group_by[i] = switch (gb_expr) {
+                .col_ref => |n| try self.resolveColName(n, scan_schema),
+                .qual_col_ref => |q| if (q.col) |c| try self.resolveQualColName(q.table, c, scan_schema) else return PlanError.WildcardInExpression,
+                else => return PlanError.TypeMismatch,
+            };
+        }
+
+        // Step 2: collect aggregate function calls from SELECT column expressions.
+        var agg_specs: std.ArrayListUnmanaged(AggCallSpec) = .empty;
+        for (stmt.columns) |sel_col| {
+            switch (sel_col) {
+                .expr => |e| try self.collectAggSpecs(e, scan_schema, &agg_specs),
+                else => {},
+            }
+        }
+        const agg_specs_slice = try agg_specs.toOwnedSlice(self.alloc());
+
+        // Step 3: build the aggregate output schema:
+        //   [group_key_cols (index=0..G-1), agg_result_cols (index=G..G+N-1)]
+        const total = group_by.len + agg_specs_slice.len;
+        const agg_out_cols = try self.alloc().alloc(SchemaCol, total);
+
+        for (group_by, 0..) |col_idx, i| {
+            for (scan_schema.columns) |sc| {
+                if (sc.index == col_idx) {
+                    agg_out_cols[i] = .{
+                        .name = sc.name,
+                        .table = sc.table,
+                        .col_type = sc.col_type,
+                        .nullable = sc.nullable,
+                        .index = i,
+                    };
+                    break;
+                }
+            }
+        }
+        for (agg_specs_slice, 0..) |spec, j| {
+            agg_out_cols[group_by.len + j] = .{
+                .name = try self.alloc().dupe(u8, spec.func.name),
+                .table = "",
+                .col_type = .int,
+                .nullable = true,
+                .index = group_by.len + j,
+            };
+        }
+        const agg_out_schema = Schema{ .table = scan_schema.table, .columns = agg_out_cols };
+
+        // Step 4: build the Aggregate logical plan node.
+        const agg_node = try self.alloc().create(Aggregate);
+        agg_node.* = .{
+            .input = try self.box(input),
+            .group_by = group_by,
+            .agg_specs = agg_specs_slice,
+            .schema = agg_out_schema,
+        };
+
+        // Step 5: build a Project on top to map SELECT column order and naming.
+        var proj_exprs: std.ArrayListUnmanaged(Expr) = .empty;
+        var proj_cols: std.ArrayListUnmanaged(SchemaCol) = .empty;
+
+        for (stmt.columns) |sel_col| {
+            switch (sel_col) {
+                .star => {
+                    for (agg_out_cols) |sc| {
+                        try proj_exprs.append(self.alloc(), .{ .col_idx = sc.index });
+                        try proj_cols.append(self.alloc(), sc);
+                    }
+                },
+                .name => |n| {
+                    const col_idx = try self.resolveColName(n, agg_out_schema);
+                    try proj_exprs.append(self.alloc(), .{ .col_idx = col_idx });
+                    try proj_cols.append(self.alloc(), .{
+                        .name = try self.alloc().dupe(u8, agg_out_cols[col_idx].name),
+                        .table = try self.alloc().dupe(u8, agg_out_cols[col_idx].table),
+                        .col_type = agg_out_cols[col_idx].col_type,
+                        .nullable = agg_out_cols[col_idx].nullable,
+                        .index = col_idx,
+                    });
+                },
+                .qual_name => |q| {
+                    if (q.col == null) {
+                        var matched = false;
+                        for (agg_out_cols) |sc| {
+                            if (std.ascii.eqlIgnoreCase(sc.table, q.table)) {
+                                matched = true;
+                                try proj_exprs.append(self.alloc(), .{ .col_idx = sc.index });
+                                try proj_cols.append(self.alloc(), sc);
+                            }
+                        }
+                        if (!matched) return PlanError.TableNotFound;
+                    } else {
+                        const col_idx = try self.resolveQualColName(q.table, q.col.?, agg_out_schema);
+                        try proj_exprs.append(self.alloc(), .{ .col_idx = col_idx });
+                        try proj_cols.append(self.alloc(), .{
+                            .name = try self.alloc().dupe(u8, agg_out_cols[col_idx].name),
+                            .table = try self.alloc().dupe(u8, agg_out_cols[col_idx].table),
+                            .col_type = agg_out_cols[col_idx].col_type,
+                            .nullable = agg_out_cols[col_idx].nullable,
+                            .index = col_idx,
+                        });
+                    }
+                },
+                .expr => |e| {
+                    const lp_expr = try self.resolveExprOverAgg(e, scan_schema, agg_specs_slice, group_by.len, agg_out_schema);
+                    try proj_exprs.append(self.alloc(), lp_expr);
+                    // For direct aggregate/column references use the canonical name from
+                    // the agg output schema (always lowercase); fall back to the AST name
+                    // for compound expressions.
+                    const col_name: []const u8 = switch (lp_expr) {
+                        .col_idx => |idx| if (idx < agg_out_cols.len) agg_out_cols[idx].name else "?",
+                        else => switch (e) {
+                            .func_call => |f| f.name,
+                            .col_ref => |n| n,
+                            else => "?",
+                        },
+                    };
+                    try proj_cols.append(self.alloc(), .{
+                        .name = try self.alloc().dupe(u8, col_name),
+                        .table = "",
+                        .col_type = .int,
+                        .nullable = true,
+                        .index = std.math.maxInt(usize),
+                    });
+                },
+            }
+        }
+
+        const proj_schema = Schema{
+            .table = agg_out_schema.table,
+            .columns = try proj_cols.toOwnedSlice(self.alloc()),
+        };
+        const project = try self.alloc().create(Project);
+        project.* = .{
+            .input = try self.box(.{ .aggregate = agg_node }),
+            .exprs = try proj_exprs.toOwnedSlice(self.alloc()),
+            .schema = proj_schema,
+        };
+        return .{ .project = project };
+    }
+
+    // Walk expr and append one AggCallSpec for every aggregate function call found.
+    // Recurse into scalar function args and binary/unary nodes; do not recurse into
+    // aggregate function args (nested aggregates are not valid SQL).
+    fn collectAggSpecs(
+        self: *LogicalPlanner,
+        expr: ast.Expr,
+        scan_schema: Schema,
+        out: *std.ArrayListUnmanaged(AggCallSpec),
+    ) PlanError!void {
+        switch (expr) {
+            .func_call => |f| {
+                if (agg_mod.find(f.name)) |agg_func| {
+                    const col_idx = try self.resolveAggArgToColIdx(f.args, scan_schema);
+                    try out.append(self.alloc(), .{ .func = agg_func, .col_idx = col_idx });
+                } else {
+                    for (f.args) |arg| try self.collectAggSpecs(arg, scan_schema, out);
+                }
+            },
+            .binary => |b| {
+                try self.collectAggSpecs(b.left, scan_schema, out);
+                try self.collectAggSpecs(b.right, scan_schema, out);
+            },
+            .unary => |u| try self.collectAggSpecs(u.operand, scan_schema, out),
+            else => {},
+        }
+    }
+
+    // Resolve the argument list of an aggregate call to a nullable column index.
+    // Zero args → null (behaves like COUNT(*)).
+    // One star arg → null (COUNT(*)).
+    // One col_ref arg → resolved column index.
+    fn resolveAggArgToColIdx(self: *LogicalPlanner, args: []const ast.Expr, scan_schema: Schema) PlanError!?usize {
+        if (args.len == 0) return null;
+        if (args.len > 1) return PlanError.WrongArgCount;
+        return switch (args[0]) {
+            .star => null,
+            .col_ref => |n| try self.resolveColName(n, scan_schema),
+            .qual_col_ref => |q| if (q.col) |c| try self.resolveQualColName(q.table, c, scan_schema) else PlanError.WildcardInExpression,
+            else => PlanError.TypeMismatch,
+        };
+    }
+
+    // Resolve a SELECT expression that sits above an Aggregate node.
+    // Aggregate function calls are translated to col_idx references into the
+    // aggregate output; all other sub-expressions are resolved recursively.
+    fn resolveExprOverAgg(
+        self: *LogicalPlanner,
+        expr: ast.Expr,
+        scan_schema: Schema,
+        agg_specs: []const AggCallSpec,
+        group_by_count: usize,
+        agg_out_schema: Schema,
+    ) PlanError!Expr {
+        return switch (expr) {
+            .int_lit => |v| .{ .int_lit = v },
+            .float_lit => |v| .{ .float_lit = v },
+            .str_lit => |v| .{ .str_lit = try self.alloc().dupe(u8, v) },
+            .bool_lit => |v| .{ .bool_lit = v },
+            .null_lit => .{ .null_lit = {} },
+            .col_ref => |n| .{ .col_idx = try self.resolveColName(n, agg_out_schema) },
+            .qual_col_ref => |q| if (q.col) |c|
+                .{ .col_idx = try self.resolveQualColName(q.table, c, agg_out_schema) }
+            else
+                return PlanError.WildcardInExpression,
+            .binary => |b| blk: {
+                const node = try self.alloc().create(Expr.Binary);
+                node.* = .{
+                    .op = b.op,
+                    .left = try self.resolveExprOverAgg(b.left, scan_schema, agg_specs, group_by_count, agg_out_schema),
+                    .right = try self.resolveExprOverAgg(b.right, scan_schema, agg_specs, group_by_count, agg_out_schema),
+                };
+                break :blk .{ .binary = node };
+            },
+            .unary => |u| blk: {
+                const node = try self.alloc().create(Expr.Unary);
+                node.* = .{
+                    .op = u.op,
+                    .operand = try self.resolveExprOverAgg(u.operand, scan_schema, agg_specs, group_by_count, agg_out_schema),
+                };
+                break :blk .{ .unary = node };
+            },
+            .func_call => |f| blk: {
+                if (agg_mod.find(f.name)) |_| {
+                    // Aggregate call: find the matching AggCallSpec and return a
+                    // col_idx into the aggregate output values slice.
+                    const arg_col_idx = try self.resolveAggArgToColIdx(f.args, scan_schema);
+                    for (agg_specs, 0..) |spec, i| {
+                        if (std.ascii.eqlIgnoreCase(spec.func.name, f.name) and
+                            spec.col_idx == arg_col_idx)
+                        {
+                            break :blk Expr{ .col_idx = group_by_count + i };
+                        }
+                    }
+                    return PlanError.ColumnNotFound;
+                } else {
+                    // Scalar function applied to aggregate outputs.
+                    const func = sf.find(f.name) orelse return PlanError.UnknownFunction;
+                    if (f.args.len < func.min_args or f.args.len > func.max_args) return PlanError.WrongArgCount;
+                    const resolved_args = try self.alloc().alloc(Expr, f.args.len);
+                    for (f.args, 0..) |arg, i| {
+                        resolved_args[i] = try self.resolveExprOverAgg(arg, scan_schema, agg_specs, group_by_count, agg_out_schema);
+                    }
+                    const node = try self.alloc().create(Expr.FuncCall);
+                    node.* = .{ .func = func, .args = resolved_args };
+                    break :blk Expr{ .func_call = node };
+                }
+            },
+            .star => return PlanError.WildcardInExpression,
+            .default_value => std.debug.panic("DEFAULT must be resolved during planning", .{}),
+        };
+    }
+
     // ── Expression resolution ──────────────────────────────────────────────────
 
     fn resolveExpr(self: *LogicalPlanner, expr: ast.Expr, schema: Schema) PlanError!Expr {
@@ -510,6 +838,8 @@ pub const LogicalPlanner = struct {
             .str_lit => |v| .{ .str_lit = try self.alloc().dupe(u8, v) },
             .bool_lit => |v| .{ .bool_lit = v },
             .null_lit => .{ .null_lit = {} },
+            // star is only valid inside COUNT(*); it must not reach regular expr resolution.
+            .star => return PlanError.WildcardInExpression,
             .col_ref => |n| .{ .col_idx = try self.resolveColName(n, schema) },
             .qual_col_ref => |q| if (q.col) |col| .{ .col_idx = try self.resolveQualColName(q.table, col, schema) } else return PlanError.WildcardInExpression,
             .binary => |b| blk: {

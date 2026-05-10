@@ -65,12 +65,20 @@ pub const PhysicalJoin = struct {
     schema: lp.Schema,
 };
 
+pub const PhysicalAggregate = struct {
+    input: *PhysicalPlan,
+    group_by: []const usize,
+    agg_specs: []const lp.AggCallSpec,
+    schema: lp.Schema,
+};
+
 pub const PhysicalPlan = union(enum) {
     seq_scan: PhysicalSeqScan,
     vtab_scan: PhysicalVTabScan,
     point_lookup: PhysicalPointLookup,
     filter: *PhysicalFilter,
     project: *PhysicalProject,
+    aggregate: *PhysicalAggregate,
     join: *PhysicalJoin,
     insert: PhysicalInsert,
     update: PhysicalUpdate,
@@ -87,6 +95,7 @@ pub const PhysicalPlan = union(enum) {
             .point_lookup => |n| n.schema,
             .filter => |n| n.schema,
             .project => |n| n.schema,
+            .aggregate => |n| n.schema,
             .join => |n| n.schema,
             .insert => |n| n.schema,
             .update => |n| n.schema,
@@ -119,6 +128,7 @@ pub const PhysicalPlanner = struct {
             .vtab_scan => |n| .{ .vtab_scan = .{ .vtab = n.vtab, .args = n.args, .schema = n.schema } },
             .filter => |n| try self.planFilter(n),
             .project => |n| try self.planProject(n),
+            .aggregate => |n| try self.planAggregate(n),
             .join => |n| try self.planJoin(n),
             .insert => |n| .{ .insert = .{ .table = n.table, .values = n.values, .schema = n.schema } },
             .update => |n| try self.planUpdate(n),
@@ -161,6 +171,19 @@ pub const PhysicalPlanner = struct {
             .schema = node.schema,
         };
         return .{ .project = proj };
+    }
+
+    fn planAggregate(self: *PhysicalPlanner, node: *lp.Aggregate) !PhysicalPlan {
+        const phys_input = try self.alloc().create(PhysicalPlan);
+        phys_input.* = try self.plan(node.input.*);
+        const agg = try self.alloc().create(PhysicalAggregate);
+        agg.* = .{
+            .input = phys_input,
+            .group_by = node.group_by,
+            .agg_specs = node.agg_specs,
+            .schema = node.schema,
+        };
+        return .{ .aggregate = agg };
     }
 
     fn planJoin(self: *PhysicalPlanner, node: *lp.Join) !PhysicalPlan {
