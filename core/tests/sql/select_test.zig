@@ -46,7 +46,7 @@ test "SELECT specific columns projects correctly" {
     try std.testing.expectEqualStrings("alice", result.result_set.rows[0].values[0].text);
 }
 
-test "SELECT with _rowid_ point-lookup returns single row" {
+test "SELECT with __rowid point-lookup returns single row" {
     const alloc = std.testing.allocator;
     const h = try makeMemoryDb(alloc, .{ .schema = &.{"CREATE TABLE t (v INT NOT NULL)"} });
     defer h.deinit();
@@ -56,7 +56,7 @@ test "SELECT with _rowid_ point-lookup returns single row" {
     _ = try h.db.insert("t", &.{.{ .int = 33 }});
 
     var buf: [64]u8 = undefined;
-    const sql = try std.fmt.bufPrint(&buf, "SELECT * FROM t WHERE _rowid_ = {d}", .{rowid});
+    const sql = try std.fmt.bufPrint(&buf, "SELECT * FROM t WHERE __rowid = {d}", .{rowid});
     var result = try execute(h.db, sql, alloc);
     defer result.deinit();
     try std.testing.expectEqual(@as(usize, 1), result.result_set.rows.len);

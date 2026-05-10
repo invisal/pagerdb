@@ -5,7 +5,7 @@ const LogicalPlanner = @import("../logical_plan.zig").LogicalPlanner;
 const LogicalPlan = @import("../logical_plan.zig").LogicalPlan;
 const makeMemoryDb = @import("../../test_helpers.zig").makeMemoryDb;
 
-test "plan SELECT * resolves to SeqScan with correct schema" {
+test "plan SELECT * produces Project over SeqScan with only real columns" {
     const alloc = std.testing.allocator;
     var h = try makeMemoryDb(alloc, .{ .schema = &.{"CREATE TABLE users (name TEXT NOT NULL, score INT)"} });
     defer h.deinit();
@@ -15,16 +15,16 @@ test "plan SELECT * resolves to SeqScan with correct schema" {
     var parsed = try Parser.parse("SELECT * FROM users", alloc);
     defer parsed.deinit();
 
-    const scan = (try planner.plan(parsed.stmt)).seq_scan;
-    try std.testing.expectEqualStrings("users", scan.table);
-    try std.testing.expectEqual(@as(usize, 2), scan.schema.columns.len);
-    try std.testing.expectEqualStrings("name", scan.schema.columns[0].name);
-    try std.testing.expectEqualStrings("score", scan.schema.columns[1].name);
-    try std.testing.expectEqual(@as(usize, 0), scan.schema.columns[0].index);
-    try std.testing.expectEqual(@as(usize, 1), scan.schema.columns[1].index);
+    const project = (try planner.plan(parsed.stmt)).project;
+    // Only real columns in the output — hidden __rowid etc. are excluded.
+    try std.testing.expectEqual(@as(usize, 2), project.schema.columns.len);
+    try std.testing.expectEqualStrings("name", project.schema.columns[0].name);
+    try std.testing.expectEqualStrings("score", project.schema.columns[1].name);
+    try std.testing.expectEqual(std.meta.Tag(LogicalPlan).seq_scan, std.meta.activeTag(project.input.*));
+    try std.testing.expectEqualStrings("users", project.input.seq_scan.table);
 }
 
-test "plan SELECT * with main.schema prefix resolves to SeqScan" {
+test "plan SELECT * with main.schema prefix produces Project over SeqScan" {
     const alloc = std.testing.allocator;
     var h = try makeMemoryDb(alloc, .{ .schema = &.{"CREATE TABLE users (name TEXT NOT NULL, score INT)"} });
     defer h.deinit();
@@ -34,12 +34,12 @@ test "plan SELECT * with main.schema prefix resolves to SeqScan" {
     var parsed = try Parser.parse("SELECT * FROM main.users", alloc);
     defer parsed.deinit();
 
-    const scan = (try planner.plan(parsed.stmt)).seq_scan;
-    try std.testing.expectEqualStrings("users", scan.table);
-    try std.testing.expectEqual(@as(usize, 2), scan.schema.columns.len);
+    const project = (try planner.plan(parsed.stmt)).project;
+    try std.testing.expectEqual(@as(usize, 2), project.schema.columns.len);
+    try std.testing.expectEqual(std.meta.Tag(LogicalPlan).seq_scan, std.meta.activeTag(project.input.*));
 }
 
-test "plan SELECT with WHERE wraps in Filter" {
+test "plan SELECT * with WHERE wraps in Project over Filter over SeqScan" {
     const alloc = std.testing.allocator;
     var h = try makeMemoryDb(alloc, .{ .schema = &.{"CREATE TABLE t (score INT)"} });
     defer h.deinit();
@@ -49,7 +49,8 @@ test "plan SELECT with WHERE wraps in Filter" {
     var parsed = try Parser.parse("SELECT * FROM t WHERE score > 50", alloc);
     defer parsed.deinit();
 
-    const filter = (try planner.plan(parsed.stmt)).filter;
+    const project = (try planner.plan(parsed.stmt)).project;
+    const filter = project.input.*.filter;
     try std.testing.expectEqual(ast.BinaryOp.gt, filter.predicate.binary.op);
     try std.testing.expectEqual(@as(usize, 0), filter.predicate.binary.left.col_idx);
     try std.testing.expectEqual(@as(i64, 50), filter.predicate.binary.right.int_lit);
@@ -88,4 +89,28 @@ test "plan SELECT columns + WHERE: Project wraps Filter wraps SeqScan" {
     const project = (try planner.plan(parsed.stmt)).project;
     try std.testing.expectEqual(std.meta.Tag(LogicalPlan).filter, std.meta.activeTag(project.input.*));
     try std.testing.expectEqual(std.meta.Tag(LogicalPlan).seq_scan, std.meta.activeTag(project.input.*.filter.input.*));
+}
+
+test "plan SELECT __rowid produces Project with correct schema and indices" {
+    const alloc = std.testing.allocator;
+    var h = try makeMemoryDb(alloc, .{ .schema = &.{"CREATE TABLE t (x INT NOT NULL)"} });
+    defer h.deinit();
+    var planner = LogicalPlanner.init(&h.db.cat, alloc);
+    defer planner.deinit();
+
+    var parsed = try Parser.parse("SELECT __rowid, __pageid, __slotid, x FROM t", alloc);
+    defer parsed.deinit();
+
+    const project = (try planner.plan(parsed.stmt)).project;
+    // Schema must have 4 columns — one per selected item.
+    try std.testing.expectEqual(@as(usize, 4), project.schema.columns.len);
+    try std.testing.expectEqualStrings("__rowid", project.schema.columns[0].name);
+    try std.testing.expectEqualStrings("__pageid", project.schema.columns[1].name);
+    try std.testing.expectEqualStrings("__slotid", project.schema.columns[2].name);
+    try std.testing.expectEqualStrings("x", project.schema.columns[3].name);
+    // t has 1 real column, so synthetic cols land at indices 1, 2, 3.
+    try std.testing.expectEqual(@as(usize, 1), project.exprs[0].col_idx); // __rowid
+    try std.testing.expectEqual(@as(usize, 2), project.exprs[1].col_idx); // __pageid
+    try std.testing.expectEqual(@as(usize, 3), project.exprs[2].col_idx); // __slotid
+    try std.testing.expectEqual(@as(usize, 0), project.exprs[3].col_idx); // x
 }

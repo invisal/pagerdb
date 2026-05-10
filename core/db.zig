@@ -245,7 +245,7 @@ pub const Db = struct {
         schema_len: usize,
 
         // Returns the next decoded row, arena-allocated, or null at EOF.
-        pub fn next(self: *DbRowIterator, allocator: std.mem.Allocator) !?struct { rowid: u64, values: []row.Value } {
+        pub fn next(self: *DbRowIterator, allocator: std.mem.Allocator) !?struct { rowid: u64, page_id: u32, slot_id: u16, values: []row.Value } {
             const cell = try self.it.next() orelse return null;
             const cols = self.schema_buf[0..self.schema_len];
 
@@ -259,7 +259,7 @@ pub const Db = struct {
             } else try allocator.dupe(u8, cell.row_data);
             defer allocator.free(row_bytes);
 
-            return .{ .rowid = cell.rowid, .values = try row.decodeRow(cols, row_bytes, allocator) };
+            return .{ .rowid = cell.rowid, .page_id = cell.page_id, .slot_id = cell.slot_idx, .values = try row.decodeRow(cols, row_bytes, allocator) };
         }
     };
 

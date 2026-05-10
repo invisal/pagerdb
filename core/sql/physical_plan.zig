@@ -142,12 +142,25 @@ pub const PhysicalPlanner = struct {
 
     fn planFilter(self: *PhysicalPlanner, node: *lp.Filter) !PhysicalPlan {
         if (node.input.* == .seq_scan) {
-            if (extractRowidEq(node.predicate)) |rowid_val| {
-                return .{ .point_lookup = .{
-                    .table = node.input.seq_scan.table,
-                    .rowid = rowid_val,
-                    .schema = node.schema,
-                } };
+            // Find the __rowid column index in this scan's schema, then check
+            // if the predicate is a simple equality on it.  If so, replace the
+            // SeqScan+Filter with a direct B-tree point lookup.
+            const scan_schema = node.input.seq_scan.schema;
+            var rowid_col_idx: ?usize = null;
+            for (scan_schema.columns) |col| {
+                if (std.mem.eql(u8, col.name, "__rowid")) {
+                    rowid_col_idx = col.index;
+                    break;
+                }
+            }
+            if (rowid_col_idx) |ridx| {
+                if (extractRowidEq(node.predicate, ridx)) |rowid_val| {
+                    return .{ .point_lookup = .{
+                        .table = node.input.seq_scan.table,
+                        .rowid = rowid_val,
+                        .schema = node.schema,
+                    } };
+                }
             }
         }
         const phys_input = try self.alloc().create(PhysicalPlan);
@@ -219,17 +232,16 @@ pub const PhysicalPlanner = struct {
     }
 };
 
-// Optimization: detect "rowid = N" or "N = rowid" patterns in the WHERE clause.
-// When found, the physical planner replaces SeqScan+Filter with PointLookup,
-// which uses btree.lookup() directly.  This is O(log n) vs O(n) and avoids
-// allocating a row buffer for every row in the table.
-fn extractRowidEq(expr: lp.Expr) ?u64 {
+// Optimization: detect "__rowid = N" or "N = __rowid" patterns in the WHERE
+// clause.  When found, the physical planner replaces SeqScan+Filter with
+// PointLookup, which uses btree.lookup() directly — O(log n) vs O(n).
+fn extractRowidEq(expr: lp.Expr, rowid_col_idx: usize) ?u64 {
     if (expr != .binary) return null;
     const b = expr.binary;
     if (b.op != .eq) return null;
-    if (b.left == .col_idx and b.left.col_idx == lp.ROWID_SENTINEL and b.right == .int_lit)
+    if (b.left == .col_idx and b.left.col_idx == rowid_col_idx and b.right == .int_lit)
         return @intCast(b.right.int_lit);
-    if (b.right == .col_idx and b.right.col_idx == lp.ROWID_SENTINEL and b.left == .int_lit)
+    if (b.right == .col_idx and b.right.col_idx == rowid_col_idx and b.left == .int_lit)
         return @intCast(b.left.int_lit);
     return null;
 }
@@ -298,8 +310,9 @@ test "SeqScan stays as SeqScan" {
     defer pplanner.deinit();
 
     const pp = try makePlan("SELECT * FROM t", alloc, &lplanner, &pplanner);
-    try std.testing.expectEqual(std.meta.Tag(PhysicalPlan).seq_scan, std.meta.activeTag(pp));
-    try std.testing.expectEqualStrings("t", pp.seq_scan.table);
+    try std.testing.expectEqual(std.meta.Tag(PhysicalPlan).project, std.meta.activeTag(pp));
+    try std.testing.expectEqual(std.meta.Tag(PhysicalPlan).seq_scan, std.meta.activeTag(pp.project.input));
+    try std.testing.expectEqualStrings("t", pp.project.input.seq_scan.table);
 }
 
 test "Filter over SeqScan becomes PhysicalFilter" {
@@ -321,8 +334,9 @@ test "Filter over SeqScan becomes PhysicalFilter" {
     defer pplanner.deinit();
 
     const pp = try makePlan("SELECT * FROM t WHERE score > 5", alloc, &lplanner, &pplanner);
-    try std.testing.expectEqual(std.meta.Tag(PhysicalPlan).filter, std.meta.activeTag(pp));
-    try std.testing.expectEqual(std.meta.Tag(PhysicalPlan).seq_scan, std.meta.activeTag(pp.filter.input));
+    try std.testing.expectEqual(std.meta.Tag(PhysicalPlan).project, std.meta.activeTag(pp));
+    try std.testing.expectEqual(std.meta.Tag(PhysicalPlan).filter, std.meta.activeTag(pp.project.input));
+    try std.testing.expectEqual(std.meta.Tag(PhysicalPlan).seq_scan, std.meta.activeTag(pp.project.input.filter.input));
 }
 
 test "rowid equality filter becomes PointLookup" {
@@ -343,10 +357,12 @@ test "rowid equality filter becomes PointLookup" {
     var pplanner = PhysicalPlanner.init(alloc);
     defer pplanner.deinit();
 
-    const pp = try makePlan("SELECT * FROM t WHERE _rowid_ = 42", alloc, &lplanner, &pplanner);
-    try std.testing.expectEqual(std.meta.Tag(PhysicalPlan).point_lookup, std.meta.activeTag(pp));
-    try std.testing.expectEqual(@as(u64, 42), pp.point_lookup.rowid);
-    try std.testing.expectEqualStrings("t", pp.point_lookup.table);
+    const pp = try makePlan("SELECT * FROM t WHERE __rowid = 42", alloc, &lplanner, &pplanner);
+    // __rowid = N is optimized to PointLookup, then wrapped in Project for column filtering.
+    try std.testing.expectEqual(std.meta.Tag(PhysicalPlan).project, std.meta.activeTag(pp));
+    try std.testing.expectEqual(std.meta.Tag(PhysicalPlan).point_lookup, std.meta.activeTag(pp.project.input));
+    try std.testing.expectEqual(@as(u64, 42), pp.project.input.point_lookup.rowid);
+    try std.testing.expectEqualStrings("t", pp.project.input.point_lookup.table);
 }
 
 test "Project carries through exprs" {

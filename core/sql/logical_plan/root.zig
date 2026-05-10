@@ -6,14 +6,6 @@ const vtab_mod = @import("../../vtable/root.zig");
 const sf = @import("../scalar_func.zig");
 const agg_mod = @import("../../cursor/agg_func.zig");
 
-// Reserved column index that maps to the internal rowid (not a real column).
-// We use maxInt(usize) because:
-//   1) It's impossible to confuse with any valid column index
-//   2) It can be detected at compile time when used in switch expressions
-//   3) The physical planner can turn Filter(SeqScan, col_idx = ROWID_SENTINEL = N)
-//      into a PointLookup node that uses the B-tree directly instead of scanning.
-pub const ROWID_SENTINEL: usize = std.math.maxInt(usize);
-
 // ── Schema ─────────────────────────────────────────────────────────────────────
 
 pub const SchemaCol = struct {
@@ -41,7 +33,7 @@ pub const Expr = union(enum) {
     str_lit: []const u8, // arena-owned
     bool_lit: bool,
     null_lit: void,
-    col_idx: usize, // source column index; ROWID_SENTINEL = _rowid_
+    col_idx: usize, // source column index into the row's values slice
     binary: *Binary,
     unary: *Unary,
     func_call: *FuncCall,
@@ -263,10 +255,9 @@ pub const LogicalPlanner = struct {
             return self.planSelectAgg(stmt, current, scan_schema);
         }
 
-        // Wrap in Project if specific columns were requested (not SELECT *).
-        // A single .star column means SELECT * — pass all columns through unchanged.
-        const is_select_star = stmt.columns.len == 1 and stmt.columns[0] == .star;
-        if (!is_select_star) {
+        // Always wrap in Project so hidden metadata cols (__rowid etc.) are
+        // excluded from SELECT * and column order is always explicit.
+        {
             var exprs: std.ArrayList(Expr) = .empty;
             var proj_cols: std.ArrayList(SchemaCol) = .empty;
 
@@ -274,6 +265,8 @@ pub const LogicalPlanner = struct {
                 switch (sel_col) {
                     .star => {
                         for (scan_schema.columns) |sc| {
+                            // Skip hidden metadata cols; users must request them explicitly.
+                            if (std.mem.startsWith(u8, sc.name, "__")) continue;
                             try exprs.append(self.alloc(), .{ .col_idx = sc.index });
                             try proj_cols.append(self.alloc(), .{
                                 .name = try self.alloc().dupe(u8, sc.name),
@@ -307,6 +300,7 @@ pub const LogicalPlanner = struct {
                             for (scan_schema.columns) |sc| {
                                 if (std.ascii.eqlIgnoreCase(sc.table, q.table)) {
                                     matched = true;
+                                    if (std.mem.startsWith(u8, sc.name, "__")) continue;
                                     try exprs.append(self.alloc(), .{ .col_idx = sc.index });
                                     try proj_cols.append(self.alloc(), .{
                                         .name = try self.alloc().dupe(u8, sc.name),
@@ -879,7 +873,6 @@ pub const LogicalPlanner = struct {
     }
 
     fn resolveColName(_: *LogicalPlanner, name: []const u8, schema: Schema) PlanError!usize {
-        if (std.ascii.eqlIgnoreCase(name, "_rowid_")) return ROWID_SENTINEL;
         for (schema.columns) |col| {
             if (std.ascii.eqlIgnoreCase(name, col.name)) return col.index;
         }
@@ -988,7 +981,10 @@ pub const LogicalPlanner = struct {
     fn buildSchema(self: *LogicalPlanner, meta: *catalog.TableMeta, alias: ?[]const u8) PlanError!Schema {
         const effective_name = alias orelse meta.name;
         const duped_name = try self.alloc().dupe(u8, effective_name);
-        const cols = try self.alloc().alloc(SchemaCol, meta.columns.len);
+        // Real columns followed by three hidden metadata cols (__rowid, __pageid, __slotid).
+        // Hidden cols are excluded from SELECT * but addressable by name.
+        const n = meta.columns.len;
+        const cols = try self.alloc().alloc(SchemaCol, n + 3);
         for (meta.columns, 0..) |c, i| {
             cols[i] = .{
                 .name = try self.alloc().dupe(u8, c.name),
@@ -998,6 +994,9 @@ pub const LogicalPlanner = struct {
                 .index = i,
             };
         }
+        cols[n] = .{ .name = "__rowid", .table = duped_name, .col_type = .int, .nullable = false, .index = n };
+        cols[n + 1] = .{ .name = "__pageid", .table = duped_name, .col_type = .int, .nullable = true, .index = n + 1 };
+        cols[n + 2] = .{ .name = "__slotid", .table = duped_name, .col_type = .int, .nullable = true, .index = n + 2 };
         return Schema{ .table = duped_name, .columns = cols };
     }
 
