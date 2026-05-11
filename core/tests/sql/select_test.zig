@@ -65,7 +65,6 @@ test "SELECT with __rowid point-lookup returns single row" {
 
 test "SELECT with main. schema prefix resolves table" {
     const alloc = std.testing.allocator;
-    const PlanError = @import("../../sql/logical_plan.zig").PlanError;
     const h = try makeMemoryDb(alloc, .{ .schema = &.{"CREATE TABLE users (id INT, name TEXT)"} });
     defer h.deinit();
 
@@ -79,7 +78,10 @@ test "SELECT with main. schema prefix resolves table" {
     defer r2.deinit();
     try std.testing.expectEqual(@as(usize, 1), r2.result_set.rows.len);
 
-    try std.testing.expectError(PlanError.TableNotFound, execute(h.db, "SELECT * FROM other.users", alloc));
+    var r3 = try execute(h.db, "SELECT * FROM other.users", alloc);
+    defer r3.deinit();
+    try std.testing.expect(r3 == .err);
+    try std.testing.expectEqualStrings("TableNotFound", r3.err.code);
 }
 
 test "SELECT table.* expands all columns from that table" {
@@ -156,25 +158,28 @@ test "SELECT mixed table.* and column in JOIN" {
 
 test "SELECT unknown_table.* returns TableNotFound" {
     const alloc = std.testing.allocator;
-    const PlanError = @import("../../sql/logical_plan.zig").PlanError;
     const h = try makeMemoryDb(alloc, .{ .schema = &.{"CREATE TABLE t (a INT NOT NULL)"} });
     defer h.deinit();
 
-    try std.testing.expectError(PlanError.TableNotFound, execute(h.db, "SELECT nope.* FROM t", alloc));
+    var r = try execute(h.db, "SELECT nope.* FROM t", alloc);
+    defer r.deinit();
+    try std.testing.expect(r == .err);
+    try std.testing.expectEqualStrings("TableNotFound", r.err.code);
 }
 
 test "table.* in WHERE clause returns WildcardInExpression" {
     const alloc = std.testing.allocator;
-    const PlanError = @import("../../sql/logical_plan.zig").PlanError;
     const h = try makeMemoryDb(alloc, .{ .schema = &.{"CREATE TABLE t (a INT NOT NULL)"} });
     defer h.deinit();
 
-    try std.testing.expectError(PlanError.WildcardInExpression, execute(h.db, "SELECT a FROM t WHERE t.*", alloc));
+    var r = try execute(h.db, "SELECT a FROM t WHERE t.*", alloc);
+    defer r.deinit();
+    try std.testing.expect(r == .err);
+    try std.testing.expectEqualStrings("WildcardInExpression", r.err.code);
 }
 
 test "SELECT abs() evaluates correctly end-to-end" {
     const alloc = std.testing.allocator;
-    const PlanError = @import("../../sql/logical_plan.zig").PlanError;
     const h = try makeMemoryDb(alloc, .{ .schema = &.{"CREATE TABLE t (n INT NOT NULL)"} });
     defer h.deinit();
 
@@ -188,5 +193,8 @@ test "SELECT abs() evaluates correctly end-to-end" {
     try std.testing.expectEqual(@as(i64, 5), r.result_set.rows[1].values[0].int);
 
     // Unknown function should be rejected at plan time.
-    try std.testing.expectError(PlanError.UnknownFunction, execute(h.db, "SELECT upper(n) FROM t", alloc));
+    var bad = try execute(h.db, "SELECT upper(n) FROM t", alloc);
+    defer bad.deinit();
+    try std.testing.expect(bad == .err);
+    try std.testing.expectEqualStrings("UnknownFunction", bad.err.code);
 }

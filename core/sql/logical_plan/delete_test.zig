@@ -11,10 +11,13 @@ test "plan DELETE without WHERE: input is SeqScan" {
     var planner = LogicalPlanner.init(&h.db.cat, alloc);
     defer planner.deinit();
 
-    var parsed = try Parser.parse("DELETE FROM t", alloc);
-    defer parsed.deinit();
+    var parsed_parser = Parser.init("DELETE FROM t", alloc);
 
-    const del = (try planner.plan(parsed.stmt)).delete;
+    defer parsed_parser.deinit();
+
+    const parsed = try parsed_parser.parse();
+
+    const del = (try planner.plan(parsed)).delete;
     try std.testing.expectEqual(std.meta.Tag(LogicalPlan).seq_scan, std.meta.activeTag(del.input.*));
 }
 
@@ -25,9 +28,12 @@ test "plan DELETE with WHERE: input is Filter" {
     var planner = LogicalPlanner.init(&h.db.cat, alloc);
     defer planner.deinit();
 
-    var parsed = try Parser.parse("DELETE FROM t WHERE x = 1", alloc);
-    defer parsed.deinit();
+    var parsed_parser = Parser.init("DELETE FROM t WHERE x = 1", alloc);
 
-    const lp = try planner.plan(parsed.stmt);
+    defer parsed_parser.deinit();
+
+    const parsed = try parsed_parser.parse();
+
+    const lp = try planner.plan(parsed);
     try std.testing.expectEqual(std.meta.Tag(LogicalPlan).filter, std.meta.activeTag(lp.delete.input.*));
 }

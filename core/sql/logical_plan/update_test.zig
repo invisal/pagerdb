@@ -11,10 +11,13 @@ test "plan UPDATE resolves assignments and filter" {
     var planner = LogicalPlanner.init(&h.db.cat, alloc);
     defer planner.deinit();
 
-    var parsed = try Parser.parse("UPDATE t SET score = 99 WHERE name = 'alice'", alloc);
-    defer parsed.deinit();
+    var parsed_parser = Parser.init("UPDATE t SET score = 99 WHERE name = 'alice'", alloc);
 
-    const upd = (try planner.plan(parsed.stmt)).update;
+    defer parsed_parser.deinit();
+
+    const parsed = try parsed_parser.parse();
+
+    const upd = (try planner.plan(parsed)).update;
     try std.testing.expectEqualStrings("t", upd.table);
     try std.testing.expectEqual(@as(usize, 1), upd.assignments.len);
     try std.testing.expectEqual(@as(usize, 1), upd.assignments[0].col_idx);

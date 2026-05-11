@@ -132,10 +132,15 @@ fn execAndPrint(
     out: *std.Io.Writer,
     err: *std.Io.Writer,
 ) !void {
-    _ = err;
     var result = try db.execute(sql, alloc);
     defer result.deinit();
-    try lib.debug.printTo(result, out);
+    switch (result) {
+        .err => |e| {
+            try err.print("Error ({s}): {s}\n", .{ e.code, e.message });
+            try err.flush();
+        },
+        else => try lib.debug.printTo(result, out),
+    }
 }
 
 fn printHelp(out: *std.Io.Writer) !void {

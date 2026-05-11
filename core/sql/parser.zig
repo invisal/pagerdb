@@ -13,44 +13,45 @@ pub const ParseError = error{
     OutOfMemory,
 } || lexer.LexError;
 
-pub const ParseResult = struct {
-    arena: std.heap.ArenaAllocator,
-    stmt: ast.Stmt,
-
-    pub fn deinit(self: *ParseResult) void {
-        self.arena.deinit();
-    }
-};
-
 pub const ParseExprResult = struct {
     arena: std.heap.ArenaAllocator,
     expr: ast.Expr,
 
-    pub fn deinit(self: *ParseResult) void {
+    pub fn deinit(self: *ParseExprResult) void {
         self.arena.deinit();
     }
 };
 
 pub const Parser = struct {
-    tokens: []const Token,
+    tokens: []const Token = &.{},
     src: []const u8,
-    pos: usize,
+    pos: usize = 0,
     arena: std.heap.ArenaAllocator,
+    /// Human-readable message set at the error site; valid until deinit().
+    error_message: []const u8 = "",
 
-    pub fn parse(src: []const u8, allocator: std.mem.Allocator) ParseError!ParseResult {
-        const tokens = try lexer.Lexer.tokenize(src, allocator);
-        defer allocator.free(tokens);
+    pub fn init(src: []const u8, allocator: std.mem.Allocator) Parser {
+        return .{ .src = src, .arena = std.heap.ArenaAllocator.init(allocator) };
+    }
 
-        var p = Parser{
-            .tokens = tokens,
-            .src = src,
-            .pos = 0,
-            .arena = std.heap.ArenaAllocator.init(allocator),
+    pub fn deinit(self: *Parser) void {
+        self.arena.deinit();
+    }
+
+    /// Tokenise src then parse it into a statement.
+    /// On failure, error_message holds a human-readable description.
+    /// The returned ast.Stmt is arena-owned; keep the Parser alive until done.
+    pub fn parse(self: *Parser) ParseError!ast.Stmt {
+        self.tokens = lexer.Lexer.tokenize(self.src, self.arena.allocator()) catch |e| {
+            self.error_message = switch (e) {
+                error.UnexpectedChar => "Unexpected character in SQL",
+                error.UnterminatedString => "Unterminated string literal",
+                error.InvalidNumber => "Invalid number literal",
+                else => "",
+            };
+            return e;
         };
-        errdefer p.arena.deinit();
-
-        const stmt = try p.parseStmt();
-        return ParseResult{ .arena = p.arena, .stmt = stmt };
+        return self.parseStmt();
     }
 
     pub fn parseStandaloneExpr(src: []const u8, allocator: std.mem.Allocator) ParseError!ParseExprResult {
@@ -60,7 +61,6 @@ pub const Parser = struct {
         var p = Parser{
             .tokens = tokens,
             .src = src,
-            .pos = 0,
             .arena = std.heap.ArenaAllocator.init(allocator),
         };
         errdefer p.arena.deinit();
@@ -94,7 +94,15 @@ pub const Parser = struct {
 
     fn expect(self: *Parser, kind: TokenKind) ParseError!Token {
         const tok = self.peek();
-        if (tok.kind != kind) return ParseError.UnexpectedToken;
+        if (tok.kind != kind) {
+            const got = if (tok.kind == .eof) "end of input" else self.tokenText(tok);
+            self.error_message = std.fmt.allocPrint(
+                self.arena.allocator(),
+                "Expected {s} but got '{s}'",
+                .{ tokenKindLabel(kind), got },
+            ) catch "";
+            return ParseError.UnexpectedToken;
+        }
         return self.advance();
     }
 
@@ -121,7 +129,16 @@ pub const Parser = struct {
                 _ = self.advance();
                 break :blk .{ .rollback = {} };
             },
-            else => ParseError.UnexpectedToken,
+            else => {
+                const tok = self.peek();
+                const text = if (tok.kind == .eof) "end of input" else self.tokenText(tok);
+                self.error_message = std.fmt.allocPrint(
+                    self.arena.allocator(),
+                    "Unexpected '{s}': expected SELECT, INSERT, UPDATE, DELETE, CREATE, BEGIN, COMMIT, or ROLLBACK",
+                    .{text},
+                ) catch "";
+                return ParseError.UnexpectedToken;
+            },
         };
     }
 
@@ -410,7 +427,14 @@ pub const Parser = struct {
                 .kw_real => .real,
                 .kw_text => .text,
                 .kw_blob => .blob,
-                else => return ParseError.InvalidType,
+                else => {
+                    self.error_message = std.fmt.allocPrint(
+                        self.arena.allocator(),
+                        "Invalid column type '{s}', expected INT, REAL, TEXT, or BLOB",
+                        .{self.tokenText(type_tok)},
+                    ) catch "";
+                    return ParseError.InvalidType;
+                },
             };
 
             var nullable = true;
@@ -645,10 +669,76 @@ pub const Parser = struct {
                 _ = try self.expect(.rparen);
                 return inner;
             },
-            else => return ParseError.UnexpectedToken,
+            else => {
+                const bad = self.peek();
+                const text = if (bad.kind == .eof) "end of input" else self.tokenText(bad);
+                self.error_message = std.fmt.allocPrint(
+                    self.arena.allocator(),
+                    "Unexpected '{s}' in expression",
+                    .{text},
+                ) catch "";
+                return ParseError.UnexpectedToken;
+            },
         }
     }
 };
+
+fn tokenKindLabel(kind: lexer.TokenKind) []const u8 {
+    return switch (kind) {
+        .kw_select => "SELECT",
+        .kw_from => "FROM",
+        .kw_where => "WHERE",
+        .kw_and => "AND",
+        .kw_or => "OR",
+        .kw_not => "NOT",
+        .kw_insert => "INSERT",
+        .kw_into => "INTO",
+        .kw_values => "VALUES",
+        .kw_update => "UPDATE",
+        .kw_set => "SET",
+        .kw_delete => "DELETE",
+        .kw_create => "CREATE",
+        .kw_table => "TABLE",
+        .kw_null => "NULL",
+        .kw_true => "TRUE",
+        .kw_false => "FALSE",
+        .kw_int => "INT",
+        .kw_real => "REAL",
+        .kw_text => "TEXT",
+        .kw_blob => "BLOB",
+        .kw_begin => "BEGIN",
+        .kw_commit => "COMMIT",
+        .kw_rollback => "ROLLBACK",
+        .kw_inner => "INNER",
+        .kw_join => "JOIN",
+        .kw_on => "ON",
+        .kw_as => "AS",
+        .kw_group => "GROUP",
+        .kw_by => "BY",
+        .kw_default => "DEFAULT",
+        .identifier => "identifier",
+        .lit_int => "integer",
+        .lit_float => "float",
+        .lit_string => "string",
+        .lparen => "'('",
+        .rparen => "')'",
+        .comma => "','",
+        .semicolon => "';'",
+        .dot => "'.'",
+        .op_star => "'*'",
+        .op_plus => "'+'",
+        .op_minus => "'-'",
+        .op_slash => "'/'",
+        .op_eq => "'='",
+        .op_neq => "'<>'",
+        .op_lt => "'<'",
+        .op_lte => "'<='",
+        .op_gt => "'>'",
+        .op_gte => "'>='",
+        .eof => "end of input",
+        else => "token",
+    };
+}
 
 // Unescape '' → ' in a raw string-literal body.
 fn unescapeString(raw: []const u8, allocator: std.mem.Allocator) ![]const u8 {
