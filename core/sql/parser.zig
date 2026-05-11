@@ -98,8 +98,8 @@ pub const Parser = struct {
             const got = if (tok.kind == .eof) "end of input" else self.tokenText(tok);
             self.error_message = std.fmt.allocPrint(
                 self.arena.allocator(),
-                "Expected {s} but got '{s}'",
-                .{ tokenKindLabel(kind), got },
+                "[{d}] Expected {s} but got '{s}'",
+                .{ tok.start, tokenKindLabel(kind), got },
             ) catch "";
             return ParseError.UnexpectedToken;
         }
@@ -134,8 +134,8 @@ pub const Parser = struct {
                 const text = if (tok.kind == .eof) "end of input" else self.tokenText(tok);
                 self.error_message = std.fmt.allocPrint(
                     self.arena.allocator(),
-                    "Unexpected '{s}': expected SELECT, INSERT, UPDATE, DELETE, CREATE, BEGIN, COMMIT, or ROLLBACK",
-                    .{text},
+                    "[{d}] Unexpected '{s}': expected SELECT, INSERT, UPDATE, DELETE, CREATE, BEGIN, COMMIT, or ROLLBACK",
+                    .{ tok.start, text },
                 ) catch "";
                 return ParseError.UnexpectedToken;
             },
@@ -430,8 +430,8 @@ pub const Parser = struct {
                 else => {
                     self.error_message = std.fmt.allocPrint(
                         self.arena.allocator(),
-                        "Invalid column type '{s}', expected INT, REAL, TEXT, or BLOB",
-                        .{self.tokenText(type_tok)},
+                        "[{d}] Invalid column type '{s}', expected INT, REAL, TEXT, or BLOB",
+                        .{ type_tok.start, self.tokenText(type_tok) },
                     ) catch "";
                     return ParseError.InvalidType;
                 },
@@ -674,8 +674,8 @@ pub const Parser = struct {
                 const text = if (bad.kind == .eof) "end of input" else self.tokenText(bad);
                 self.error_message = std.fmt.allocPrint(
                     self.arena.allocator(),
-                    "Unexpected '{s}' in expression",
-                    .{text},
+                    "[{d}] Unexpected '{s}' in expression",
+                    .{ bad.start, text },
                 ) catch "";
                 return ParseError.UnexpectedToken;
             },
