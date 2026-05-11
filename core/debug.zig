@@ -12,7 +12,7 @@ const row_mod = @import("row.zig");
 // The printTo() functions allow writing to any writer.
 
 /// Print an ExecResult to stderr.
-/// Handles all variants: result_set, affected, and created.
+/// Handles all variants: result_set, affected, created, and err.
 /// The caller retains ownership and must call deinit() when done.
 pub fn print(result: ExecResult) void {
     switch (result) {
@@ -21,6 +21,7 @@ pub fn print(result: ExecResult) void {
         },
         .affected => |n| std.debug.print("{d} row{s} affected\n", .{ n, if (n == 1) "" else "s" }),
         .created => std.debug.print("Table created.\n", .{}),
+        .err => |e| std.debug.print("Error ({s}): {s}\n", .{ e.code, e.message }),
     }
 }
 
@@ -33,6 +34,7 @@ pub fn printTo(result: ExecResult, writer: anytype) !void {
         },
         .affected => |n| try writer.print("{d} row{s} affected\n", .{ n, if (n == 1) "" else "s" }),
         .created => try writer.print("Table created.\n", .{}),
+        .err => |e| try writer.print("Error ({s}): {s}\n", .{ e.code, e.message }),
     }
 }
 

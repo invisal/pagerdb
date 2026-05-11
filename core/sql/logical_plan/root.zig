@@ -183,6 +183,7 @@ pub const PlanError = error{
 pub const LogicalPlanner = struct {
     cat: *catalog.Catalog,
     arena: std.heap.ArenaAllocator,
+    error_message: []const u8 = "",
 
     pub fn init(cat: *catalog.Catalog, allocator: std.mem.Allocator) LogicalPlanner {
         return .{ .cat = cat, .arena = std.heap.ArenaAllocator.init(allocator) };
@@ -194,6 +195,10 @@ pub const LogicalPlanner = struct {
 
     fn alloc(self: *LogicalPlanner) std.mem.Allocator {
         return self.arena.allocator();
+    }
+
+    fn setError(self: *LogicalPlanner, comptime fmt_str: []const u8, args: anytype) void {
+        self.error_message = std.fmt.allocPrint(self.arena.allocator(), fmt_str, args) catch "";
     }
 
     pub fn plan(self: *LogicalPlanner, stmt: ast.Stmt) PlanError!LogicalPlan {
@@ -311,7 +316,10 @@ pub const LogicalPlanner = struct {
                                     });
                                 }
                             }
-                            if (!matched) return PlanError.TableNotFound;
+                            if (!matched) {
+                                self.setError("Table '{s}' does not exist", .{q.table});
+                                return PlanError.TableNotFound;
+                            }
                         } else {
                             // Handle SELECT table_name.column_name
                             const src_idx = try self.resolveQualColName(q.table, q.col.?, scan_schema);
@@ -369,8 +377,10 @@ pub const LogicalPlanner = struct {
     /// Handles both named and positional inserts, resolves expressions,
     /// and ensures all required columns are provided.
     fn planInsert(self: *LogicalPlanner, stmt: ast.InsertStmt) PlanError!LogicalPlan {
-        const meta = self.cat.getTable(stmt.table) orelse
+        const meta = self.cat.getTable(stmt.table) orelse {
+            self.setError("Table '{s}' does not exist", .{stmt.table});
             return PlanError.TableNotFound;
+        };
 
         const schema = try self.buildSchema(meta, null);
         const col_count = meta.columns.len;
@@ -396,12 +406,16 @@ pub const LogicalPlanner = struct {
         if (stmt.columns.len > 0) {
             // Named column insert (user specifies target columns)
             // INSERT INTO table_name(col1, col2, ...)
-            if (stmt.columns.len != stmt.values.len)
+            if (stmt.columns.len != stmt.values.len) {
+                self.setError("Column count ({d}) does not match value count ({d})", .{ stmt.columns.len, stmt.values.len });
                 return PlanError.ColumnCountMismatch;
+            }
 
             for (stmt.columns, 0..) |name, i| {
-                const col = meta.findColumn(name) orelse
+                const col = meta.findColumn(name) orelse {
+                    self.setError("Column '{s}' does not exist in table '{s}'", .{ name, stmt.table });
                     return PlanError.ColumnNotFound;
+                };
 
                 const idx = col.attnum;
 
@@ -427,8 +441,11 @@ pub const LogicalPlanner = struct {
         }
 
         // Ensure all required columns are filled
-        for (is_set) |set| {
-            if (!set) return PlanError.NoDefaultValue;
+        for (is_set, 0..) |set, i| {
+            if (!set) {
+                self.setError("Column '{s}' has no default value and was not provided", .{meta.columns[i].name});
+                return PlanError.NoDefaultValue;
+            }
         }
 
         return .{
@@ -443,7 +460,10 @@ pub const LogicalPlanner = struct {
     // ── UPDATE ─────────────────────────────────────────────────────────────────
 
     fn planUpdate(self: *LogicalPlanner, stmt: ast.UpdateStmt) PlanError!LogicalPlan {
-        const meta = self.cat.getTable(stmt.table) orelse return PlanError.TableNotFound;
+        const meta = self.cat.getTable(stmt.table) orelse {
+            self.setError("Table '{s}' does not exist", .{stmt.table});
+            return PlanError.TableNotFound;
+        };
         const schema = try self.buildSchema(meta, null);
 
         var input: LogicalPlan = .{ .seq_scan = .{ .table = schema.table, .schema = schema } };
@@ -478,7 +498,10 @@ pub const LogicalPlanner = struct {
     // ── DELETE ─────────────────────────────────────────────────────────────────
 
     fn planDelete(self: *LogicalPlanner, stmt: ast.DeleteStmt) PlanError!LogicalPlan {
-        const meta = self.cat.getTable(stmt.table) orelse return PlanError.TableNotFound;
+        const meta = self.cat.getTable(stmt.table) orelse {
+            self.setError("Table '{s}' does not exist", .{stmt.table});
+            return PlanError.TableNotFound;
+        };
         const schema = try self.buildSchema(meta, null);
 
         var input: LogicalPlan = .{ .seq_scan = .{ .table = schema.table, .schema = schema } };
@@ -660,7 +683,10 @@ pub const LogicalPlanner = struct {
                                 try proj_cols.append(self.alloc(), sc);
                             }
                         }
-                        if (!matched) return PlanError.TableNotFound;
+                        if (!matched) {
+                            self.setError("Table '{s}' does not exist", .{q.table});
+                            return PlanError.TableNotFound;
+                        }
                     } else {
                         const col_idx = try self.resolveQualColName(q.table, q.col.?, agg_out_schema);
                         try proj_exprs.append(self.alloc(), .{ .col_idx = col_idx });
@@ -858,8 +884,14 @@ pub const LogicalPlanner = struct {
                 // as vtable resolution.  The pointer into REGISTRY is stored in the
                 // plan and used directly by the evaluator, with no string comparison
                 // at execution time.
-                const func = sf.find(f.name) orelse return PlanError.UnknownFunction;
-                if (f.args.len < func.min_args or f.args.len > func.max_args) return PlanError.WrongArgCount;
+                const func = sf.find(f.name) orelse {
+                    self.setError("Unknown function '{s}'", .{f.name});
+                    return PlanError.UnknownFunction;
+                };
+                if (f.args.len < func.min_args or f.args.len > func.max_args) {
+                    self.setError("Function '{s}' expects {d}-{d} arguments but got {d}", .{ f.name, func.min_args, func.max_args, f.args.len });
+                    return PlanError.WrongArgCount;
+                }
                 const resolved_args = try self.alloc().alloc(Expr, f.args.len);
                 for (f.args, 0..) |arg, i| resolved_args[i] = try self.resolveExpr(arg, schema);
                 const node = try self.alloc().create(Expr.FuncCall);
@@ -872,15 +904,16 @@ pub const LogicalPlanner = struct {
         };
     }
 
-    fn resolveColName(_: *LogicalPlanner, name: []const u8, schema: Schema) PlanError!usize {
+    fn resolveColName(self: *LogicalPlanner, name: []const u8, schema: Schema) PlanError!usize {
         for (schema.columns) |col| {
             if (std.ascii.eqlIgnoreCase(name, col.name)) return col.index;
         }
+        self.setError("Column '{s}' does not exist", .{name});
         return PlanError.ColumnNotFound;
     }
 
     // Resolve a table-qualified column reference (tbl.col) to its merged index.
-    fn resolveQualColName(_: *LogicalPlanner, table: []const u8, col_name: []const u8, schema: Schema) PlanError!usize {
+    fn resolveQualColName(self: *LogicalPlanner, table: []const u8, col_name: []const u8, schema: Schema) PlanError!usize {
         for (schema.columns) |col| {
             if (std.ascii.eqlIgnoreCase(table, col.table) and
                 std.ascii.eqlIgnoreCase(col_name, col.name))
@@ -888,6 +921,7 @@ pub const LogicalPlanner = struct {
                 return col.index;
             }
         }
+        self.setError("Column '{s}.{s}' does not exist", .{ table, col_name });
         return PlanError.ColumnNotFound;
     }
 
@@ -949,7 +983,10 @@ pub const LogicalPlanner = struct {
                     }
                 }
                 // Not a user table — try the vtab registry (zero-arg access).
-                const vt = vtab_mod.find(q.schema orelse "main", q.name) orelse return PlanError.TableNotFound;
+                const vt = vtab_mod.find(q.schema orelse "main", q.name) orelse {
+                    self.setError("Table '{s}' does not exist", .{q.name});
+                    return PlanError.TableNotFound;
+                };
                 if (vt.min_args > 0) return PlanError.ArgCountMismatch;
                 const s = try self.buildVTabSchema(effective, vt);
                 break :blk ScanResult{
@@ -961,7 +998,10 @@ pub const LogicalPlanner = struct {
                 if (f.schema) |schema_name| {
                     if (!std.ascii.eqlIgnoreCase(schema_name, "main")) return PlanError.TableNotFound;
                 }
-                const vt = vtab_mod.find(f.schema orelse "main", f.name) orelse return PlanError.TableNotFound;
+                const vt = vtab_mod.find(f.schema orelse "main", f.name) orelse {
+                    self.setError("Table function '{s}' does not exist", .{f.name});
+                    return PlanError.TableNotFound;
+                };
                 if (f.args.len < vt.min_args or f.args.len > vt.max_args) return PlanError.ArgCountMismatch;
                 const resolved_args = try self.resolveVTabArgs(f.args);
                 const effective = f.alias orelse f.name;

@@ -12,10 +12,13 @@ test "unknown table returns TableNotFound" {
     var planner = LogicalPlanner.init(&h.db.cat, alloc);
     defer planner.deinit();
 
-    var parsed = try Parser.parse("SELECT * FROM ghost", alloc);
-    defer parsed.deinit();
+    var parsed_parser = Parser.init("SELECT * FROM ghost", alloc);
 
-    try std.testing.expectError(PlanError.TableNotFound, planner.plan(parsed.stmt));
+    defer parsed_parser.deinit();
+
+    const parsed = try parsed_parser.parse();
+
+    try std.testing.expectError(PlanError.TableNotFound, planner.plan(parsed));
 }
 
 test "non-main schema returns TableNotFound" {
@@ -25,10 +28,13 @@ test "non-main schema returns TableNotFound" {
     var planner = LogicalPlanner.init(&h.db.cat, alloc);
     defer planner.deinit();
 
-    var parsed = try Parser.parse("SELECT * FROM other.users", alloc);
-    defer parsed.deinit();
+    var parsed_parser = Parser.init("SELECT * FROM other.users", alloc);
 
-    try std.testing.expectError(PlanError.TableNotFound, planner.plan(parsed.stmt));
+    defer parsed_parser.deinit();
+
+    const parsed = try parsed_parser.parse();
+
+    try std.testing.expectError(PlanError.TableNotFound, planner.plan(parsed));
 }
 
 test "unknown column in WHERE returns ColumnNotFound" {
@@ -38,10 +44,13 @@ test "unknown column in WHERE returns ColumnNotFound" {
     var planner = LogicalPlanner.init(&h.db.cat, alloc);
     defer planner.deinit();
 
-    var parsed = try Parser.parse("SELECT * FROM t WHERE y = 1", alloc);
-    defer parsed.deinit();
+    var parsed_parser = Parser.init("SELECT * FROM t WHERE y = 1", alloc);
 
-    try std.testing.expectError(PlanError.ColumnNotFound, planner.plan(parsed.stmt));
+    defer parsed_parser.deinit();
+
+    const parsed = try parsed_parser.parse();
+
+    try std.testing.expectError(PlanError.ColumnNotFound, planner.plan(parsed));
 }
 
 test "__rowid resolves to correct column index" {
@@ -51,11 +60,14 @@ test "__rowid resolves to correct column index" {
     var planner = LogicalPlanner.init(&h.db.cat, alloc);
     defer planner.deinit();
 
-    var parsed = try Parser.parse("SELECT * FROM t WHERE __rowid = 42", alloc);
-    defer parsed.deinit();
+    var parsed_parser = Parser.init("SELECT * FROM t WHERE __rowid = 42", alloc);
+
+    defer parsed_parser.deinit();
+
+    const parsed = try parsed_parser.parse();
 
     // t has 1 real column, so __rowid is at index 1.
-    const pred = (try planner.plan(parsed.stmt)).project.input.filter.predicate.binary;
+    const pred = (try planner.plan(parsed)).project.input.filter.predicate.binary;
     try std.testing.expectEqual(ast.BinaryOp.eq, pred.op);
     try std.testing.expectEqual(@as(usize, 1), pred.left.col_idx);
     try std.testing.expectEqual(@as(i64, 42), pred.right.int_lit);

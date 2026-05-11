@@ -24,14 +24,32 @@ pub const ResultSet = struct {
     }
 };
 
+/// A SQL-level error with a human-readable message.  Returned as a result
+/// variant rather than a Zig error so callers can inspect the message string.
+pub const FormattedError = struct {
+    /// Machine-readable error name, e.g. "TableNotFound"
+    code: []const u8,
+    /// Human-readable message, e.g. "Table 'users' does not exist"
+    message: []const u8,
+    arena: std.heap.ArenaAllocator,
+
+    pub fn deinit(self: *FormattedError) void {
+        self.arena.deinit();
+    }
+};
+
 pub const ExecResult = union(enum) {
     result_set: ResultSet,
     affected: u64,
     created: void,
+    /// SQL-level error (bad syntax, unknown table, type mismatch, …).
+    /// Unexpected system failures (OOM, I/O) still propagate as Zig errors.
+    err: FormattedError,
 
     pub fn deinit(self: *ExecResult) void {
         switch (self.*) {
             .result_set => |*rs| rs.deinit(),
+            .err => |*e| e.deinit(),
             else => {},
         }
     }
@@ -182,18 +200,87 @@ fn evalToValue(
 // Full query pipeline: parse → logical plan → physical plan → execute.
 // Each stage owns its memory via arena allocators that are freed before
 // returning, so the only memory retained is the result set itself.
+//
+// SQL-level errors (bad syntax, unknown table, type mismatch, …) are returned
+// as ExecResult.err so callers receive a human-readable message string.
+// Genuine system failures (OOM, I/O errors) still propagate as Zig errors.
 pub fn execute(db: *Db, sql: []const u8, allocator: std.mem.Allocator) !ExecResult {
-    var parse_result = try Parser.parse(sql, allocator);
-    defer parse_result.deinit();
+    var parser = Parser.init(sql, allocator);
+    defer parser.deinit();
+
+    const stmt = parser.parse() catch |e| {
+        return toSqlError(e, parser.error_message, allocator);
+    };
 
     var logical_planner = lp_mod.LogicalPlanner.init(&db.cat, allocator);
     defer logical_planner.deinit();
-    const logical = try logical_planner.plan(parse_result.stmt);
+    const logical = logical_planner.plan(stmt) catch |e| {
+        return toSqlError(e, logical_planner.error_message, allocator);
+    };
 
     var phys_planner = pp_mod.PhysicalPlanner.init(allocator);
     defer phys_planner.deinit();
     const physical = try phys_planner.plan(logical);
 
     var ex = Executor.init(db, allocator);
-    return ex.exec(physical);
+    return ex.exec(physical) catch |e| {
+        if (isSqlUserError(e)) {
+            var arena = std.heap.ArenaAllocator.init(allocator);
+            errdefer arena.deinit();
+            const msg = try std.fmt.allocPrint(arena.allocator(), "{s}", .{@errorName(e)});
+            return ExecResult{ .err = .{ .code = @errorName(e), .message = msg, .arena = arena } };
+        }
+        return e;
+    };
+}
+
+/// Convert a caught error into ExecResult.err (SQL-level user error) or
+/// re-propagate it as a Zig error (unexpected system failure).
+fn toSqlError(e: anyerror, message: []const u8, allocator: std.mem.Allocator) !ExecResult {
+    if (!isSqlUserError(e)) return e;
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    errdefer arena.deinit();
+    const msg = if (message.len > 0)
+        try arena.allocator().dupe(u8, message)
+    else
+        try std.fmt.allocPrint(arena.allocator(), "{s}", .{@errorName(e)});
+
+    return ExecResult{ .err = .{ .code = @errorName(e), .message = msg, .arena = arena } };
+}
+
+/// Returns true for errors that are the user's fault (bad SQL, wrong schema).
+/// Returns false for system failures that should surface as Zig errors.
+fn isSqlUserError(e: anyerror) bool {
+    return switch (e) {
+        // Lex / parse errors
+        error.UnexpectedChar,
+        error.UnterminatedString,
+        error.InvalidNumber,
+        error.UnexpectedToken,
+        error.UnexpectedEof,
+        error.InvalidType,
+        // Logical plan errors
+        error.TableNotFound,
+        error.ColumnNotFound,
+        error.WildcardInExpression,
+        error.TypeMismatch,
+        error.ColumnCountMismatch,
+        error.ArgCountMismatch,
+        error.NoDefaultValue,
+        error.UnknownFunction,
+        error.WrongArgCount,
+        // Execution errors
+        error.DivisionByZero,
+        // Schema / catalog errors
+        error.TableAlreadyExists,
+        // Transaction errors
+        error.TransactionAlreadyActive,
+        error.NoActiveTransaction,
+        // Virtual table argument errors
+        error.ArgumentMismatch,
+        error.InvalidArgumentType,
+        => true,
+        else => false,
+    };
 }

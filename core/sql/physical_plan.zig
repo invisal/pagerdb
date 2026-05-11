@@ -285,9 +285,10 @@ fn makePlan(
     lp_out: *lp.LogicalPlanner,
     pp_out: *PhysicalPlanner,
 ) !PhysicalPlan {
-    var parsed = try Parser.parse(src, alloc);
-    defer parsed.deinit();
-    const logical = try lp_out.plan(parsed.stmt);
+    var parser = Parser.init(src, alloc);
+    defer parser.deinit();
+    const stmt = try parser.parse();
+    const logical = try lp_out.plan(stmt);
     return pp_out.plan(logical);
 }
 

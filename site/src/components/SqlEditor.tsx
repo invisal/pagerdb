@@ -5,7 +5,7 @@ type QueryResult =
   | { type: 'select'; columns: string[]; rows: unknown[][] }
   | { type: 'affected'; count: number }
   | { type: 'created' }
-  | { type: 'error'; message: string };
+  | { type: 'error'; code: string; message: string };
 
 const INITIAL_SQL = `-- Welcome to PagerDB!
 CREATE TABLE users (id INT, name TEXT, age INT);
@@ -143,6 +143,14 @@ export default function SqlEditor() {
               )}
             </tbody>
           </table>
+        </div>
+      )}
+
+      {/* SQL error */}
+      {result && result.type === 'error' && (
+        <div className="bg-red-950 border border-red-800 rounded-lg px-4 py-3 text-sm text-red-300 font-mono">
+          <span className="text-red-500 font-semibold">{result.code}: </span>
+          {result.message}
         </div>
       )}
 

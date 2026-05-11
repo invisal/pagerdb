@@ -133,14 +133,28 @@ fn writeResult(result: core.ExecResult) !void {
             try jw.write("created");
             try jw.endObject();
         },
+        .err => |e| {
+            try jw.beginObject();
+            try jw.objectField("type");
+            try jw.write("error");
+            try jw.objectField("code");
+            try jw.write(e.code);
+            try jw.objectField("message");
+            try jw.write(e.message);
+            try jw.endObject();
+        },
     }
 }
 
+// writeError handles unexpected system failures (OOM, I/O) that were not
+// caught as SQL-level errors and converted to ExecResult.err.
 fn writeError(err: anyerror) !void {
     var jw: std.json.Stringify = .{ .writer = &g_result.writer };
     try jw.beginObject();
     try jw.objectField("type");
     try jw.write("error");
+    try jw.objectField("code");
+    try jw.write(@errorName(err));
     try jw.objectField("message");
     try jw.write(@errorName(err));
     try jw.endObject();

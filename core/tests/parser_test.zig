@@ -5,10 +5,11 @@ const Parser = @import("../sql/parser.zig").Parser;
 
 test "parse SELECT *" {
     const alloc = std.testing.allocator;
-    var res = try Parser.parse("SELECT * FROM users", alloc);
-    defer res.deinit();
+    var p = Parser.init("SELECT * FROM users", alloc);
+    defer p.deinit();
+    const res = try p.parse();
 
-    const s = res.stmt.select;
+    const s = res.select;
     try std.testing.expectEqualStrings("users", s.table_ref.name.name);
     try std.testing.expect(s.table_ref.name.schema == null);
     // SELECT * is now represented as a single .star entry
@@ -19,30 +20,33 @@ test "parse SELECT *" {
 
 test "parse SELECT * with schema" {
     const alloc = std.testing.allocator;
-    var res = try Parser.parse("SELECT * FROM main.users", alloc);
-    defer res.deinit();
+    var p = Parser.init("SELECT * FROM main.users", alloc);
+    defer p.deinit();
+    const res = try p.parse();
 
-    const s = res.stmt.select;
+    const s = res.select;
     try std.testing.expectEqualStrings("users", s.table_ref.name.name);
     try std.testing.expectEqualStrings("main", s.table_ref.name.schema.?);
 }
 
 test "parse SELECT * with information_schema schema" {
     const alloc = std.testing.allocator;
-    var res = try Parser.parse("SELECT * FROM information_schema.tables", alloc);
-    defer res.deinit();
+    var p = Parser.init("SELECT * FROM information_schema.tables", alloc);
+    defer p.deinit();
+    const res = try p.parse();
 
-    const s = res.stmt.select;
+    const s = res.select;
     try std.testing.expectEqualStrings("tables", s.table_ref.name.name);
     try std.testing.expectEqualStrings("information_schema", s.table_ref.name.schema.?);
 }
 
 test "parse SELECT columns with WHERE" {
     const alloc = std.testing.allocator;
-    var res = try Parser.parse("SELECT name, score FROM users WHERE score > 100", alloc);
-    defer res.deinit();
+    var p = Parser.init("SELECT name, score FROM users WHERE score > 100", alloc);
+    defer p.deinit();
+    const res = try p.parse();
 
-    const s = res.stmt.select;
+    const s = res.select;
     try std.testing.expectEqual(@as(usize, 2), s.columns.len);
     try std.testing.expectEqualStrings("name", s.columns[0].name);
     try std.testing.expectEqualStrings("score", s.columns[1].name);
@@ -52,10 +56,11 @@ test "parse SELECT columns with WHERE" {
 
 test "parse SELECT * FROM tvf with no args" {
     const alloc = std.testing.allocator;
-    var res = try Parser.parse("SELECT * FROM __pages()", alloc);
-    defer res.deinit();
+    var p = Parser.init("SELECT * FROM __pages()", alloc);
+    defer p.deinit();
+    const res = try p.parse();
 
-    const s = res.stmt.select;
+    const s = res.select;
     try std.testing.expect(s.table_ref.func.schema == null);
     try std.testing.expectEqualStrings("__pages", s.table_ref.func.name);
     try std.testing.expectEqual(@as(usize, 0), s.table_ref.func.args.len);
@@ -63,10 +68,11 @@ test "parse SELECT * FROM tvf with no args" {
 
 test "parse SELECT * FROM schema.tvf with no args" {
     const alloc = std.testing.allocator;
-    var res = try Parser.parse("SELECT * FROM main.__pages()", alloc);
-    defer res.deinit();
+    var p = Parser.init("SELECT * FROM main.__pages()", alloc);
+    defer p.deinit();
+    const res = try p.parse();
 
-    const s = res.stmt.select;
+    const s = res.select;
     try std.testing.expectEqualStrings("main", s.table_ref.func.schema.?);
     try std.testing.expectEqualStrings("__pages", s.table_ref.func.name);
     try std.testing.expectEqual(@as(usize, 0), s.table_ref.func.args.len);
@@ -74,10 +80,11 @@ test "parse SELECT * FROM schema.tvf with no args" {
 
 test "parse SELECT * FROM tvf with int arg" {
     const alloc = std.testing.allocator;
-    var res = try Parser.parse("SELECT * FROM __page_slots(3)", alloc);
-    defer res.deinit();
+    var p = Parser.init("SELECT * FROM __page_slots(3)", alloc);
+    defer p.deinit();
+    const res = try p.parse();
 
-    const s = res.stmt.select;
+    const s = res.select;
     try std.testing.expect(s.table_ref.func.schema == null);
     try std.testing.expectEqualStrings("__page_slots", s.table_ref.func.name);
     try std.testing.expectEqual(@as(usize, 1), s.table_ref.func.args.len);
@@ -86,10 +93,11 @@ test "parse SELECT * FROM tvf with int arg" {
 
 test "parse INSERT" {
     const alloc = std.testing.allocator;
-    var res = try Parser.parse("INSERT INTO t VALUES ('alice', 42, NULL)", alloc);
-    defer res.deinit();
+    var p = Parser.init("INSERT INTO t VALUES ('alice', 42, NULL)", alloc);
+    defer p.deinit();
+    const res = try p.parse();
 
-    const ins = res.stmt.insert;
+    const ins = res.insert;
     try std.testing.expectEqualStrings("t", ins.table);
     try std.testing.expectEqual(@as(usize, 3), ins.values.len);
     try std.testing.expectEqualStrings("alice", ins.values[0].str_lit);
@@ -99,10 +107,11 @@ test "parse INSERT" {
 
 test "parse INSERT with columns" {
     const alloc = std.testing.allocator;
-    var res = try Parser.parse("INSERT INTO t(id, name) VALUES(5, 'visal')", alloc);
-    defer res.deinit();
+    var p = Parser.init("INSERT INTO t(id, name) VALUES(5, 'visal')", alloc);
+    defer p.deinit();
+    const res = try p.parse();
 
-    const ins = res.stmt.insert;
+    const ins = res.insert;
     try std.testing.expectEqualStrings("t", ins.table);
     try std.testing.expectEqual(@as(usize, 2), ins.values.len);
     try std.testing.expectEqual(@as(usize, 2), ins.columns.len);
@@ -112,10 +121,11 @@ test "parse INSERT with columns" {
 
 test "parse UPDATE" {
     const alloc = std.testing.allocator;
-    var res = try Parser.parse("UPDATE t SET score = 999 WHERE name = 'bob'", alloc);
-    defer res.deinit();
+    var p = Parser.init("UPDATE t SET score = 999 WHERE name = 'bob'", alloc);
+    defer p.deinit();
+    const res = try p.parse();
 
-    const u = res.stmt.update;
+    const u = res.update;
     try std.testing.expectEqualStrings("t", u.table);
     try std.testing.expectEqualStrings("score", u.assignments[0].column);
     try std.testing.expectEqual(@as(i64, 999), u.assignments[0].value.int_lit);
@@ -124,23 +134,22 @@ test "parse UPDATE" {
 
 test "parse DELETE" {
     const alloc = std.testing.allocator;
-    var res = try Parser.parse("DELETE FROM t WHERE id = 1", alloc);
-    defer res.deinit();
+    var p = Parser.init("DELETE FROM t WHERE id = 1", alloc);
+    defer p.deinit();
+    const res = try p.parse();
 
-    const d = res.stmt.delete;
+    const d = res.delete;
     try std.testing.expectEqualStrings("t", d.table);
     try std.testing.expect(d.where != null);
 }
 
 test "parse CREATE TABLE" {
     const alloc = std.testing.allocator;
-    var res = try Parser.parse(
-        "CREATE TABLE products (name TEXT NOT NULL, price REAL, qty INT)",
-        alloc,
-    );
-    defer res.deinit();
+    var p = Parser.init("CREATE TABLE products (name TEXT NOT NULL, price REAL, qty INT)", alloc);
+    defer p.deinit();
+    const res = try p.parse();
 
-    const ct = res.stmt.create_table;
+    const ct = res.create_table;
     try std.testing.expectEqualStrings("products", ct.table);
     try std.testing.expectEqual(@as(usize, 3), ct.columns.len);
     try std.testing.expectEqualStrings("name", ct.columns[0].name);
@@ -159,10 +168,11 @@ test "parse CREATE TABLE with default value" {
         \\);
     ;
 
-    var res = try Parser.parse(sql, alloc);
-    defer res.deinit();
+    var p = Parser.init(sql, alloc);
+    defer p.deinit();
+    const res = try p.parse();
 
-    const ct = res.stmt.create_table;
+    const ct = res.create_table;
     try std.testing.expectEqualStrings("products", ct.table);
     try std.testing.expectEqual(@as(usize, 3), ct.columns.len);
 
@@ -181,75 +191,83 @@ test "parse CREATE TABLE with default value" {
 
 test "parse AND / OR precedence" {
     const alloc = std.testing.allocator;
-    var res = try Parser.parse("SELECT * FROM t WHERE a = 1 OR b = 2 AND c = 3", alloc);
-    defer res.deinit();
+    var p = Parser.init("SELECT * FROM t WHERE a = 1 OR b = 2 AND c = 3", alloc);
+    defer p.deinit();
+    const res = try p.parse();
 
-    const w = res.stmt.select.where.?;
+    const w = res.select.where.?;
     try std.testing.expectEqual(ast.BinaryOp.or_, w.binary.op);
     try std.testing.expectEqual(ast.BinaryOp.and_, w.binary.right.binary.op);
 }
 
 test "parse nested parens" {
     const alloc = std.testing.allocator;
-    var res = try Parser.parse("SELECT * FROM t WHERE (a = 1 OR b = 2) AND c = 3", alloc);
-    defer res.deinit();
+    var p = Parser.init("SELECT * FROM t WHERE (a = 1 OR b = 2) AND c = 3", alloc);
+    defer p.deinit();
+    const res = try p.parse();
 
-    const w = res.stmt.select.where.?;
+    const w = res.select.where.?;
     try std.testing.expectEqual(ast.BinaryOp.and_, w.binary.op);
     try std.testing.expectEqual(ast.BinaryOp.or_, w.binary.left.binary.op);
 }
 
 test "parse string with escaped quote" {
     const alloc = std.testing.allocator;
-    var res = try Parser.parse("INSERT INTO t VALUES ('alice''s')", alloc);
-    defer res.deinit();
+    var p = Parser.init("INSERT INTO t VALUES ('alice''s')", alloc);
+    defer p.deinit();
+    const res = try p.parse();
 
-    try std.testing.expectEqualStrings("alice's", res.stmt.insert.values[0].str_lit);
+    try std.testing.expectEqualStrings("alice's", res.insert.values[0].str_lit);
 }
 
 test "parse unary negation" {
     const alloc = std.testing.allocator;
-    var res = try Parser.parse("INSERT INTO t VALUES (-42)", alloc);
-    defer res.deinit();
+    var p = Parser.init("INSERT INTO t VALUES (-42)", alloc);
+    defer p.deinit();
+    const res = try p.parse();
 
-    const expr = res.stmt.insert.values[0];
+    const expr = res.insert.values[0];
     try std.testing.expectEqual(ast.UnaryOp.neg, expr.unary.op);
     try std.testing.expectEqual(@as(i64, 42), expr.unary.operand.int_lit);
 }
 
 test "parse NOT expression" {
     const alloc = std.testing.allocator;
-    var res = try Parser.parse("SELECT * FROM t WHERE NOT done = 1", alloc);
-    defer res.deinit();
+    var p = Parser.init("SELECT * FROM t WHERE NOT done = 1", alloc);
+    defer p.deinit();
+    const res = try p.parse();
 
-    const w = res.stmt.select.where.?;
+    const w = res.select.where.?;
     try std.testing.expectEqual(ast.UnaryOp.not, w.unary.op);
 }
 
 test "parse arithmetic in expression" {
     const alloc = std.testing.allocator;
-    var res = try Parser.parse("SELECT * FROM t WHERE score + 10 > 100", alloc);
-    defer res.deinit();
+    var p = Parser.init("SELECT * FROM t WHERE score + 10 > 100", alloc);
+    defer p.deinit();
+    const res = try p.parse();
 
-    const w = res.stmt.select.where.?.binary;
+    const w = res.select.where.?.binary;
     try std.testing.expectEqual(ast.BinaryOp.gt, w.op);
     try std.testing.expectEqual(ast.BinaryOp.add, w.left.binary.op);
 }
 
 test "parse DELETE without WHERE" {
     const alloc = std.testing.allocator;
-    var res = try Parser.parse("DELETE FROM t", alloc);
-    defer res.deinit();
+    var p = Parser.init("DELETE FROM t", alloc);
+    defer p.deinit();
+    const res = try p.parse();
 
-    try std.testing.expect(res.stmt.delete.where == null);
+    try std.testing.expect(res.delete.where == null);
 }
 
 test "parse UPDATE multiple assignments" {
     const alloc = std.testing.allocator;
-    var res = try Parser.parse("UPDATE t SET a = 1, b = 2", alloc);
-    defer res.deinit();
+    var p = Parser.init("UPDATE t SET a = 1, b = 2", alloc);
+    defer p.deinit();
+    const res = try p.parse();
 
-    try std.testing.expectEqual(@as(usize, 2), res.stmt.update.assignments.len);
-    try std.testing.expectEqualStrings("a", res.stmt.update.assignments[0].column);
-    try std.testing.expectEqualStrings("b", res.stmt.update.assignments[1].column);
+    try std.testing.expectEqual(@as(usize, 2), res.update.assignments.len);
+    try std.testing.expectEqualStrings("a", res.update.assignments[0].column);
+    try std.testing.expectEqualStrings("b", res.update.assignments[1].column);
 }

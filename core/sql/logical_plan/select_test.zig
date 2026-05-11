@@ -12,10 +12,13 @@ test "plan SELECT * produces Project over SeqScan with only real columns" {
     var planner = LogicalPlanner.init(&h.db.cat, alloc);
     defer planner.deinit();
 
-    var parsed = try Parser.parse("SELECT * FROM users", alloc);
-    defer parsed.deinit();
+    var parsed_parser = Parser.init("SELECT * FROM users", alloc);
 
-    const project = (try planner.plan(parsed.stmt)).project;
+    defer parsed_parser.deinit();
+
+    const parsed = try parsed_parser.parse();
+
+    const project = (try planner.plan(parsed)).project;
     // Only real columns in the output — hidden __rowid etc. are excluded.
     try std.testing.expectEqual(@as(usize, 2), project.schema.columns.len);
     try std.testing.expectEqualStrings("name", project.schema.columns[0].name);
@@ -31,10 +34,13 @@ test "plan SELECT * with main.schema prefix produces Project over SeqScan" {
     var planner = LogicalPlanner.init(&h.db.cat, alloc);
     defer planner.deinit();
 
-    var parsed = try Parser.parse("SELECT * FROM main.users", alloc);
-    defer parsed.deinit();
+    var parsed_parser = Parser.init("SELECT * FROM main.users", alloc);
 
-    const project = (try planner.plan(parsed.stmt)).project;
+    defer parsed_parser.deinit();
+
+    const parsed = try parsed_parser.parse();
+
+    const project = (try planner.plan(parsed)).project;
     try std.testing.expectEqual(@as(usize, 2), project.schema.columns.len);
     try std.testing.expectEqual(std.meta.Tag(LogicalPlan).seq_scan, std.meta.activeTag(project.input.*));
 }
@@ -46,10 +52,13 @@ test "plan SELECT * with WHERE wraps in Project over Filter over SeqScan" {
     var planner = LogicalPlanner.init(&h.db.cat, alloc);
     defer planner.deinit();
 
-    var parsed = try Parser.parse("SELECT * FROM t WHERE score > 50", alloc);
-    defer parsed.deinit();
+    var parsed_parser = Parser.init("SELECT * FROM t WHERE score > 50", alloc);
 
-    const project = (try planner.plan(parsed.stmt)).project;
+    defer parsed_parser.deinit();
+
+    const parsed = try parsed_parser.parse();
+
+    const project = (try planner.plan(parsed)).project;
     const filter = project.input.*.filter;
     try std.testing.expectEqual(ast.BinaryOp.gt, filter.predicate.binary.op);
     try std.testing.expectEqual(@as(usize, 0), filter.predicate.binary.left.col_idx);
@@ -64,10 +73,13 @@ test "plan SELECT columns produces Project" {
     var planner = LogicalPlanner.init(&h.db.cat, alloc);
     defer planner.deinit();
 
-    var parsed = try Parser.parse("SELECT a, c FROM t", alloc);
-    defer parsed.deinit();
+    var parsed_parser = Parser.init("SELECT a, c FROM t", alloc);
 
-    const project = (try planner.plan(parsed.stmt)).project;
+    defer parsed_parser.deinit();
+
+    const parsed = try parsed_parser.parse();
+
+    const project = (try planner.plan(parsed)).project;
     try std.testing.expectEqual(@as(usize, 2), project.exprs.len);
     try std.testing.expectEqual(@as(usize, 0), project.exprs[0].col_idx);
     try std.testing.expectEqual(@as(usize, 2), project.exprs[1].col_idx);
@@ -83,10 +95,13 @@ test "plan SELECT columns + WHERE: Project wraps Filter wraps SeqScan" {
     var planner = LogicalPlanner.init(&h.db.cat, alloc);
     defer planner.deinit();
 
-    var parsed = try Parser.parse("SELECT name FROM t WHERE score > 10", alloc);
-    defer parsed.deinit();
+    var parsed_parser = Parser.init("SELECT name FROM t WHERE score > 10", alloc);
 
-    const project = (try planner.plan(parsed.stmt)).project;
+    defer parsed_parser.deinit();
+
+    const parsed = try parsed_parser.parse();
+
+    const project = (try planner.plan(parsed)).project;
     try std.testing.expectEqual(std.meta.Tag(LogicalPlan).filter, std.meta.activeTag(project.input.*));
     try std.testing.expectEqual(std.meta.Tag(LogicalPlan).seq_scan, std.meta.activeTag(project.input.*.filter.input.*));
 }
@@ -98,10 +113,13 @@ test "plan SELECT __rowid produces Project with correct schema and indices" {
     var planner = LogicalPlanner.init(&h.db.cat, alloc);
     defer planner.deinit();
 
-    var parsed = try Parser.parse("SELECT __rowid, __pageid, __slotid, x FROM t", alloc);
-    defer parsed.deinit();
+    var parsed_parser = Parser.init("SELECT __rowid, __pageid, __slotid, x FROM t", alloc);
 
-    const project = (try planner.plan(parsed.stmt)).project;
+    defer parsed_parser.deinit();
+
+    const parsed = try parsed_parser.parse();
+
+    const project = (try planner.plan(parsed)).project;
     // Schema must have 4 columns — one per selected item.
     try std.testing.expectEqual(@as(usize, 4), project.schema.columns.len);
     try std.testing.expectEqualStrings("__rowid", project.schema.columns[0].name);

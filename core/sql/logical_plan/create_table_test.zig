@@ -10,10 +10,13 @@ test "plan CREATE TABLE" {
     var planner = LogicalPlanner.init(&h.db.cat, alloc);
     defer planner.deinit();
 
-    var parsed = try Parser.parse("CREATE TABLE items (id INT NOT NULL, label TEXT)", alloc);
-    defer parsed.deinit();
+    var parsed_parser = Parser.init("CREATE TABLE items (id INT NOT NULL, label TEXT)", alloc);
 
-    const ct = (try planner.plan(parsed.stmt)).create_table;
+    defer parsed_parser.deinit();
+
+    const parsed = try parsed_parser.parse();
+
+    const ct = (try planner.plan(parsed)).create_table;
     try std.testing.expectEqualStrings("items", ct.table);
     try std.testing.expectEqual(@as(usize, 2), ct.columns.len);
     try std.testing.expectEqualStrings("id", ct.columns[0].name);
