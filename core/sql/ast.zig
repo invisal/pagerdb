@@ -155,7 +155,7 @@ pub const JoinClause = struct {
 };
 
 pub const SelectStmt = struct {
-    table_ref: TableRef, // arena-owned; left-most table in FROM
+    table_ref: ?TableRef, // null means SELECT without FROM (e.g. SELECT 1)
     joins: []JoinClause, // INNER JOIN clauses in order (empty = no joins)
     columns: []SelectCol, // len = 0 means SELECT *
     where: ?Expr,

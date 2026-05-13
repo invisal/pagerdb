@@ -64,6 +64,20 @@ pub const VTabScanCursor = struct {
     }
 };
 
+// Produces exactly one empty row for SELECT without FROM.
+// The projection layer above evaluates expressions against this row.
+pub const ConstantScanCursor = struct {
+    first: bool = true,
+
+    pub fn next(self: *ConstantScanCursor, a: Allocator) !?[]Row {
+        if (!self.first) return null;
+        self.first = false;
+        const t = try a.alloc(Row, 1);
+        t[0] = .{ .rowid = 0, .values = try a.alloc(row_mod.Value, 0) };
+        return t;
+    }
+};
+
 // Point lookups fetch exactly one row (or nothing) from the btree.
 // We return it as a 1-element batch so the calling loop stays uniform.
 pub const PointLookupCursor = struct {
@@ -345,6 +359,7 @@ pub const JoinCursor = struct {
 // ── Cursor union ───────────────────────────────────────────────────────────────
 
 pub const Cursor = union(enum) {
+    const_scan: ConstantScanCursor,
     seq_scan: SeqScanCursor,
     vtab_scan: VTabScanCursor,
     point_lookup: PointLookupCursor,
@@ -355,6 +370,7 @@ pub const Cursor = union(enum) {
 
     pub fn open(plan: pp.PhysicalPlan, db: *Db, a: Allocator) !Cursor {
         return switch (plan) {
+            .const_scan => .{ .const_scan = .{} },
             .seq_scan => |n| .{ .seq_scan = .{ .it = try db.scanOpen(n.table) } },
             .vtab_scan => |n| blk: {
                 const vtab_cursor = try n.vtab.open(&db.cat, n.args, a);
@@ -425,6 +441,7 @@ pub const Cursor = union(enum) {
     pub fn next(self: *Cursor, a: Allocator) !?[]Row {
         return switch (self.*) {
             .seq_scan => |*s| s.next(a),
+            .const_scan => |*s| s.next(a),
             .vtab_scan => |*s| s.next(a),
             .point_lookup => |*s| s.next(a),
             .filter => |f| f.next(a),

@@ -75,6 +75,7 @@ pub const PhysicalAggregate = struct {
 pub const PhysicalPlan = union(enum) {
     seq_scan: PhysicalSeqScan,
     vtab_scan: PhysicalVTabScan,
+    const_scan: void,
     point_lookup: PhysicalPointLookup,
     filter: *PhysicalFilter,
     project: *PhysicalProject,
@@ -91,6 +92,7 @@ pub const PhysicalPlan = union(enum) {
     pub fn schema(self: PhysicalPlan) lp.Schema {
         return switch (self) {
             .seq_scan => |n| n.schema,
+            .const_scan => lp.Schema{ .table = "", .columns = &.{} },
             .vtab_scan => |n| n.schema,
             .point_lookup => |n| n.schema,
             .filter => |n| n.schema,
@@ -126,6 +128,7 @@ pub const PhysicalPlanner = struct {
         return switch (logical) {
             .seq_scan => |n| .{ .seq_scan = .{ .table = n.table, .schema = n.schema } },
             .vtab_scan => |n| .{ .vtab_scan = .{ .vtab = n.vtab, .args = n.args, .schema = n.schema } },
+            .const_scan => .{ .const_scan = {} },
             .filter => |n| try self.planFilter(n),
             .project => |n| try self.planProject(n),
             .aggregate => |n| try self.planAggregate(n),

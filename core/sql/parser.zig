@@ -172,7 +172,25 @@ pub const Parser = struct {
             _ = self.advance();
         }
 
-        _ = try self.expect(.kw_from);
+        const from_tok = self.advance();
+        switch (from_tok.kind) {
+            .kw_from => {},
+            .eof => {
+                // SELECT without FROM
+                return ast.SelectStmt{
+                    .table_ref = null,
+                    .joins = &.{},
+                    .columns = try columns.toOwnedSlice(self.alloc()),
+                    .where = null,
+                    .group_by = &.{},
+                };
+            },
+            else => {
+                self.error_message = try std.fmt.allocPrint(self.alloc(), "[{d}] Unexpected token FROM but found {s}", .{ from_tok.start, self.tokenText(from_tok) });
+                return ParseError.UnexpectedToken;
+            },
+        }
+
         const qualified_name = try self.parseQualifiedName();
 
         // Parse optional TVF args and optional AS alias for the FROM table.

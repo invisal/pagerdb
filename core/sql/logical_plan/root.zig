@@ -135,6 +135,7 @@ pub const Join = struct {
 
 pub const LogicalPlan = union(enum) {
     seq_scan: SeqScan,
+    const_scan: void,
     vtab_scan: VTabScan,
     filter: *Filter,
     project: *Project,
@@ -966,8 +967,15 @@ pub const LogicalPlanner = struct {
     // references resolve against the alias rather than the real table name.
     // SeqScan.table always holds the real catalog name for execution.
     const ScanResult = struct { plan: LogicalPlan, schema: Schema };
-    fn buildScan(self: *LogicalPlanner, ref: ast.TableRef) PlanError!ScanResult {
-        return switch (ref) {
+    fn buildScan(self: *LogicalPlanner, ref: ?ast.TableRef) PlanError!ScanResult {
+        if (ref == null) {
+            return ScanResult{ .plan = .{ .const_scan = {} }, .schema = .{
+                .table = "",
+                .columns = &.{},
+            } };
+        }
+
+        return switch (ref.?) {
             .name => |q| blk: {
                 const effective = q.alias orelse q.name;
                 if (std.ascii.eqlIgnoreCase(q.schema orelse "main", "main")) {

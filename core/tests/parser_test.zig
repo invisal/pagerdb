@@ -10,8 +10,8 @@ test "parse SELECT *" {
     const res = try p.parse();
 
     const s = res.select;
-    try std.testing.expectEqualStrings("users", s.table_ref.name.name);
-    try std.testing.expect(s.table_ref.name.schema == null);
+    try std.testing.expectEqualStrings("users", s.table_ref.?.name.name);
+    try std.testing.expect(s.table_ref.?.name.schema == null);
     // SELECT * is now represented as a single .star entry
     try std.testing.expectEqual(@as(usize, 1), s.columns.len);
     try std.testing.expect(s.columns[0] == .star);
@@ -25,8 +25,8 @@ test "parse SELECT * with schema" {
     const res = try p.parse();
 
     const s = res.select;
-    try std.testing.expectEqualStrings("users", s.table_ref.name.name);
-    try std.testing.expectEqualStrings("main", s.table_ref.name.schema.?);
+    try std.testing.expectEqualStrings("users", s.table_ref.?.name.name);
+    try std.testing.expectEqualStrings("main", s.table_ref.?.name.schema.?);
 }
 
 test "parse SELECT * with information_schema schema" {
@@ -36,8 +36,8 @@ test "parse SELECT * with information_schema schema" {
     const res = try p.parse();
 
     const s = res.select;
-    try std.testing.expectEqualStrings("tables", s.table_ref.name.name);
-    try std.testing.expectEqualStrings("information_schema", s.table_ref.name.schema.?);
+    try std.testing.expectEqualStrings("tables", s.table_ref.?.name.name);
+    try std.testing.expectEqualStrings("information_schema", s.table_ref.?.name.schema.?);
 }
 
 test "parse SELECT columns with WHERE" {
@@ -61,9 +61,9 @@ test "parse SELECT * FROM tvf with no args" {
     const res = try p.parse();
 
     const s = res.select;
-    try std.testing.expect(s.table_ref.func.schema == null);
-    try std.testing.expectEqualStrings("__pages", s.table_ref.func.name);
-    try std.testing.expectEqual(@as(usize, 0), s.table_ref.func.args.len);
+    try std.testing.expect(s.table_ref.?.func.schema == null);
+    try std.testing.expectEqualStrings("__pages", s.table_ref.?.func.name);
+    try std.testing.expectEqual(@as(usize, 0), s.table_ref.?.func.args.len);
 }
 
 test "parse SELECT * FROM schema.tvf with no args" {
@@ -73,9 +73,9 @@ test "parse SELECT * FROM schema.tvf with no args" {
     const res = try p.parse();
 
     const s = res.select;
-    try std.testing.expectEqualStrings("main", s.table_ref.func.schema.?);
-    try std.testing.expectEqualStrings("__pages", s.table_ref.func.name);
-    try std.testing.expectEqual(@as(usize, 0), s.table_ref.func.args.len);
+    try std.testing.expectEqualStrings("main", s.table_ref.?.func.schema.?);
+    try std.testing.expectEqualStrings("__pages", s.table_ref.?.func.name);
+    try std.testing.expectEqual(@as(usize, 0), s.table_ref.?.func.args.len);
 }
 
 test "parse SELECT * FROM tvf with int arg" {
@@ -85,10 +85,10 @@ test "parse SELECT * FROM tvf with int arg" {
     const res = try p.parse();
 
     const s = res.select;
-    try std.testing.expect(s.table_ref.func.schema == null);
-    try std.testing.expectEqualStrings("__page_slots", s.table_ref.func.name);
-    try std.testing.expectEqual(@as(usize, 1), s.table_ref.func.args.len);
-    try std.testing.expectEqual(@as(i64, 3), s.table_ref.func.args[0].int_lit);
+    try std.testing.expect(s.table_ref.?.func.schema == null);
+    try std.testing.expectEqualStrings("__page_slots", s.table_ref.?.func.name);
+    try std.testing.expectEqual(@as(usize, 1), s.table_ref.?.func.args.len);
+    try std.testing.expectEqual(@as(i64, 3), s.table_ref.?.func.args[0].int_lit);
 }
 
 test "parse INSERT" {
@@ -270,4 +270,15 @@ test "parse UPDATE multiple assignments" {
     try std.testing.expectEqual(@as(usize, 2), res.update.assignments.len);
     try std.testing.expectEqualStrings("a", res.update.assignments[0].column);
     try std.testing.expectEqualStrings("b", res.update.assignments[1].column);
+}
+
+test "parse SELECT without FROM sets table_ref null" {
+    const alloc = std.testing.allocator;
+    var p = Parser.init("SELECT 1", alloc);
+    defer p.deinit();
+    const res = try p.parse();
+
+    const s = res.select;
+    try std.testing.expect(s.table_ref == null);
+    try std.testing.expectEqual(@as(usize, 1), s.columns.len);
 }
