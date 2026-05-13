@@ -1,1 +1,134 @@
 @import "tailwindcss";
+
+/* ── Design tokens ── */
+@theme {
+  --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+
+  --color-bg:         #ffffff;
+  --color-bg2:        #f7f7f5;
+  --color-ink:        #0a0a0a;
+  --color-ink2:       #3d3d3d;
+  --color-ink3:       #6f6f6f;
+  --color-ink4:       #a8a8a8;
+  --color-rule:       #0a0a0a;
+  --color-rule-soft:  #d8d8d6;
+  --color-accent:     #b8311f;
+  --color-accent-bg:  rgba(184,49,31,0.07);
+  --color-hi:         #fff3a8;
+  --color-syn-kw:     #b8311f;
+  --color-syn-fn:     #6d4a13;
+  --color-syn-str:    #2f6b1f;
+  --color-syn-num:    #1a4d8a;
+  --color-syn-cm:     #8a8a8a;
+
+  --animate-blink: blink 1.05s steps(2) infinite;
+}
+
+/* ── Runtime theme overrides (changed by TweaksPanel JS) ── */
+html[data-theme="dark"] {
+  --color-bg:         #0a0a0a;
+  --color-bg2:        #141414;
+  --color-ink:        #eaeaea;
+  --color-ink2:       #c9c9c9;
+  --color-ink3:       #888;
+  --color-ink4:       #555;
+  --color-rule:       #eaeaea;
+  --color-rule-soft:  #2a2a2a;
+  --color-accent:     #ff6a4d;
+  --color-accent-bg:  rgba(255,106,77,0.10);
+  --color-hi:         #4a3f00;
+  --color-syn-kw:     #ff6a4d;
+  --color-syn-fn:     #e0b35a;
+  --color-syn-str:    #8fc870;
+  --color-syn-num:    #6ea8e0;
+  --color-syn-cm:     #6a6a6a;
+}
+
+/* ── Section row-height (density-aware) ── */
+:root { --row: clamp(56px, 8vw, 112px); --gutter: clamp(16px, 3vw, 40px); }
+html[data-density="compact"] { --row: clamp(40px, 6vw, 80px);  }
+html[data-density="roomy"]   { --row: clamp(80px, 12vw, 160px); }
+
+/* ── Global resets ── */
+body { font-feature-settings: "calt" 0, "liga" 0; -webkit-font-smoothing: antialiased; overflow-x: hidden; }
+::selection { background: var(--color-ink); color: var(--color-bg); }
+
+/* ── Animation ── */
+@keyframes blink { 50% { opacity: 0; } }
+
+/* ── Syntax-highlight spans (used inside pre / code blocks) ── */
+@layer components {
+  .kw  { color: var(--color-syn-kw);  font-weight: 600; }
+  .fn  { color: var(--color-syn-fn);  }
+  .str { color: var(--color-syn-str); }
+  .num { color: var(--color-syn-num); }
+  .cm  { color: var(--color-syn-cm);  font-style: italic; }
+  .pr  { color: var(--color-ink3);    user-select: none; }
+  .ok  { color: var(--color-syn-str); }
+  .hi  { color: var(--color-accent);  }
+  .dim { color: var(--color-ink3);    }
+  .lk  { color: var(--color-syn-num); }
+}
+
+/* ── Pseudo-element content — not expressible in Tailwind ── */
+.step-h3::before    { content: "» "; color: var(--color-accent); }
+.feature-h3::before { content: "[+] "; color: var(--color-accent); }
+.road-h4::before    { content: "» "; color: var(--color-accent); }
+
+/* Nav / footer link arrows */
+.nav-link::before  { content: "› "; color: var(--color-ink4); }
+.colo-link::before { content: "› "; color: var(--color-ink4); }
+.nav-link:hover::before  { color: var(--color-accent); }
+.colo-link:hover::before { color: var(--color-accent); }
+
+/* Codeblock language badge */
+.codeblock {
+  position: relative;
+  background: var(--color-bg2);
+  border: 1px solid var(--color-rule);
+}
+.codeblock::before {
+  content: attr(data-lang);
+  position: absolute; top: -1px; right: -1px;
+  background: var(--color-ink); color: var(--color-bg);
+  padding: 2px 8px; font-size: 10px; letter-spacing: 0.12em; text-transform: uppercase;
+}
+
+/* ASCII box figure label */
+.ascii-box { position: relative; }
+.ascii-box::before {
+  content: attr(data-fig);
+  position: absolute; top: -1px; left: -1px;
+  background: var(--color-ink); color: var(--color-bg);
+  padding: 3px 10px; font-size: 10px; letter-spacing: 0.12em; text-transform: uppercase;
+}
+
+/* FAQ toggle [+] / [-] */
+.faq-toggle::after          { content: "[+]"; }
+details[open] .faq-toggle   { color: var(--color-accent); }
+details[open] .faq-toggle::after { content: "[-]"; }
+details[open]               { background: var(--color-bg2); }
+details summary::-webkit-details-marker { display: none; }
+
+/* Roadmap vertical track line */
+.road-track::before {
+  content: "";
+  position: absolute;
+  top: -24px; bottom: -24px; left: 50%;
+  width: 0; border-left: 1px solid var(--color-ink);
+  transform: translateX(-50%);
+}
+.road-stop:first-child .road-track::before { top: 14px; }
+.road-stop:last-child  .road-track::before { bottom: calc(100% - 14px); }
+.road-planned .road-track::before { border-left-style: dashed; border-left-color: var(--color-ink3); }
+
+/* Roadmap checklist bullets */
+.road-done     li::before { content: "[x]"; position: absolute; left: 0; color: var(--color-ink);   font-size: 11px; font-family: var(--font-mono); }
+.road-now      li::before { content: "[~]"; position: absolute; left: 0; color: var(--color-accent); font-size: 11px; font-family: var(--font-mono); }
+.road-planned  li::before { content: "[ ]"; position: absolute; left: 0; color: var(--color-ink3);  font-size: 11px; font-family: var(--font-mono); }
+
+/* Run button "[▶]" prefix */
+.run-btn::before { content: "[▶]"; }
+
+/* Editor active tab underline */
+.tab-active { box-shadow: inset 0 -2px 0 var(--color-accent); }

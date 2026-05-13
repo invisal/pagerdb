@@ -1,24 +1,16 @@
 ---
-import Layout from '../layouts/Layout.astro';
-import SqlEditor from '../components/SqlEditor';
+import Layout from "../layouts/Layout.astro";
+import Masthead from "../components/sections/Masthead.astro";
+import Hero from "../components/sections/Hero.astro";
+import Features from "../components/sections/Features";
+import FAQ from "../components/sections/FAQ.astro";
+import Colophon from "../components/sections/Colophon.astro";
 ---
 
-<Layout title="PagerDB — SQL in your browser">
-  <main class="px-6 py-16 flex flex-col items-center gap-12">
-    <!-- Hero -->
-    <div class="text-center max-w-2xl">
-      <h1 class="text-4xl font-bold tracking-tight text-white mb-4">
-        PagerDB
-      </h1>
-      <p class="text-gray-400 text-lg">
-        A lightweight SQL database that runs entirely in your browser via WebAssembly.
-        No server. No setup. Just SQL.
-      </p>
-    </div>
-
-    <!-- Editor -->
-    <div class="w-full max-w-5xl">
-      <SqlEditor client:load />
-    </div>
-  </main>
+<Layout title="PagerDB — a toy relational database">
+  <Masthead />
+  <Hero />
+  <Features />
+  <FAQ />
+  <Colophon />
 </Layout>

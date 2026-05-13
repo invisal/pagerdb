@@ -1,0 +1,60 @@
+---
+import SqlEditor from "../SqlEditor";
+---
+
+<section class="py-[clamp(28px,5vw,56px)] pb-[var(--row)] border-b border-rule">
+  <div class="max-w-[1280px] mx-auto px-[var(--gutter)]">
+    <div class="mb-8">
+      <SqlEditor client:load />
+    </div>
+
+    <div
+      class="grid grid-cols-[1fr_auto] gap-[clamp(24px,3vw,48px)] items-start max-[720px]:grid-cols-1"
+    >
+      <p
+        class="text-[13.5px] leading-[1.65] text-ink2 m-0 first-letter:font-bold first-letter:text-accent"
+      >
+        This is my personal toy relational database, written in Zig. I’m trying
+        to keep it dependency-free. I’m new to Zig and had zero experience
+        building databases before this, so yes, I’m learning in public. My goal
+        is to build a LEGO-like database where people can extend and plug in
+        different layers. It’s still very early, very unstable, and a lot will
+        change as I go.
+      </p>
+
+      <div class="flex flex-col gap-4 shrink-0">
+        <div class="flex gap-[10px] flex-wrap items-center">
+          <a
+            href="#layers"
+            class="font-mono text-[12px] tracking-[0.06em] px-4 py-[10px] border border-rule text-bg bg-ink no-underline inline-flex items-center gap-2 uppercase cursor-pointer hover:bg-accent hover:border-accent hover:text-white"
+            >$ explore layers</a
+          >
+          <a
+            href="https://github.com/invisal/pagerdb"
+            class="font-mono text-[12px] tracking-[0.06em] px-4 py-[10px] border border-rule text-ink bg-transparent no-underline inline-flex items-center gap-2 uppercase cursor-pointer hover:bg-accent hover:border-accent hover:text-white"
+            >[★] star on github</a
+          >
+        </div>
+
+        <div class="border border-rule grid grid-cols-3 text-[11px]">
+          <div class="p-[12px_14px] border-r border-dashed border-rule-soft">
+            <span class="text-ink3 uppercase tracking-[0.10em] block mb-[6px]"
+              >// deps</span
+            >
+            <span class="text-[18px] font-semibold text-ink tracking-[-0.005em]"
+              >0</span
+            >
+          </div>
+          <div class="p-[12px_14px]">
+            <span class="text-ink3 uppercase tracking-[0.10em] block mb-[6px]"
+              >// lang</span
+            >
+            <span class="text-[18px] font-semibold text-ink tracking-[-0.005em]"
+              >zig</span
+            >
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
