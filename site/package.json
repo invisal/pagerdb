@@ -10,18 +10,25 @@
     "dev": "npm run copy-wasm && astro dev",
     "build": "npm run copy-wasm && astro build",
     "preview": "astro preview",
-    "astro": "astro"
+    "astro": "astro",
+    "format": "prettier --write \"src/**/*.{astro,ts,tsx,js,jsx,html}\""
   },
   "dependencies": {
     "@astrojs/check": "^0.9.9",
     "@astrojs/react": "^5.0.4",
+    "@codemirror/lang-sql": "^6.10.0",
     "@tailwindcss/vite": "^4.3.0",
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",
+    "@uiw/react-codemirror": "^4.25.9",
     "astro": "^6.3.1",
     "react": "^19.2.6",
     "react-dom": "^19.2.6",
     "tailwindcss": "^4.3.0",
     "typescript": "^6.0.3"
+  },
+  "devDependencies": {
+    "prettier": "^3.8.3",
+    "prettier-plugin-astro": "^0.14.1"
   }
 }
