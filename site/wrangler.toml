@@ -1,0 +1,5 @@
+name = "pagerdb-site"
+compatibility_date = "2025-05-13"
+
+[assets]
+directory = "./dist"
