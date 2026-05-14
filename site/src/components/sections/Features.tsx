@@ -8,16 +8,11 @@ export default function LayerSection() {
               <span className="hi">## 02 ─</span>
               {" internal/layers ─────────────────"}
             </pre>
-            <p className="text-[14px] text-ink2 m-0 mb-5">
-              This is my roadmap: I’m building each layer to be plug-and-play,
-              like LEGO, so anyone can snap pieces together and shape a database
-              that feels like their own.
-            </p>
-
-            <p className="text-[14px] text-ink2 m-0 mb-5">
-              It’s also my internal reference and a very public record of
-              progress. It will definitely change a lot—because, honestly, I’m
-              still figuring things out as I go.
+            <p className="text-ink2 m-0 mb-5">
+              Each layer is independently swappable — plug in a different buffer
+              pool, storage backend, or transaction strategy without touching
+              the rest. This is also my live progress log: what’s built, what’s
+              planned, and what I’m still working out.
             </p>
           </header>
 
