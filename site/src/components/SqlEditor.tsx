@@ -1,17 +1,18 @@
-import { useState, useEffect, useRef, useLayoutEffect, useMemo } from 'react';
-import CodeMirror from '@uiw/react-codemirror';
-import { sql } from '@codemirror/lang-sql';
-import { EditorView, keymap } from '@codemirror/view';
-import { HighlightStyle, syntaxHighlighting } from '@codemirror/language';
-import { tags as t } from '@lezer/highlight';
-import { Prec } from '@codemirror/state';
-import { ManagedDatabase } from '../pagerdb.js';
+import { useState, useEffect, useRef, useLayoutEffect, useMemo } from "react";
+import CodeMirror from "@uiw/react-codemirror";
+import DataTable from "./DataTable";
+import { sql } from "@codemirror/lang-sql";
+import { EditorView, keymap } from "@codemirror/view";
+import { HighlightStyle, syntaxHighlighting } from "@codemirror/language";
+import { tags as t } from "@lezer/highlight";
+import { Prec } from "@codemirror/state";
+import { ManagedDatabase } from "../pagerdb.js";
 
 type QueryResult =
-  | { type: 'select'; columns: string[]; rows: unknown[][] }
-  | { type: 'affected'; count: number }
-  | { type: 'created' }
-  | { type: 'error'; code: string; message: string };
+  | { type: "select"; columns: string[]; rows: unknown[][] }
+  | { type: "affected"; count: number }
+  | { type: "created" }
+  | { type: "error"; code: string; message: string };
 
 const SETUP_SQL = `
 CREATE TABLE users (
@@ -107,75 +108,81 @@ INSERT INTO order_items VALUES (26, 14, 9,  4,   9.99);
 INSERT INTO order_items VALUES (27, 15, 8,  1,  89.00);
 `;
 
-const INITIAL_SQL = `-- internal page storage
-SELECT * FROM __pages;
+const INITIAL_SQL = `SELECT * FROM __pages; -- internal page storage
+SELECT * FROM __page_slots(3); -- slots inside page 3
+SELECT __pageid, __slotid, users.* FROM __page_slots(3) AS p INNER JOIN users ON (users.__rowid = p.rowid);
 
--- slots inside page 2
-SELECT * FROM __page_slots(2);
+SELECT * FROM information_schema.tables;
+SELECT * FROM information_schema.columns;
 
--- all users
-SELECT * FROM users;`;
+SELECT *, __rowid, __pageid, __slotid FROM users; -- all users`;
 
 // ── CodeMirror theme matching the site's design tokens ──────────────────────
 
-const pagerTheme = EditorView.theme({
-  '&': {
-    backgroundColor: 'var(--color-bg)',
-    color: 'var(--color-ink)',
+const pagerTheme = EditorView.theme(
+  {
+    "&": {
+      backgroundColor: "var(--color-bg)",
+      color: "var(--color-ink)",
+      height: "200px",
+    },
+    "&.cm-focused": { outline: "none !important" },
+    ".cm-scroller": {
+      fontFamily: "var(--font-mono)",
+      fontSize: "13px",
+      lineHeight: "1.55",
+      overflow: "auto",
+    },
+    ".cm-content": {
+      padding: "14px",
+      caretColor: "var(--color-ink)",
+    },
+    ".cm-gutters": {
+      backgroundColor: "var(--color-bg)",
+      color: "var(--color-ink4)",
+      border: "none",
+      borderRight: "1px dashed var(--color-rule-soft)",
+      minWidth: "40px",
+    },
+    ".cm-lineNumbers .cm-gutterElement": {
+      padding: "0 8px 0 0",
+      fontSize: "12px",
+      minWidth: "40px",
+      textAlign: "right",
+    },
+    ".cm-activeLine": { backgroundColor: "transparent" },
+    ".cm-activeLineGutter": { backgroundColor: "transparent" },
+    ".cm-matchingBracket": {
+      backgroundColor: "var(--color-hi)",
+      outline: "none",
+    },
   },
-  '&.cm-focused': { outline: 'none !important' },
-  '.cm-scroller': {
-    fontFamily: 'var(--font-mono)',
-    fontSize: '13px',
-    lineHeight: '1.55',
-    overflow: 'auto',
-  },
-  '.cm-content': {
-    padding: '14px',
-    minHeight: '200px',
-    caretColor: 'var(--color-ink)',
-  },
-  '.cm-gutters': {
-    backgroundColor: 'var(--color-bg)',
-    color: 'var(--color-ink4)',
-    border: 'none',
-    borderRight: '1px dashed var(--color-rule-soft)',
-    minWidth: '40px',
-  },
-  '.cm-lineNumbers .cm-gutterElement': {
-    padding: '0 8px 0 0',
-    fontSize: '12px',
-    minWidth: '40px',
-    textAlign: 'right',
-  },
-  '.cm-activeLine':       { backgroundColor: 'transparent' },
-  '.cm-activeLineGutter': { backgroundColor: 'transparent' },
-  '.cm-matchingBracket': {
-    backgroundColor: 'var(--color-hi)',
-    outline: 'none',
-  },
-}, { dark: false });
+  { dark: false },
+);
 
 const pagerHighlight = HighlightStyle.define([
-  { tag: t.keyword,                                    color: 'var(--color-syn-kw)', fontWeight: '600' },
-  { tag: [t.function(t.variableName), t.function(t.name), t.special(t.name)],
-                                                       color: 'var(--color-syn-fn)' },
-  { tag: [t.string, t.special(t.string)],              color: 'var(--color-syn-str)' },
-  { tag: t.number,                                     color: 'var(--color-syn-num)' },
-  { tag: t.comment,                                    color: 'var(--color-syn-cm)', fontStyle: 'italic' },
-  { tag: [t.operator, t.punctuation],                  color: 'var(--color-ink3)' },
-  { tag: [t.variableName, t.name],                     color: 'var(--color-ink)' },
+  { tag: t.keyword, color: "var(--color-syn-kw)", fontWeight: "600" },
+  {
+    tag: [t.function(t.variableName), t.function(t.name), t.special(t.name)],
+    color: "var(--color-syn-fn)",
+  },
+  { tag: [t.string, t.special(t.string)], color: "var(--color-syn-str)" },
+  { tag: t.number, color: "var(--color-syn-num)" },
+  { tag: t.comment, color: "var(--color-syn-cm)", fontStyle: "italic" },
+  { tag: [t.operator, t.punctuation], color: "var(--color-ink3)" },
+  { tag: [t.variableName, t.name], color: "var(--color-ink)" },
 ]);
 
 // ────────────────────────────────────────────────────────────────────────────
 
 export default function SqlEditor() {
-  const [sqlText, setSqlText]   = useState(INITIAL_SQL);
-  const [result, setResult]     = useState<QueryResult | null>(null);
-  const [loading, setLoading]   = useState(false);
-  const [elapsed, setElapsed]   = useState<number | null>(null);
-  const [dbReady, setDbReady]   = useState(false);
-  const [dbError, setDbError]   = useState<string | null>(null);
+  const [sqlText, setSqlText] = useState(INITIAL_SQL);
+  const [result, setResult] = useState<QueryResult | null>(null);
+  const [queryKey, setQueryKey] = useState(0);
+  const [loading, setLoading] = useState(false);
+  const [elapsed, setElapsed] = useState<number | null>(null);
+  const [dbReady, setDbReady] = useState(false);
+  const [dbError, setDbError] = useState<string | null>(null);
   const dbRef = useRef<ManagedDatabase | null>(null);
   const editorViewRef = useRef<EditorView | null>(null);
   const lastCursorRef = useRef<number>(0);
@@ -184,29 +191,37 @@ export default function SqlEditor() {
   const executeRef = useRef<() => void>(() => {});
 
   useEffect(() => {
-    console.log('[pagerdb] opening wasm…');
-    ManagedDatabase.open('/pagerdb.wasm')
+    console.log("[pagerdb] opening wasm…");
+    ManagedDatabase.open("/pagerdb.wasm")
       .then((db) => {
-        console.log('[pagerdb] wasm opened, running setup SQL…');
+        console.log("[pagerdb] wasm opened, running setup SQL…");
         dbRef.current = db;
-        const stmts = SETUP_SQL.split(';').map((s) => s.trim()).filter(Boolean);
+        const stmts = SETUP_SQL.split(";")
+          .map((s) => s.trim())
+          .filter(Boolean);
         console.log(`[pagerdb] ${stmts.length} statements to execute`);
         for (let i = 0; i < stmts.length; i++) {
           try {
             const result = db.execute(stmts[i]);
             console.log(`[pagerdb] stmt ${i + 1}/${stmts.length} ok`, result);
           } catch (e) {
-            console.error(`[pagerdb] stmt ${i + 1}/${stmts.length} FAILED:`, stmts[i], e);
+            console.error(
+              `[pagerdb] stmt ${i + 1}/${stmts.length} FAILED:`,
+              stmts[i],
+              e,
+            );
           }
         }
-        console.log('[pagerdb] setup complete, db ready');
+        console.log("[pagerdb] setup complete, db ready");
         setDbReady(true);
       })
       .catch((e) => {
-        console.error('[pagerdb] failed to open wasm:', e);
+        console.error("[pagerdb] failed to open wasm:", e);
         setDbError(`Failed to load PagerDB WASM: ${e.message}`);
       });
-    return () => { dbRef.current?.close(); };
+    return () => {
+      dbRef.current?.close();
+    };
   }, []);
 
   function currentStatement(): string {
@@ -214,10 +229,14 @@ export default function SqlEditor() {
     // step back over whitespace then over a trailing ';' so the cursor
     // sitting on or just after a semicolon still resolves to that statement
     while (pos > 0 && /[ \t\n\r]/.test(sqlText[pos - 1])) pos--;
-    if (pos > 0 && sqlText[pos - 1] === ';') pos--;
-    const start = sqlText.lastIndexOf(';', pos - 1) + 1;
-    const end   = sqlText.indexOf(';', pos);
-    return sqlText.slice(start, end === -1 ? undefined : end + 1).trim().replace(/;$/, '').trim();
+    if (pos > 0 && sqlText[pos - 1] === ";") pos--;
+    const start = sqlText.lastIndexOf(";", pos - 1) + 1;
+    const end = sqlText.indexOf(";", pos);
+    return sqlText
+      .slice(start, end === -1 ? undefined : end + 1)
+      .trim()
+      .replace(/;$/, "")
+      .trim();
   }
 
   function execute() {
@@ -230,46 +249,89 @@ export default function SqlEditor() {
       const res = dbRef.current.execute(stmt) as QueryResult;
       setElapsed(performance.now() - t0);
       setResult(res);
+      setQueryKey((k) => k + 1);
     } catch (e) {
       setElapsed(performance.now() - t0);
-      setResult({ type: 'error', code: 'RUNTIME_ERROR', message: e instanceof Error ? e.message : String(e) });
+      setResult({
+        type: "error",
+        code: "RUNTIME_ERROR",
+        message: e instanceof Error ? e.message : String(e),
+      });
+      setQueryKey((k) => k + 1);
     } finally {
       setLoading(false);
     }
   }
 
   // Sync the ref after every render so keymap always sees latest execute
-  useLayoutEffect(() => { executeRef.current = execute; });
+  useLayoutEffect(() => {
+    executeRef.current = execute;
+  });
 
-  const extensions = useMemo(() => [
-    sql(),
-    pagerTheme,
-    syntaxHighlighting(pagerHighlight),
-    Prec.highest(keymap.of([{
-      key: 'Mod-Enter',
-      run: () => { executeRef.current(); return true; },
-    }])),
-  ], []);
+  const extensions = useMemo(
+    () => [
+      sql(),
+      pagerTheme,
+      syntaxHighlighting(pagerHighlight),
+      Prec.highest(
+        keymap.of([
+          {
+            key: "Mod-Enter",
+            run: () => {
+              executeRef.current();
+              return true;
+            },
+          },
+        ]),
+      ),
+    ],
+    [],
+  );
 
   function StatusLabel() {
-    if (dbError)  return <span className="text-accent">[error] wasm failed to load</span>;
+    if (dbError)
+      return <span className="text-accent">[error] wasm failed to load</span>;
     if (!dbReady) return <span>loading wasm…</span>;
-    if (loading)  return <span>running…</span>;
-    if (!result)  return <span>ready · ⌘↵ to run</span>;
-    if (result.type === 'select')
-      return <span><span className="text-syn-str">[ok]</span>&nbsp; {result.rows.length} row{result.rows.length !== 1 ? 's' : ''}{elapsed !== null ? ` · ${elapsed.toFixed(1)} ms` : ''}</span>;
-    if (result.type === 'affected')
-      return <span><span className="text-syn-str">[ok]</span>&nbsp; {result.count} row{result.count !== 1 ? 's' : ''} affected{elapsed !== null ? ` · ${elapsed.toFixed(1)} ms` : ''}</span>;
-    if (result.type === 'created')
-      return <span><span className="text-syn-str">[ok]</span>&nbsp; table created{elapsed !== null ? ` · ${elapsed.toFixed(1)} ms` : ''}</span>;
-    if (result.type === 'error')
-      return <span><span className="text-accent">[err]</span>&nbsp; {result.code}</span>;
+    if (loading) return <span>running…</span>;
+    if (!result) return <span>ready · ⌘↵ to run</span>;
+    if (result.type === "select")
+      return (
+        <span>
+          <span className="text-syn-str">[ok]</span>&nbsp; {result.rows.length}{" "}
+          row{result.rows.length !== 1 ? "s" : ""}
+          {elapsed !== null ? ` · ${elapsed.toFixed(1)} ms` : ""}
+        </span>
+      );
+    if (result.type === "affected")
+      return (
+        <span>
+          <span className="text-syn-str">[ok]</span>&nbsp; {result.count} row
+          {result.count !== 1 ? "s" : ""} affected
+          {elapsed !== null ? ` · ${elapsed.toFixed(1)} ms` : ""}
+        </span>
+      );
+    if (result.type === "created")
+      return (
+        <span>
+          <span className="text-syn-str">[ok]</span>&nbsp; table created
+          {elapsed !== null ? ` · ${elapsed.toFixed(1)} ms` : ""}
+        </span>
+      );
+    if (result.type === "error")
+      return (
+        <span>
+          <span className="text-accent">[err]</span>&nbsp; {result.code}
+        </span>
+      );
     return null;
   }
 
   return (
-    <div className="border border-rule bg-bg overflow-hidden font-mono text-[13px] leading-[1.55]" role="region" aria-label="SQL editor">
-
+    <div
+      className="border border-rule bg-bg overflow-hidden font-mono text-[13px] leading-[1.55]"
+      role="region"
+      aria-label="SQL editor"
+    >
       {/* Bar */}
       <div className="flex items-center justify-between px-3 py-2 border-b border-rule text-[11px] uppercase tracking-[0.08em] text-ink3 bg-bg2">
         <div className="flex items-center gap-2">
@@ -287,13 +349,22 @@ export default function SqlEditor() {
       </div>
 
       {/* Tabs */}
-      <div className="flex border-b border-rule text-[11px] uppercase tracking-[0.08em] bg-bg" role="tablist">
-        <button role="tab" aria-selected="true"
-          className="tab-active bg-bg2 text-ink border-0 border-r border-dashed border-rule-soft px-[14px] py-2 font-mono text-[11px] uppercase tracking-[0.08em] cursor-pointer">
+      <div
+        className="flex border-b border-rule text-[11px] uppercase tracking-[0.08em] bg-bg"
+        role="tablist"
+      >
+        <button
+          role="tab"
+          aria-selected="true"
+          className="tab-active bg-bg2 text-ink border-0 border-r border-dashed border-rule-soft px-[14px] py-2 font-mono text-[11px] uppercase tracking-[0.08em] cursor-pointer"
+        >
           query.sql
         </button>
-        <button role="tab" aria-selected="false"
-          className="text-ink3 border-0 border-r border-dashed border-rule-soft px-[14px] py-2 bg-transparent font-mono text-[11px] uppercase tracking-[0.08em] cursor-pointer">
+        <button
+          role="tab"
+          aria-selected="false"
+          className="text-ink3 border-0 border-r border-dashed border-rule-soft px-[14px] py-2 bg-transparent font-mono text-[11px] uppercase tracking-[0.08em] cursor-pointer"
+        >
           schema.sql
         </button>
       </div>
@@ -304,59 +375,43 @@ export default function SqlEditor() {
         onChange={(val) => setSqlText(val)}
         extensions={extensions}
         basicSetup={{
-          lineNumbers:                true,
-          highlightActiveLine:        false,
-          highlightActiveLineGutter:  false,
-          foldGutter:                 false,
-          drawSelection:              false,
-          highlightSelectionMatches:  false,
-          autocompletion:             false,
-          searchKeymap:               false,
-          syntaxHighlighting:         false,
+          lineNumbers: true,
+          highlightActiveLine: false,
+          highlightActiveLineGutter: false,
+          foldGutter: false,
+          drawSelection: false,
+          highlightSelectionMatches: false,
+          autocompletion: false,
+          searchKeymap: false,
+          syntaxHighlighting: false,
         }}
         theme="none"
         aria-label="SQL source"
-        onCreateEditor={(view) => { editorViewRef.current = view; }}
-        onUpdate={(update) => { lastCursorRef.current = update.state.selection.main.head; }}
+        onCreateEditor={(view) => {
+          editorViewRef.current = view;
+        }}
+        onUpdate={(update) => {
+          lastCursorRef.current = update.state.selection.main.head;
+        }}
       />
 
       {/* Results */}
       <div className="border-t border-rule bg-bg2">
         <div className="flex justify-between px-3 py-2 text-[11px] uppercase tracking-[0.08em] text-ink3 border-b border-dashed border-rule-soft flex-wrap gap-2">
-          <span><StatusLabel /></span>
+          <span>
+            <StatusLabel />
+          </span>
         </div>
 
-        {result?.type === 'select' && (
-          <div className="overflow-x-auto">
-            <table className="w-full border-collapse font-mono text-[12.5px] bg-bg">
-              <thead>
-                <tr>
-                  {result.columns.map((col) => (
-                    <th key={col} className="text-left font-semibold px-3 py-[7px] text-ink3 uppercase text-[10.5px] tracking-[0.10em] border-b border-rule bg-bg2">
-                      {col}
-                    </th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {result.rows.length === 0 && (
-                  <tr><td colSpan={result.columns.length} className="px-3 py-3 text-ink3">no rows returned</td></tr>
-                )}
-                {result.rows.map((row, i) => (
-                  <tr key={i} className="border-b border-dashed border-rule-soft last:border-0">
-                    {row.map((cell, j) => (
-                      <td key={j} className={`px-3 py-[6px] text-ink ${typeof cell === 'number' ? 'text-right text-syn-num' : ''}`}>
-                        {cell === null ? <span className="text-ink3">NULL</span> : String(cell)}
-                      </td>
-                    ))}
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+        {result?.type === "select" && (
+          <DataTable
+            key={queryKey}
+            columns={result.columns}
+            rows={result.rows}
+          />
         )}
 
-        {result?.type === 'error' && (
+        {result?.type === "error" && (
           <p className="m-0 px-[14px] py-[10px] text-[12.5px] font-mono text-accent">
             {result.code}: {result.message}
           </p>
