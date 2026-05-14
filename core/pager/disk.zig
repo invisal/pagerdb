@@ -11,6 +11,7 @@ const File = std.Io.File;
 const Allocator = std.mem.Allocator;
 
 pub const DEFAULT_POOL_SIZE: usize = 64;
+const WAL_CHECKPOINT_SIZE: usize = 8 * 1024 * 1024; // 8 MB
 
 // Runtime-configurable buffer pool settings.  Pass .{} to create/open to
 // accept all defaults (DEFAULT_POOL_SIZE frames × PAGE_SIZE bytes each).
@@ -218,13 +219,15 @@ pub const DiskPager = struct {
         // Flush is only valid at commit time; dirty pages must never reach disk
         // mid-transaction (no-steal policy).
         std.debug.assert(!self.txn_active);
+
+        try page0.writeHeader(pager);
+
         // WAL must reach disk before pages so recovery can replay any records
         // that were not yet applied to the data file at crash time.
         if (self.wal) |wal| {
             try wal.appendCommit();
             try wal.flush();
         }
-        try page0.writeHeader(pager);
         for (self.pool) |*frame| {
             if (frame.dirty and frame.page_id != std.math.maxInt(u32)) {
                 try self.writePageRaw(frame.page_id, &frame.data);
@@ -232,6 +235,15 @@ pub const DiskPager = struct {
             }
         }
         try self.file.sync(self.io);
+
+        // Every WAL record is now applied and on disk.  Reset when the WAL
+        // exceeds the checkpoint threshold to bound recovery time.
+        // next_lsn is preserved inside reset() so page LSNs stay valid.
+        if (self.wal) |wal| {
+            if (wal.offset >= WAL_CHECKPOINT_SIZE) {
+                try wal.reset();
+            }
+        }
     }
 
     fn diskBeginTxn(ptr: *anyopaque) void {

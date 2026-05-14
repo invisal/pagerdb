@@ -61,7 +61,11 @@ pub const Pager = struct {
             ._reserved = 0,
         };
         @memcpy(buf[0..@sizeOf(t.FreePage)], std.mem.asBytes(&fp));
-        try self.writePage(page_id, &buf, &.{});
+        // Log the free-page header so recovery can restore the free-list chain
+        // pointer (next_free_page).  Without this, recovery might restore
+        // free_list_head in page0 but find stale btree content in the freed page.
+        var delta = [_]Delta{.{ .offset = 0, .len = @sizeOf(t.FreePage) }};
+        try self.writePage(page_id, &buf, &delta);
         self.free_list_head = page_id;
     }
 

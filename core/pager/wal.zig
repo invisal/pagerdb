@@ -218,6 +218,23 @@ pub const WAL = struct {
         }
         // Records still in `pending` have no commit marker — discard them.
 
+        // page0 may have been restored into the buffer pool by the WAL records
+        // above with values that differ from what DiskPager.open() loaded at
+        // startup (because the crash happened before page0 reached disk).
+        // Re-read page0 now so the diskFlush inside pager.flush() writes the
+        // correct metadata rather than the stale values from open time.
+        var p0: [t.PAGE_SIZE]u8 = undefined;
+        if (pager.readPage(0, &p0)) |_| {
+            const off = @sizeOf(t.PageHeader);
+            const h = std.mem.bytesToValue(t.DbHeader, p0[off..][0..@sizeOf(t.DbHeader)]);
+            if (h.magic == t.DB_MAGIC) {
+                pager.total_pages = h.total_pages;
+                pager.free_list_head = h.free_list_head;
+                pager.sys_tables_root = h.sys_tables_root;
+                pager.sys_columns_root = h.sys_columns_root;
+            }
+        } else |_| {}
+
         try pager.flush();
         try self.reset();
     }
