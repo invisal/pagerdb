@@ -155,16 +155,17 @@ pub const Parser = struct {
                 .op_star => {
                     // Handle SELECT *
                     _ = self.advance();
-                    try columns.append(self.alloc(), .star);
+                    try columns.append(self.alloc(), .{ .col = .star, .alias = null });
                 },
                 else => {
                     const e = try self.parseExpr();
-                    const col = switch (e) {
-                        .col_ref => |n| ast.SelectCol{ .name = n },
-                        .qual_col_ref => |q| ast.SelectCol{ .qual_name = q },
-                        else => ast.SelectCol{ .expr = e },
+                    const alias = try self.parseOptionalAlias();
+                    const col_kind: ast.SelectCol.Kind = switch (e) {
+                        .col_ref => |n| .{ .name = n },
+                        .qual_col_ref => |q| .{ .qual_name = q },
+                        else => .{ .expr = e },
                     };
-                    try columns.append(self.alloc(), col);
+                    try columns.append(self.alloc(), .{ .col = col_kind, .alias = alias });
                 },
             }
 

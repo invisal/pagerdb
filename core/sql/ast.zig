@@ -123,11 +123,16 @@ pub const Expr = union(enum) {
     }
 };
 
-pub const SelectCol = union(enum) {
-    star,
-    name: []const u8, // arena-owned: bare column name
-    qual_name: QualifiedColRef, // arena-owned: table.col
-    expr: Expr, // computed expression, e.g. abs(n) or n + 1
+pub const SelectCol = struct {
+    col: Kind,
+    alias: ?[]const u8, // arena-owned; AS alias, or null if none
+
+    pub const Kind = union(enum) {
+        star,
+        name: []const u8, // arena-owned: bare column name
+        qual_name: QualifiedColRef, // arena-owned: table.col
+        expr: Expr, // computed expression, e.g. abs(n) or n + 1
+    };
 };
 
 pub const TableFunc = struct {
