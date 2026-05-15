@@ -5,6 +5,7 @@
 const std = @import("std");
 const Db = @import("db.zig").Db;
 const DiskPager = @import("pager/disk.zig").DiskPager;
+const DiskIo = @import("io/disk_io.zig").DiskIo;
 const InMemoryPager = @import("pager/memory.zig").InMemoryPager;
 const Pager = @import("pager/pager.zig").Pager;
 const WAL = @import("pager/wal.zig").WAL;
@@ -39,8 +40,13 @@ pub const ManagedDatabase = struct {
     /// var db = try ManagedDatabase.open(io, allocator, "mydb.db");
     /// defer db.deinit();
     /// ```
-    pub fn open(io: std.Io, alloc: std.mem.Allocator, path: ?[]const u8) !ManagedDatabase {
+    pub fn open(std_io: std.Io, alloc: std.mem.Allocator, path: ?[]const u8) !ManagedDatabase {
         if (path) |db_path| {
+            // DiskIo wraps std.Io for real filesystem access.  It only needs to
+            // exist long enough to open/create files; File handles outlive it.
+            var disk_io = DiskIo.init(alloc, std_io);
+            const io = disk_io.io();
+
             // Construct WAL path by appending ".wal" to the database path
             const wal_path = try std.mem.concat(alloc, u8, &.{ db_path, ".wal" });
 

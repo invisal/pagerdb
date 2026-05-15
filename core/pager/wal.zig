@@ -31,6 +31,9 @@
 const std = @import("std");
 const t = @import("../types.zig");
 const Pager = @import("pager.zig").Pager;
+const io_mod = @import("../io/io.zig");
+const Io = io_mod.Io;
+const File = io_mod.File;
 
 const WALError = error{
     CorruptWAL,
@@ -66,33 +69,32 @@ pub const WALEntry = union(enum) {
 };
 
 pub const WAL = struct {
-    file: std.Io.File,
-    io: std.Io,
+    file: File,
     next_lsn: u64,
-    buffer: std.ArrayList(u8),
+    buffer: std.ArrayListUnmanaged(u8),
     alloc: std.mem.Allocator,
     offset: usize,
 
     // Create a new WAL file and write the initial LSN header.
-    pub fn create(io: std.Io, path: []const u8, alloc: std.mem.Allocator) !WAL {
-        const file = try std.Io.Dir.cwd().createFile(io, path, .{ .read = true });
-        var wal = WAL{ .file = file, .io = io, .next_lsn = 0, .buffer = .empty, .alloc = alloc, .offset = 0 };
+    pub fn create(io: Io, path: []const u8, alloc: std.mem.Allocator) !WAL {
+        const file = try io.createFile(path);
+        var wal = WAL{ .file = file, .next_lsn = 0, .buffer = .empty, .alloc = alloc, .offset = 0 };
         try wal.reset();
         return wal;
     }
 
     // Open an existing WAL file, or create it if it doesn't exist.
     // Caller must run wal.recover() before use if the file already existed.
-    pub fn open(io: std.Io, path: []const u8, alloc: std.mem.Allocator) !WAL {
-        const file = std.Io.Dir.cwd().openFile(io, path, .{ .mode = .read_write }) catch |err| switch (err) {
+    pub fn open(io: Io, path: []const u8, alloc: std.mem.Allocator) !WAL {
+        const file = io.openFile(path) catch |err| switch (err) {
             error.FileNotFound => return create(io, path, alloc),
             else => return err,
         };
-        return WAL{ .file = file, .io = io, .next_lsn = 0, .buffer = .empty, .alloc = alloc, .offset = 0 };
+        return WAL{ .file = file, .next_lsn = 0, .buffer = .empty, .alloc = alloc, .offset = 0 };
     }
 
     pub fn deinit(self: *WAL) void {
-        self.file.close(self.io);
+        self.file.close();
         self.buffer.deinit(self.alloc);
     }
 
@@ -104,16 +106,16 @@ pub const WAL = struct {
     }
 
     pub fn flush(self: *WAL) !void {
-        try self.file.writePositionalAll(self.io, self.buffer.items, self.offset);
+        try self.file.writeAt(self.buffer.items, self.offset);
         self.offset += self.buffer.items.len;
 
-        try self.file.sync(self.io);
+        try self.file.sync();
         self.buffer.clearRetainingCapacity();
     }
 
     pub fn reset(self: *WAL) !void {
         self.offset = 0;
-        try self.file.setLength(self.io, 0);
+        try self.file.setLength(0);
 
         try self.appendInt(u64, self.next_lsn);
         try self.flush();
@@ -279,7 +281,7 @@ pub const WALReader = struct {
 
                 const payload = try alloc.alloc(u8, length);
                 errdefer alloc.free(payload);
-                const n = try self.wal.file.readPositionalAll(self.wal.io, payload, self.offset);
+                const n = try self.wal.file.readAt(payload, self.offset);
                 if (n != length) return WALError.CorruptWAL;
                 self.offset += @intCast(length);
 
@@ -304,7 +306,7 @@ pub const WALReader = struct {
 
     fn readInt(self: *WALReader, comptime T: type) !T {
         var buffer: [@sizeOf(T)]u8 = undefined;
-        const n = try self.wal.file.readPositionalAll(self.wal.io, &buffer, self.offset);
+        const n = try self.wal.file.readAt(&buffer, self.offset);
         if (n != @sizeOf(T)) return error.EndOfStream;
         self.offset += @sizeOf(T);
         return std.mem.readInt(T, &buffer, .little);

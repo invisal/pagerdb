@@ -16,6 +16,7 @@
 
 const std = @import("std");
 const DiskPager = @import("pager/disk.zig").DiskPager;
+const DiskIo = @import("io/disk_io.zig").DiskIo;
 const InMemoryPager = @import("pager/memory.zig").InMemoryPager;
 const Db = @import("db.zig").Db;
 const execute = @import("sql/executor.zig").execute;
@@ -72,7 +73,8 @@ pub const DiskDbHandle = struct {
 /// For reopen tests where the file must survive between sessions, close just the
 /// database with h.db.close() and let the final loadDiskDb handle delete the file.
 pub fn makeDiskDb(alloc: std.mem.Allocator, io: std.Io, path: []const u8, opts: DbOptions) !DiskDbHandle {
-    const db = try Db.init(try DiskPager.create(alloc, io, path, .{}), alloc);
+    var disk_io = DiskIo.init(alloc, io);
+    const db = try Db.init(try DiskPager.create(alloc, disk_io.io(), path, .{}), alloc);
     errdefer db.close();
     for (opts.schema) |sql| try exec(db, sql, alloc);
     return .{ .db = db, .io = io, .path = path };
@@ -81,8 +83,9 @@ pub fn makeDiskDb(alloc: std.mem.Allocator, io: std.Io, path: []const u8, opts: 
 /// Open an existing database file. Pairs with makeDiskDb for reopen tests.
 /// deinit() closes the db and deletes the file.
 pub fn loadDiskDb(alloc: std.mem.Allocator, io: std.Io, path: []const u8) !DiskDbHandle {
+    var disk_io = DiskIo.init(alloc, io);
     return .{
-        .db = try Db.load(try DiskPager.open(alloc, io, path, .{}), alloc),
+        .db = try Db.load(try DiskPager.open(alloc, disk_io.io(), path, .{}), alloc),
         .io = io,
         .path = path,
     };

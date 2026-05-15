@@ -23,6 +23,7 @@ const wal_sim = @import("wal_sim.zig");
 
 const Database = core.Database;
 const DiskPager = core.DiskPager;
+const DiskIo = core.DiskIo;
 const Dir = std.Io.Dir;
 
 const DEFAULT_SEEDS: u64 = 200;
@@ -93,7 +94,8 @@ fn runSeed(io: std.Io, alloc: std.mem.Allocator, seed: u64, n_ops: u64) !void {
     defer Dir.deleteFile(.cwd(), io, path) catch {};
     defer Dir.deleteFile(.cwd(), io, wal_path) catch {};
 
-    const db = try Database.init(try DiskPager.create(alloc, io, path, .{}), alloc);
+    var disk_io = DiskIo.init(alloc, io);
+    const db = try Database.init(try DiskPager.create(alloc, disk_io.io(), path, .{}), alloc);
     defer db.close();
 
     try workload.setupTable(db);

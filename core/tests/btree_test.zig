@@ -2,6 +2,7 @@ const std = @import("std");
 const t = @import("../types.zig");
 const btree = @import("../btree.zig");
 const DiskPager = @import("../pager/disk.zig").DiskPager;
+const DiskIo = @import("../io/disk_io.zig").DiskIo;
 const PageWriter = @import("../page_writer.zig").PageWriter;
 
 const Dir = std.Io.Dir;
@@ -13,7 +14,8 @@ test "scan returns rows in rowid order" {
     defer Dir.deleteFile(.cwd(), io, path) catch {};
     defer Dir.deleteFile(.cwd(), io, path ++ ".wal") catch {};
 
-    var pager = try DiskPager.create(alloc, io, path, .{});
+    var disk_io = DiskIo.init(alloc, io);
+    var pager = try DiskPager.create(alloc, disk_io.io(), path, .{});
     defer pager.close();
 
     const root_id = try pager.allocPage();
@@ -43,7 +45,8 @@ test "delete existing row" {
     defer Dir.deleteFile(.cwd(), io, path) catch {};
     defer Dir.deleteFile(.cwd(), io, path ++ ".wal") catch {};
 
-    var pager = try DiskPager.create(alloc, io, path, .{});
+    var disk_io = DiskIo.init(alloc, io);
+    var pager = try DiskPager.create(alloc, disk_io.io(), path, .{});
     defer pager.close();
 
     const root_id = try pager.allocPage();
@@ -74,7 +77,8 @@ test "delete non-existent row returns false" {
     defer Dir.deleteFile(.cwd(), io, path) catch {};
     defer Dir.deleteFile(.cwd(), io, path ++ ".wal") catch {};
 
-    var pager = try DiskPager.create(alloc, io, path, .{});
+    var disk_io = DiskIo.init(alloc, io);
+    var pager = try DiskPager.create(alloc, disk_io.io(), path, .{});
     defer pager.close();
 
     const root_id = try pager.allocPage();
@@ -95,7 +99,8 @@ test "delete all rows in a page frees the page" {
     defer Dir.deleteFile(.cwd(), io, path) catch {};
     defer Dir.deleteFile(.cwd(), io, path ++ ".wal") catch {};
 
-    var pager = try DiskPager.create(alloc, io, path, .{});
+    var disk_io = DiskIo.init(alloc, io);
+    var pager = try DiskPager.create(alloc, disk_io.io(), path, .{});
     defer pager.close();
 
     const root_id = try pager.allocPage();
@@ -130,7 +135,8 @@ test "insert and lookup large row via btree" {
     defer Dir.deleteFile(.cwd(), io, path) catch {};
     defer Dir.deleteFile(.cwd(), io, path ++ ".wal") catch {};
 
-    var pager = try DiskPager.create(alloc, io, path, .{});
+    var disk_io = DiskIo.init(alloc, io);
+    var pager = try DiskPager.create(alloc, disk_io.io(), path, .{});
     defer pager.close();
 
     const root_id = try pager.allocPage();
@@ -157,7 +163,8 @@ test "delete overflowed row frees overflow chain" {
     defer Dir.deleteFile(.cwd(), io, path) catch {};
     defer Dir.deleteFile(.cwd(), io, path ++ ".wal") catch {};
 
-    var pager = try DiskPager.create(alloc, io, path, .{});
+    var disk_io = DiskIo.init(alloc, io);
+    var pager = try DiskPager.create(alloc, disk_io.io(), path, .{});
     defer pager.close();
 
     const root_id = try pager.allocPage();
