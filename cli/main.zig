@@ -22,7 +22,7 @@ pub fn main(init: std.process.Init) !void {
     }
 
     const path: ?[]const u8 = if (args.len < 2) null else args[1];
-    var db = ManagedDatabase.open(io, alloc, path) catch |err| switch (err) {
+    var db = ManagedDatabase.open(alloc, io, path) catch |err| switch (err) {
         error.AccessDenied => {
             return error.AccessDenied;
         },
@@ -40,7 +40,7 @@ pub fn main(init: std.process.Init) !void {
     var out = std.Io.File.stdout().writerStreaming(io, &out_buf);
     try printWelcome(&out.interface);
 
-    try repl.run(&db, io, alloc);
+    try repl.run(alloc, io, &db);
 }
 
 fn printWelcome(out: *std.Io.Writer) !void {

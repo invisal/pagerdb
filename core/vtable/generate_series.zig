@@ -27,7 +27,7 @@ fn cursorNext(ptr: *anyopaque, alloc: std.mem.Allocator) anyerror!?[]root.Value 
     return vals;
 }
 
-pub fn open(_: *Catalog, args: []const root.Value, alloc: std.mem.Allocator) anyerror!root.VTabCursor {
+pub fn open(alloc: std.mem.Allocator, _: *Catalog, args: []const root.Value) anyerror!root.VTabCursor {
     if (args.len < 1) return error.ArgumentMismatch;
 
     switch (args[0]) {

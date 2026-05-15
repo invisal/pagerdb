@@ -28,7 +28,7 @@ pub fn checkCatalog(db: *Database) !void {
 // fresh Pager that has an empty buffer pool, so every page is read from disk.
 // This avoids false negatives that could occur if the cached pager hides an
 // inconsistency between in-memory and on-disk state.
-pub fn checkBTreeStructure(io: std.Io, alloc: std.mem.Allocator, db: *Database, path: []const u8, table_name: []const u8) !void {
+pub fn checkBTreeStructure(alloc: std.mem.Allocator, io: std.Io, db: *Database, path: []const u8, table_name: []const u8) !void {
     const meta = db.cat.tables.get(table_name) orelse return Error.TableNotFound;
     var disk_io = DiskIo.init(alloc, io);
     var disk_pager = try DiskPager.open(alloc, disk_io.io(), path, .{});
@@ -52,7 +52,7 @@ pub fn checkRowCount(
     var sql_buf: [256]u8 = undefined;
     const sql = try std.fmt.bufPrint(&sql_buf, "SELECT * FROM {s}", .{table_name});
 
-    var er = try execute(db, sql, alloc);
+    var er = try execute(alloc, db, sql);
     defer er.result_set.deinit();
 
     const got = er.result_set.rows.len;

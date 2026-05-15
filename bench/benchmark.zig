@@ -43,13 +43,13 @@ pub fn main(init: std.process.Init) !void {
     , .{});
 
     for (COUNTS) |n| {
-        const insert_pagerdb = try benchPagerdbInsert(n, io, alloc);
+        const insert_pagerdb = try benchPagerdbInsert(alloc, io, n);
         const insert_sqlite = try benchSqliteInsert(n, io);
-        const insert_pagerdb_txn = try benchPagerdbInsertTxn(n, io, alloc);
+        const insert_pagerdb_txn = try benchPagerdbInsertTxn(alloc, io, n);
         const insert_sqlite_txn = try benchSqliteInsertTxn(n, io);
-        const scan_pagerdb = try benchPagerdbScan(n, io, alloc);
+        const scan_pagerdb = try benchPagerdbScan(alloc, io, n);
         const scan_sqlite = try benchSqliteScan(n);
-        const where_pagerdb = try benchPagerdbWhere(n, io, alloc);
+        const where_pagerdb = try benchPagerdbWhere(alloc, io, n);
         const where_sqlite = try benchSqliteWhere(n);
 
         try printTable(w, n, insert_pagerdb.ns, insert_sqlite.ns, insert_pagerdb_txn.ns, insert_sqlite_txn.ns, scan_pagerdb, scan_sqlite, where_pagerdb, where_sqlite, insert_pagerdb.bytes, insert_sqlite.bytes);
@@ -59,7 +59,7 @@ pub fn main(init: std.process.Init) !void {
 
 // ── PagerDB ───────────────────────────────────────────────────────────────────
 
-fn benchPagerdbInsert(n: usize, io: std.Io, alloc: std.mem.Allocator) !InsertResult {
+fn benchPagerdbInsert(alloc: std.mem.Allocator, io: std.Io, n: usize) !InsertResult {
     const path = "bench/data/bench_pagerdb_insert.db";
     defer Dir.deleteFile(.cwd(), io, path) catch {};
 
@@ -86,7 +86,7 @@ fn benchPagerdbInsert(n: usize, io: std.Io, alloc: std.mem.Allocator) !InsertRes
     return .{ .ns = ns, .bytes = stat.size };
 }
 
-fn benchPagerdbInsertTxn(n: usize, io: std.Io, alloc: std.mem.Allocator) !InsertResult {
+fn benchPagerdbInsertTxn(alloc: std.mem.Allocator, io: std.Io, n: usize) !InsertResult {
     const path = "bench/data/bench_pagerdb_insert_txn.db";
     defer Dir.deleteFile(.cwd(), io, path) catch {};
 
@@ -115,7 +115,7 @@ fn benchPagerdbInsertTxn(n: usize, io: std.Io, alloc: std.mem.Allocator) !Insert
     return .{ .ns = ns, .bytes = stat.size };
 }
 
-fn benchPagerdbScan(n: usize, io: std.Io, alloc: std.mem.Allocator) !u64 {
+fn benchPagerdbScan(alloc: std.mem.Allocator, io: std.Io, n: usize) !u64 {
     const path = "bench/data/bench_pagerdb_scan.db";
     defer Dir.deleteFile(.cwd(), io, path) catch {};
 
@@ -148,7 +148,7 @@ fn benchPagerdbScan(n: usize, io: std.Io, alloc: std.mem.Allocator) !u64 {
     return elapsed;
 }
 
-fn benchPagerdbWhere(n: usize, io: std.Io, alloc: std.mem.Allocator) !u64 {
+fn benchPagerdbWhere(alloc: std.mem.Allocator, io: std.Io, n: usize) !u64 {
     const path = "bench/data/bench_pagerdb_where.db";
     defer Dir.deleteFile(.cwd(), io, path) catch {};
 

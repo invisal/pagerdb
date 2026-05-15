@@ -9,11 +9,11 @@ test "INSERT adds a row" {
     const h = try makeMemoryDb(alloc, .{ .schema = &.{"CREATE TABLE t (n INT NOT NULL)"} });
     defer h.deinit();
 
-    var r = try execute(h.db, "INSERT INTO t VALUES (42)", alloc);
+    var r = try execute(alloc, h.db, "INSERT INTO t VALUES (42)");
     defer r.deinit();
     try std.testing.expectEqual(@as(u64, 1), r.affected);
 
-    var sel = try execute(h.db, "SELECT * FROM t", alloc);
+    var sel = try execute(alloc, h.db, "SELECT * FROM t");
     defer sel.deinit();
     try std.testing.expectEqual(@as(usize, 1), sel.result_set.rows.len);
     try std.testing.expectEqual(@as(i64, 42), sel.result_set.rows[0].values[0].int);
@@ -24,9 +24,9 @@ test "INSERT with named columns reorders values correctly" {
     const h = try makeMemoryDb(alloc, .{ .schema = &.{"CREATE TABLE t (name TEXT NOT NULL, score INT NOT NULL)"} });
     defer h.deinit();
 
-    try exec(h.db, "INSERT INTO t(score, name) VALUES (99, 'alice')", alloc);
+    try exec(alloc, h.db, "INSERT INTO t(score, name) VALUES (99, 'alice')");
 
-    var sel = try execute(h.db, "SELECT * FROM t", alloc);
+    var sel = try execute(alloc, h.db, "SELECT * FROM t");
     defer sel.deinit();
     try std.testing.expectEqualStrings("alice", sel.result_set.rows[0].values[0].text);
     try std.testing.expectEqual(@as(i64, 99), sel.result_set.rows[0].values[1].int);
@@ -37,11 +37,11 @@ test "INSERT with multiple value rows" {
     const h = try makeMemoryDb(alloc, .{ .schema = &.{"CREATE TABLE t (id INT NOT NULL, name TEXT NOT NULL)"} });
     defer h.deinit();
 
-    var r = try execute(h.db, "INSERT INTO t VALUES (1, 'alice'), (2, 'bob'), (3, 'carol')", alloc);
+    var r = try execute(alloc, h.db, "INSERT INTO t VALUES (1, 'alice'), (2, 'bob'), (3, 'carol')");
     defer r.deinit();
     try std.testing.expectEqual(@as(u64, 3), r.affected);
 
-    var sel = try execute(h.db, "SELECT * FROM t", alloc);
+    var sel = try execute(alloc, h.db, "SELECT * FROM t");
     defer sel.deinit();
     try std.testing.expectEqual(@as(usize, 3), sel.result_set.rows.len);
     try std.testing.expectEqual(@as(i64, 1), sel.result_set.rows[0].values[0].int);
@@ -57,10 +57,10 @@ test "CREATE TABLE then INSERT via SQL" {
     const h = try makeMemoryDb(alloc, .{});
     defer h.deinit();
 
-    try exec(h.db, "CREATE TABLE items (id INT NOT NULL, label TEXT)", alloc);
-    try exec(h.db, "INSERT INTO items VALUES (1, 'thing')", alloc);
+    try exec(alloc, h.db, "CREATE TABLE items (id INT NOT NULL, label TEXT)");
+    try exec(alloc, h.db, "INSERT INTO items VALUES (1, 'thing')");
 
-    var sel = try execute(h.db, "SELECT * FROM items", alloc);
+    var sel = try execute(alloc, h.db, "SELECT * FROM items");
     defer sel.deinit();
     try std.testing.expectEqual(@as(usize, 1), sel.result_set.rows.len);
     try std.testing.expectEqual(@as(i64, 1), sel.result_set.rows[0].values[0].int);

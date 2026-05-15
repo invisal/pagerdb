@@ -22,9 +22,9 @@ pub const VTabCursor = struct {
 // Opens a cursor over the virtual table.  The returned VTabCursor owns its
 // internal state and must be closed by the caller.
 pub const OpenFn = *const fn (
+    alloc: std.mem.Allocator,
     cat: *Catalog,
     args: []const Value,
-    alloc: std.mem.Allocator,
 ) anyerror!VTabCursor;
 
 pub const VTabColumn = struct {

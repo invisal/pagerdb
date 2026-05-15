@@ -37,10 +37,10 @@ pub const ManagedDatabase = struct {
     ///
     /// **Example:**
     /// ```zig
-    /// var db = try ManagedDatabase.open(io, allocator, "mydb.db");
+    /// var db = try ManagedDatabase.open(allocator, io, "mydb.db");
     /// defer db.deinit();
     /// ```
-    pub fn open(std_io: std.Io, alloc: std.mem.Allocator, path: ?[]const u8) !ManagedDatabase {
+    pub fn open(alloc: std.mem.Allocator, std_io: std.Io, path: ?[]const u8) !ManagedDatabase {
         if (path) |db_path| {
             // DiskIo wraps std.Io for real filesystem access.  It only needs to
             // exist long enough to open/create files; File handles outlive it.
@@ -52,7 +52,7 @@ pub const ManagedDatabase = struct {
 
             // Initialize the WAL for durability
             const wal = try alloc.create(WAL);
-            wal.* = try WAL.open(io, wal_path, alloc);
+            wal.* = try WAL.open(alloc, io, wal_path);
             errdefer alloc.destroy(wal);
 
             // Try to open existing database file, or create new if not found.
@@ -137,6 +137,6 @@ pub const ManagedDatabase = struct {
     /// defer e.freeExecResult(result, allocator); // Clean up result data
     /// ```
     pub fn execute(self: *ManagedDatabase, sql: []const u8, alloc: std.mem.Allocator) !e.ExecResult {
-        return e.execute(self.db, sql, alloc);
+        return e.execute(alloc, self.db, sql);
     }
 };

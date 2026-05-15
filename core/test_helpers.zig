@@ -23,8 +23,8 @@ const execute = @import("sql/executor.zig").execute;
 
 /// Execute SQL and discard the result. Use for setup statements
 /// (CREATE TABLE, INSERT, BEGIN/COMMIT) where the return value is irrelevant.
-pub fn exec(db: *Db, sql: []const u8, alloc: std.mem.Allocator) !void {
-    var r = try execute(db, sql, alloc);
+pub fn exec(alloc: std.mem.Allocator, db: *Db, sql: []const u8) !void {
+    var r = try execute(alloc, db, sql);
     r.deinit();
 }
 
@@ -49,7 +49,7 @@ pub const DbHandle = struct {
 pub fn makeMemoryDb(alloc: std.mem.Allocator, opts: DbOptions) !DbHandle {
     const db = try Db.init(try InMemoryPager.create(alloc), alloc);
     errdefer db.close();
-    for (opts.schema) |sql| try exec(db, sql, alloc);
+    for (opts.schema) |sql| try exec(alloc, db, sql);
     return .{ .db = db };
 }
 
@@ -76,7 +76,7 @@ pub fn makeDiskDb(alloc: std.mem.Allocator, io: std.Io, path: []const u8, opts: 
     var disk_io = DiskIo.init(alloc, io);
     const db = try Db.init(try DiskPager.create(alloc, disk_io.io(), path, .{}), alloc);
     errdefer db.close();
-    for (opts.schema) |sql| try exec(db, sql, alloc);
+    for (opts.schema) |sql| try exec(alloc, db, sql);
     return .{ .db = db, .io = io, .path = path };
 }
 

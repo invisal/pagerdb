@@ -11,10 +11,10 @@ test "AS alias on plain table allows qualified column reference" {
     });
     defer h.deinit();
 
-    try exec(h.db, "INSERT INTO users VALUES (1, 'alice')", alloc);
-    try exec(h.db, "INSERT INTO users VALUES (2, 'bob')", alloc);
+    try exec(alloc, h.db, "INSERT INTO users VALUES (1, 'alice')");
+    try exec(alloc, h.db, "INSERT INTO users VALUES (2, 'bob')");
 
-    var result = try execute(h.db, "SELECT u.id, u.name FROM users AS u", alloc);
+    var result = try execute(alloc, h.db, "SELECT u.id, u.name FROM users AS u");
     defer result.deinit();
 
     try std.testing.expectEqual(@as(usize, 2), result.result_set.rows.len);
@@ -28,7 +28,7 @@ test "AS alias on TVF allows qualified column reference" {
     defer h.deinit();
 
     // generate_series(5) yields 0..4
-    var result = try execute(h.db, "SELECT gs.generate_series FROM generate_series(5) AS gs", alloc);
+    var result = try execute(alloc, h.db, "SELECT gs.generate_series FROM generate_series(5) AS gs");
     defer result.deinit();
 
     try std.testing.expectEqual(@as(usize, 5), result.result_set.rows.len);
@@ -46,13 +46,13 @@ test "AS alias on JOIN right-hand plain table" {
     });
     defer h.deinit();
 
-    try exec(h.db, "INSERT INTO users VALUES (1, 'alice')", alloc);
-    try exec(h.db, "INSERT INTO orders VALUES (10, 1)", alloc);
+    try exec(alloc, h.db, "INSERT INTO users VALUES (1, 'alice')");
+    try exec(alloc, h.db, "INSERT INTO orders VALUES (10, 1)");
 
     var result = try execute(
+        alloc,
         h.db,
         "SELECT o.id, u.name FROM orders AS o INNER JOIN users AS u ON o.user_id = u.id",
-        alloc,
     );
     defer result.deinit();
 
@@ -68,9 +68,9 @@ test "INNER JOIN two aliased TVFs" {
 
     // gs yields 0..9, gs2 yields 0..4; inner join keeps values in 0..4 (5 rows)
     var result = try execute(
+        alloc,
         h.db,
         "SELECT gs.generate_series FROM generate_series(10) AS gs INNER JOIN generate_series(5) AS gs2 ON gs.generate_series = gs2.generate_series",
-        alloc,
     );
     defer result.deinit();
 
@@ -86,15 +86,15 @@ test "INNER JOIN plain table alias and TVF alias" {
     });
     defer h.deinit();
 
-    try exec(h.db, "INSERT INTO items VALUES (1, 'one')", alloc);
-    try exec(h.db, "INSERT INTO items VALUES (2, 'two')", alloc);
-    try exec(h.db, "INSERT INTO items VALUES (3, 'three')", alloc);
+    try exec(alloc, h.db, "INSERT INTO items VALUES (1, 'one')");
+    try exec(alloc, h.db, "INSERT INTO items VALUES (2, 'two')");
+    try exec(alloc, h.db, "INSERT INTO items VALUES (3, 'three')");
 
     // generate_series(4) yields 0,1,2,3; items has ids 1,2,3 — three matches
     var result = try execute(
+        alloc,
         h.db,
         "SELECT i.label FROM items AS i INNER JOIN generate_series(4) AS gs ON i.id = gs.generate_series",
-        alloc,
     );
     defer result.deinit();
 
