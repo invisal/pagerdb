@@ -60,18 +60,18 @@ pub fn main(init: std.process.Init) !void {
 
     if (wal_mode) {
         const seeds = if (num_seeds == DEFAULT_SEEDS) DEFAULT_WAL_SEEDS else num_seeds;
-        return wal_sim.run(io, alloc, seeds);
+        return wal_sim.run(alloc, io, seeds);
     }
 
     if (single_seed) |s| {
-        try runSeed(io, alloc, s, ops_per_seed);
+        try runSeed(alloc, io, s, ops_per_seed);
         std.debug.print("[DST] seed {d} passed ({d} ops)\n", .{ s, ops_per_seed });
         return;
     }
 
     var seed: u64 = 0;
     while (seed < num_seeds) : (seed += 1) {
-        runSeed(io, alloc, seed, ops_per_seed) catch |err| {
+        runSeed(alloc, io, seed, ops_per_seed) catch |err| {
             std.debug.print("[DST] FAILED seed={d}: {s}\n", .{ seed, @errorName(err) });
             std.process.exit(1);
         };
@@ -81,7 +81,7 @@ pub fn main(init: std.process.Init) !void {
     std.debug.print("[DST] {d} seeds passed ({d} ops each)\n", .{ num_seeds, ops_per_seed });
 }
 
-fn runSeed(io: std.Io, alloc: std.mem.Allocator, seed: u64, n_ops: u64) !void {
+fn runSeed(alloc: std.mem.Allocator, io: std.Io, seed: u64, n_ops: u64) !void {
     var prng = std.Random.DefaultPrng.init(seed);
     const rng = prng.random();
 
@@ -107,7 +107,7 @@ fn runSeed(io: std.Io, alloc: std.mem.Allocator, seed: u64, n_ops: u64) !void {
         try db.pager.flush();
         if (rng.uintLessThan(u8, 10) == 0) {
             try checker.checkCatalog(db);
-            try checker.checkBTreeStructure(io, alloc, db, path, workload.TABLE_NAME);
+            try checker.checkBTreeStructure(alloc, io, db, path, workload.TABLE_NAME);
             try checker.checkRowCount(db, workload.TABLE_NAME, shadow.count(), alloc);
         }
     }

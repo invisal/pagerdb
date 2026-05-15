@@ -54,7 +54,7 @@ pub const Parser = struct {
         return self.parseStmt();
     }
 
-    pub fn parseStandaloneExpr(src: []const u8, allocator: std.mem.Allocator) ParseError!ParseExprResult {
+    pub fn parseStandaloneExpr(allocator: std.mem.Allocator, src: []const u8) ParseError!ParseExprResult {
         const tokens = try lexer.Lexer.tokenize(src, allocator);
         defer allocator.free(tokens);
 
@@ -635,7 +635,7 @@ pub const Parser = struct {
             .lit_string => {
                 _ = self.advance();
                 const raw = self.src[tok.str_start..tok.str_end];
-                const s = try unescapeString(raw, self.alloc());
+                const s = try unescapeString(self.alloc(), raw);
                 return .{ .str_lit = s };
             },
             .kw_null => {
@@ -769,7 +769,7 @@ fn tokenKindLabel(kind: lexer.TokenKind) []const u8 {
 }
 
 // Unescape '' → ' in a raw string-literal body.
-fn unescapeString(raw: []const u8, allocator: std.mem.Allocator) ![]const u8 {
+fn unescapeString(allocator: std.mem.Allocator, raw: []const u8) ![]const u8 {
     // Fast path: no embedded quotes at all.
     var has_escape = false;
     for (raw) |c| if (c == '\'') {

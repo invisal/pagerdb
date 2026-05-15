@@ -9,7 +9,7 @@ test "SELECT * FROM __pages returns at least the header page" {
     const h = try makeMemoryDb(alloc, .{});
     defer h.deinit();
 
-    var result = try execute(h.db, "SELECT * FROM __pages", alloc);
+    var result = try execute(alloc, h.db, "SELECT * FROM __pages");
     defer result.deinit();
     try std.testing.expectEqual(@as(usize, 1), result.result_set.rows.len);
     try std.testing.expectEqual(@as(i64, 0), result.result_set.rows[0].values[0].int);
@@ -21,7 +21,7 @@ test "SELECT * FROM __pages after creating table has more pages" {
     const h = try makeMemoryDb(alloc, .{ .schema = &.{"CREATE TABLE t (n INT NOT NULL)"} });
     defer h.deinit();
 
-    var result = try execute(h.db, "SELECT * FROM __pages", alloc);
+    var result = try execute(alloc, h.db, "SELECT * FROM __pages");
     defer result.deinit();
     try std.testing.expect(result.result_set.rows.len >= 4);
 }
@@ -31,10 +31,10 @@ test "SELECT * FROM __page_slots(1) shows btree_leaf cells" {
     const h = try makeMemoryDb(alloc, .{ .schema = &.{"CREATE TABLE t (n INT NOT NULL)"} });
     defer h.deinit();
 
-    try exec(h.db, "INSERT INTO t VALUES (10)", alloc);
-    try exec(h.db, "INSERT INTO t VALUES (20)", alloc);
+    try exec(alloc, h.db, "INSERT INTO t VALUES (10)");
+    try exec(alloc, h.db, "INSERT INTO t VALUES (20)");
 
-    var pages_res = try execute(h.db, "SELECT * FROM __pages", alloc);
+    var pages_res = try execute(alloc, h.db, "SELECT * FROM __pages");
     defer pages_res.deinit();
 
     var leaf_page_id: i64 = -1;
@@ -46,7 +46,7 @@ test "SELECT * FROM __page_slots(1) shows btree_leaf cells" {
 
     var buf: [64]u8 = undefined;
     const sql = try std.fmt.bufPrint(&buf, "SELECT * FROM __page_slots({d})", .{leaf_page_id});
-    var slots = try execute(h.db, sql, alloc);
+    var slots = try execute(alloc, h.db, sql);
     defer slots.deinit();
 
     try std.testing.expectEqual(@as(usize, 2), slots.result_set.rows.len);

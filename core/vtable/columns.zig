@@ -66,7 +66,7 @@ fn cursorNext(ptr: *anyopaque, alloc: std.mem.Allocator) anyerror!?[]root.Value 
     }
 }
 
-pub fn open(cat: *Catalog, args: []const root.Value, alloc: std.mem.Allocator) anyerror!root.VTabCursor {
+pub fn open(alloc: std.mem.Allocator, cat: *Catalog, args: []const root.Value) anyerror!root.VTabCursor {
     _ = args;
     const cur = try alloc.create(ColumnsCursor);
     cur.* = .{ .it = cat.tables.valueIterator(), .current_meta = null, .col_idx = 0 };

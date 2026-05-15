@@ -206,18 +206,18 @@ fn evalToValue(
 // SQL-level errors (bad syntax, unknown table, type mismatch, …) are returned
 // as ExecResult.err so callers receive a human-readable message string.
 // Genuine system failures (OOM, I/O errors) still propagate as Zig errors.
-pub fn execute(db: *Db, sql: []const u8, allocator: std.mem.Allocator) !ExecResult {
+pub fn execute(allocator: std.mem.Allocator, db: *Db, sql: []const u8) !ExecResult {
     var parser = Parser.init(sql, allocator);
     defer parser.deinit();
 
     const stmt = parser.parse() catch |e| {
-        return toSqlError(e, parser.error_message, allocator);
+        return toSqlError(allocator, e, parser.error_message);
     };
 
     var logical_planner = lp_mod.LogicalPlanner.init(&db.cat, allocator);
     defer logical_planner.deinit();
     const logical = logical_planner.plan(stmt) catch |e| {
-        return toSqlError(e, logical_planner.error_message, allocator);
+        return toSqlError(allocator, e, logical_planner.error_message);
     };
 
     var phys_planner = pp_mod.PhysicalPlanner.init(allocator);
@@ -238,7 +238,7 @@ pub fn execute(db: *Db, sql: []const u8, allocator: std.mem.Allocator) !ExecResu
 
 /// Convert a caught error into ExecResult.err (SQL-level user error) or
 /// re-propagate it as a Zig error (unexpected system failure).
-fn toSqlError(e: anyerror, message: []const u8, allocator: std.mem.Allocator) !ExecResult {
+fn toSqlError(allocator: std.mem.Allocator, e: anyerror, message: []const u8) !ExecResult {
     if (!isSqlUserError(e)) return e;
 
     var arena = std.heap.ArenaAllocator.init(allocator);

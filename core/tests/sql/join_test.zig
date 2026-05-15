@@ -14,16 +14,16 @@ test "INNER JOIN returns matching rows" {
     });
     defer h.deinit();
 
-    try exec(h.db, "INSERT INTO users VALUES (1, 'alice')", alloc);
-    try exec(h.db, "INSERT INTO users VALUES (2, 'bob')", alloc);
-    try exec(h.db, "INSERT INTO orders VALUES (10, 1)", alloc);
-    try exec(h.db, "INSERT INTO orders VALUES (11, 2)", alloc);
-    try exec(h.db, "INSERT INTO orders VALUES (12, 1)", alloc);
+    try exec(alloc, h.db, "INSERT INTO users VALUES (1, 'alice')");
+    try exec(alloc, h.db, "INSERT INTO users VALUES (2, 'bob')");
+    try exec(alloc, h.db, "INSERT INTO orders VALUES (10, 1)");
+    try exec(alloc, h.db, "INSERT INTO orders VALUES (11, 2)");
+    try exec(alloc, h.db, "INSERT INTO orders VALUES (12, 1)");
 
     var result = try execute(
+        alloc,
         h.db,
         "SELECT * FROM orders INNER JOIN users ON orders.user_id = users.id",
-        alloc,
     );
     defer result.deinit();
 
@@ -42,10 +42,10 @@ test "INNER JOIN with no matching rows returns empty" {
     });
     defer h.deinit();
 
-    try exec(h.db, "INSERT INTO a VALUES (1)", alloc);
-    try exec(h.db, "INSERT INTO b VALUES (99)", alloc);
+    try exec(alloc, h.db, "INSERT INTO a VALUES (1)");
+    try exec(alloc, h.db, "INSERT INTO b VALUES (99)");
 
-    var result = try execute(h.db, "SELECT * FROM a INNER JOIN b ON a.x = b.y", alloc);
+    var result = try execute(alloc, h.db, "SELECT * FROM a INNER JOIN b ON a.x = b.y");
     defer result.deinit();
 
     try std.testing.expectEqual(@as(usize, 0), result.result_set.rows.len);
@@ -61,16 +61,16 @@ test "INNER JOIN with SELECT * exposes all columns" {
     });
     defer h.deinit();
 
-    try exec(h.db, "INSERT INTO dept VALUES (1, 'engineering')", alloc);
-    try exec(h.db, "INSERT INTO dept VALUES (2, 'sales')", alloc);
-    try exec(h.db, "INSERT INTO emp VALUES (100, 1, 'alice')", alloc);
-    try exec(h.db, "INSERT INTO emp VALUES (101, 1, 'bob')", alloc);
-    try exec(h.db, "INSERT INTO emp VALUES (102, 2, 'carol')", alloc);
+    try exec(alloc, h.db, "INSERT INTO dept VALUES (1, 'engineering')");
+    try exec(alloc, h.db, "INSERT INTO dept VALUES (2, 'sales')");
+    try exec(alloc, h.db, "INSERT INTO emp VALUES (100, 1, 'alice')");
+    try exec(alloc, h.db, "INSERT INTO emp VALUES (101, 1, 'bob')");
+    try exec(alloc, h.db, "INSERT INTO emp VALUES (102, 2, 'carol')");
 
     var result = try execute(
+        alloc,
         h.db,
         "SELECT * FROM dept INNER JOIN emp ON dept.dept_id = emp.dept_id",
-        alloc,
     );
     defer result.deinit();
 
@@ -90,10 +90,10 @@ test "INNER JOIN column names are correct" {
     });
     defer h.deinit();
 
-    try exec(h.db, "INSERT INTO t1 VALUES (1)", alloc);
-    try exec(h.db, "INSERT INTO t2 VALUES (1)", alloc);
+    try exec(alloc, h.db, "INSERT INTO t1 VALUES (1)");
+    try exec(alloc, h.db, "INSERT INTO t2 VALUES (1)");
 
-    var result = try execute(h.db, "SELECT * FROM t1 INNER JOIN t2 ON t1.a = t2.b", alloc);
+    var result = try execute(alloc, h.db, "SELECT * FROM t1 INNER JOIN t2 ON t1.a = t2.b");
     defer result.deinit();
 
     try std.testing.expectEqual(@as(usize, 2), result.result_set.columns.len);
@@ -111,17 +111,17 @@ test "INNER JOIN with WHERE filters after join" {
     });
     defer h.deinit();
 
-    try exec(h.db, "INSERT INTO users VALUES (1, 'alice')", alloc);
-    try exec(h.db, "INSERT INTO users VALUES (2, 'bob')", alloc);
-    try exec(h.db, "INSERT INTO orders VALUES (10, 1)", alloc);
-    try exec(h.db, "INSERT INTO orders VALUES (11, 2)", alloc);
-    try exec(h.db, "INSERT INTO orders VALUES (12, 1)", alloc);
+    try exec(alloc, h.db, "INSERT INTO users VALUES (1, 'alice')");
+    try exec(alloc, h.db, "INSERT INTO users VALUES (2, 'bob')");
+    try exec(alloc, h.db, "INSERT INTO orders VALUES (10, 1)");
+    try exec(alloc, h.db, "INSERT INTO orders VALUES (11, 2)");
+    try exec(alloc, h.db, "INSERT INTO orders VALUES (12, 1)");
 
     // WHERE filters on a left-side column after the join
     var result = try execute(
+        alloc,
         h.db,
         "SELECT * FROM orders INNER JOIN users ON orders.user_id = users.id WHERE orders.id > 10",
-        alloc,
     );
     defer result.deinit();
 
@@ -138,13 +138,13 @@ test "INNER JOIN with qualified SELECT columns" {
     });
     defer h.deinit();
 
-    try exec(h.db, "INSERT INTO users VALUES (1, 'alice')", alloc);
-    try exec(h.db, "INSERT INTO orders VALUES (10, 1)", alloc);
+    try exec(alloc, h.db, "INSERT INTO users VALUES (1, 'alice')");
+    try exec(alloc, h.db, "INSERT INTO orders VALUES (10, 1)");
 
     var result = try execute(
+        alloc,
         h.db,
         "SELECT orders.id, users.name FROM orders INNER JOIN users ON orders.user_id = users.id",
-        alloc,
     );
     defer result.deinit();
 

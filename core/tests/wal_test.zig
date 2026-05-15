@@ -14,7 +14,7 @@ test "WAL.open on missing file initializes with lsn=0 and no entries" {
     Dir.deleteFile(.cwd(), io, path) catch {};
 
     var disk_io = DiskIo.init(alloc, io);
-    var wal = try WAL.open(disk_io.io(), path, alloc);
+    var wal = try WAL.open(alloc, disk_io.io(), path);
     defer wal.deinit();
 
     try std.testing.expectEqual(0, wal.next_lsn);
@@ -37,7 +37,7 @@ test "WAL.open on empty file initializes with lsn=0 and no entries" {
     empty.close();
 
     var disk_io2 = DiskIo.init(alloc, io);
-    var wal = try WAL.open(disk_io2.io(), path, alloc);
+    var wal = try WAL.open(alloc, disk_io2.io(), path);
     defer wal.deinit();
 
     try std.testing.expectEqual(0, wal.next_lsn);
@@ -58,7 +58,7 @@ test "WAL records can be read after flush" {
     var lsn_list: [2]u64 = undefined;
     {
         var disk_io = DiskIo.init(alloc, io);
-        var wal = try WAL.open(disk_io.io(), path, alloc);
+        var wal = try WAL.open(alloc, disk_io.io(), path);
         defer wal.deinit();
 
         lsn_list[0] = try wal.append(1, 10, "abc");
@@ -68,7 +68,7 @@ test "WAL records can be read after flush" {
 
     // Reopen WAL and replay records
     var disk_io2 = DiskIo.init(alloc, io);
-    var wal = try WAL.open(disk_io2.io(), path, alloc);
+    var wal = try WAL.open(alloc, disk_io2.io(), path);
     defer wal.deinit();
 
     var reader = wal.reader();
@@ -92,7 +92,7 @@ test "WAL reader returns InvalidChecksum on corrupted payload" {
 
     {
         var disk_io = DiskIo.init(alloc, io);
-        var wal = try WAL.open(disk_io.io(), path, alloc);
+        var wal = try WAL.open(alloc, disk_io.io(), path);
         defer wal.deinit();
         _ = try wal.append(1, 0, "abc");
         try wal.flush();
@@ -109,7 +109,7 @@ test "WAL reader returns InvalidChecksum on corrupted payload" {
     }
 
     var disk_io2 = DiskIo.init(alloc, io);
-    var wal = try WAL.open(disk_io2.io(), path, alloc);
+    var wal = try WAL.open(alloc, disk_io2.io(), path);
     defer wal.deinit();
 
     var reader = wal.reader();
@@ -125,7 +125,7 @@ test "WAL reader can read LSN from header" {
     // Create WAL with LSN 100
     {
         var disk_io = DiskIo.init(alloc, io);
-        var wal = try WAL.open(disk_io.io(), path, alloc);
+        var wal = try WAL.open(alloc, disk_io.io(), path);
         defer wal.deinit();
 
         wal.next_lsn = 100;
@@ -133,7 +133,7 @@ test "WAL reader can read LSN from header" {
     }
 
     var disk_io2 = DiskIo.init(alloc, io);
-    var wal = try WAL.open(disk_io2.io(), path, alloc);
+    var wal = try WAL.open(alloc, disk_io2.io(), path);
     defer wal.deinit();
 
     var reader = wal.reader();

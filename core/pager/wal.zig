@@ -76,7 +76,7 @@ pub const WAL = struct {
     offset: usize,
 
     // Create a new WAL file and write the initial LSN header.
-    pub fn create(io: Io, path: []const u8, alloc: std.mem.Allocator) !WAL {
+    pub fn create(alloc: std.mem.Allocator, io: Io, path: []const u8) !WAL {
         const file = try io.createFile(path);
         var wal = WAL{ .file = file, .next_lsn = 0, .buffer = .empty, .alloc = alloc, .offset = 0 };
         try wal.reset();
@@ -85,9 +85,9 @@ pub const WAL = struct {
 
     // Open an existing WAL file, or create it if it doesn't exist.
     // Caller must run wal.recover() before use if the file already existed.
-    pub fn open(io: Io, path: []const u8, alloc: std.mem.Allocator) !WAL {
+    pub fn open(alloc: std.mem.Allocator, io: Io, path: []const u8) !WAL {
         const file = io.openFile(path) catch |err| switch (err) {
-            error.FileNotFound => return create(io, path, alloc),
+            error.FileNotFound => return create(alloc, io, path),
             else => return err,
         };
         return WAL{ .file = file, .next_lsn = 0, .buffer = .empty, .alloc = alloc, .offset = 0 };

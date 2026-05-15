@@ -51,7 +51,7 @@ fn cursorNext(ptr: *anyopaque, alloc: std.mem.Allocator) anyerror!?[]root.Value 
     return vals;
 }
 
-pub fn open(cat: *Catalog, args: []const root.Value, alloc: std.mem.Allocator) anyerror!root.VTabCursor {
+pub fn open(alloc: std.mem.Allocator, cat: *Catalog, args: []const root.Value) anyerror!root.VTabCursor {
     const page_id: u32 = switch (args[0]) {
         .int => |n| @intCast(n),
         else => return error.InvalidArgumentType,

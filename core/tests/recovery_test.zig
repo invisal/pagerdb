@@ -9,8 +9,9 @@ const Dir = std.Io.Dir;
 
 // Creates a temp-file-backed WAL initialized to initial_lsn and ready to
 // receive records.
-fn makeWAL(disk_io: *DiskIo, path: []const u8, alloc: std.mem.Allocator, initial_lsn: u64) !WAL {
-    var wal = try WAL.create(disk_io.io(), path, alloc);
+fn makeWAL(alloc: std.mem.Allocator, std_io: std.Io, path: []const u8, initial_lsn: u64) !WAL {
+    var disk_io = DiskIo.init(alloc, std_io);
+    var wal = try WAL.create(alloc, disk_io.io(), path);
     wal.next_lsn = initial_lsn;
     try wal.reset(); // writes the 8-byte next_lsn header
     return wal;
@@ -56,8 +57,7 @@ test "recovery with no WAL records leaves next_lsn unchanged" {
     const wal_path = "/tmp/test_recovery_no_records.wal";
     defer Dir.deleteFile(.cwd(), io, wal_path) catch {};
 
-    var disk_io = DiskIo.init(alloc, io);
-    var wal = try makeWAL(&disk_io, wal_path, alloc, 42);
+    var wal = try makeWAL(alloc, io, wal_path, 42);
     defer wal.deinit();
 
     var pager = try InMemoryPager.create(alloc);
@@ -76,8 +76,7 @@ test "recovery applies WAL record to a stale page" {
     defer Dir.deleteFile(.cwd(), io, wal_path) catch {};
 
     // WAL starts at LSN=10; the first appended record has LSN=10.
-    var disk_io = DiskIo.init(alloc, io);
-    var wal = try makeWAL(&disk_io, wal_path, alloc, 10);
+    var wal = try makeWAL(alloc, io, wal_path, 10);
     defer wal.deinit();
 
     var pager = try InMemoryPager.create(alloc);
@@ -105,8 +104,7 @@ test "recovery skips a page whose LSN is already ahead of the WAL record" {
     defer Dir.deleteFile(.cwd(), io, wal_path) catch {};
 
     // Record will have LSN=5; page has LSN=20 — already ahead.
-    var disk_io = DiskIo.init(alloc, io);
-    var wal = try makeWAL(&disk_io, wal_path, alloc, 5);
+    var wal = try makeWAL(alloc, io, wal_path, 5);
     defer wal.deinit();
 
     var pager = try InMemoryPager.create(alloc);
@@ -134,8 +132,7 @@ test "recovery patches stale pages and skips fresh ones in the same run" {
     defer Dir.deleteFile(.cwd(), io, wal_path) catch {};
 
     // Records: LSN=10 for page 1, LSN=32 for page 2 (10+18+4).
-    var disk_io = DiskIo.init(alloc, io);
-    var wal = try makeWAL(&disk_io, wal_path, alloc, 10);
+    var wal = try makeWAL(alloc, io, wal_path, 10);
     defer wal.deinit();
 
     var pager = try InMemoryPager.create(alloc);
@@ -168,8 +165,7 @@ test "recovery advances next_lsn past the last WAL record" {
     const wal_path = "/tmp/test_recovery_next_lsn.wal";
     defer Dir.deleteFile(.cwd(), io, wal_path) catch {};
 
-    var disk_io = DiskIo.init(alloc, io);
-    var wal = try makeWAL(&disk_io, wal_path, alloc, 0);
+    var wal = try makeWAL(alloc, io, wal_path, 0);
     defer wal.deinit();
 
     var pager = try InMemoryPager.create(alloc);
@@ -194,8 +190,7 @@ test "recovery truncates WAL to a header-only file after completing" {
     const wal_path = "/tmp/test_recovery_wal_reset.wal";
     defer Dir.deleteFile(.cwd(), io, wal_path) catch {};
 
-    var disk_io = DiskIo.init(alloc, io);
-    var wal = try makeWAL(&disk_io, wal_path, alloc, 10);
+    var wal = try makeWAL(alloc, io, wal_path, 10);
     defer wal.deinit();
 
     var pager = try InMemoryPager.create(alloc);
@@ -224,8 +219,7 @@ test "recovery returns CorruptWAL when record write range overflows the page" {
     const wal_path = "/tmp/test_recovery_corrupt_overflow.wal";
     defer Dir.deleteFile(.cwd(), io, wal_path) catch {};
 
-    var disk_io = DiskIo.init(alloc, io);
-    var wal = try makeWAL(&disk_io, wal_path, alloc, 10);
+    var wal = try makeWAL(alloc, io, wal_path, 10);
     defer wal.deinit();
 
     var pager = try InMemoryPager.create(alloc);
@@ -247,8 +241,7 @@ test "recovery returns CorruptWAL when the WAL file is truncated mid-record" {
     const wal_path = "/tmp/test_recovery_corrupt_truncated.wal";
     defer Dir.deleteFile(.cwd(), io, wal_path) catch {};
 
-    var disk_io = DiskIo.init(alloc, io);
-    var wal = try makeWAL(&disk_io, wal_path, alloc, 0);
+    var wal = try makeWAL(alloc, io, wal_path, 0);
     defer wal.deinit();
 
     // Write only the length and lsn fields of a record, then stop.

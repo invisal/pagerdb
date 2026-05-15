@@ -39,7 +39,7 @@ const SCHEMA = [_]core.catalog.ColumnMeta{
     .{ .name = "v", .col_type = .int, .nullable = false, .default_src = null, .default_expr = null },
 };
 
-pub fn run(io: std.Io, alloc: std.mem.Allocator, num_seeds: u64) !void {
+pub fn run(alloc: std.mem.Allocator, io: std.Io, num_seeds: u64) !void {
     _ = io; // SimIo replaces real disk IO for the crash simulation
 
     var seed: u64 = 0;
@@ -72,7 +72,7 @@ fn runSeed(alloc: std.mem.Allocator, seed: u64) !void {
     // ── Phase 1: committed baseline ─────────────────────────────────────────
     var baseline_ids: [BASELINE]u64 = undefined;
     {
-        var wal = try WAL.open(sim_io.io(), wal_path, alloc);
+        var wal = try WAL.open(alloc, sim_io.io(), wal_path);
         defer wal.deinit();
 
         const db = try Database.init(try DiskPager.create(alloc, sim_io.io(), path, .{ .wal = &wal }), alloc);
@@ -85,7 +85,7 @@ fn runSeed(alloc: std.mem.Allocator, seed: u64) !void {
 
     // ── Phase 2: crash sweep ─────────────────────────────────────────────────
     for (0..MAX_CRASH_POINTS) |crash_point| {
-        var wal1 = try WAL.open(sim_io.io(), wal_path, alloc);
+        var wal1 = try WAL.open(alloc, sim_io.io(), wal_path);
         defer wal1.deinit();
 
         var pager = try DiskPager.open(alloc, sim_io.io(), path, .{ .wal = &wal1 });
@@ -117,7 +117,7 @@ fn runSeed(alloc: std.mem.Allocator, seed: u64) !void {
 
         // ── Recovery check ──────────────────────────────────────────────────
         // Reopen triggers WAL recovery; then verify every committed row survived.
-        var wal2 = try WAL.open(sim_io.io(), wal_path, alloc);
+        var wal2 = try WAL.open(alloc, sim_io.io(), wal_path);
         defer wal2.deinit();
 
         var pager2 = try DiskPager.open(alloc, sim_io.io(), path, .{ .wal = &wal2 });

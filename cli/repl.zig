@@ -6,7 +6,7 @@ const Console = @import("console.zig").Console;
 const PROMPT = "pagerdb> ";
 const CONT_PROMPT = "   ...> ";
 
-pub fn run(db: *Db, io: std.Io, alloc: std.mem.Allocator) !void {
+pub fn run(alloc: std.mem.Allocator, io: std.Io, db: *Db) !void {
     var out_buf: [4096]u8 = undefined;
     var err_buf: [512]u8 = undefined;
     var out = std.Io.File.stdout().writerStreaming(io, &out_buf);

@@ -373,7 +373,7 @@ pub const Cursor = union(enum) {
             .const_scan => .{ .const_scan = .{} },
             .seq_scan => |n| .{ .seq_scan = .{ .it = try db.scanOpen(n.table) } },
             .vtab_scan => |n| blk: {
-                const vtab_cursor = try n.vtab.open(&db.cat, n.args, a);
+                const vtab_cursor = try n.vtab.open(a, &db.cat, n.args);
                 break :blk .{ .vtab_scan = .{ .cursor = vtab_cursor, .rowid = 1 } };
             },
             .point_lookup => |n| blk: {

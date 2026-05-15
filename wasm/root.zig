@@ -85,7 +85,7 @@ export fn db_close() void {
 }
 
 fn execInner(sql: []const u8) !void {
-    var result = try core.execute(g_db.?, sql, allocator);
+    var result = try core.execute(allocator, g_db.?, sql);
     defer result.deinit();
     try writeResult(result);
 }
