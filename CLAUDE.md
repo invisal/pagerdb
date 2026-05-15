@@ -11,21 +11,8 @@ zig build
 
 Do not report a fix as complete until both commands succeed without errors.
 
-## Parameter Ordering
+## Code Guidelines
 
-For free functions and constructors (`init`, `create`, `open`, etc.), infrastructure parameters always come first in this order:
+**Parameter ordering** — Free functions and constructors (`init`, `create`, `open`, etc.) take infrastructure parameters first: `alloc: std.mem.Allocator`, then `io` (either `std.Io` or the custom `Io` abstraction), then domain-specific parameters. Does not apply to struct methods (`self` or `ptr: *anyopaque` first parameter).
 
-1. `alloc: std.mem.Allocator` (if present)
-2. `io: std.Io` (if present)
-3. Domain-specific parameters
-
-Do not apply this to struct methods (functions with a `self` or `ptr: *anyopaque` first parameter).
-
-## Comments
-
-This is a learning project. Add comments to explain:
-- Non-obvious design decisions or trade-offs
-- How algorithms or data structures work at a high level
-- Why a particular approach was chosen over alternatives
-
-Skip comments that just restate what the code already says.
+**Comments** — This is a learning project. Explain non-obvious design decisions, how algorithms or data structures work, and why an approach was chosen over alternatives. Skip comments that just restate what the code already says.
