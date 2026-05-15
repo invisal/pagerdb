@@ -269,7 +269,7 @@ pub const LogicalPlanner = struct {
             var proj_cols: std.ArrayList(SchemaCol) = .empty;
 
             for (stmt.columns) |sel_col| {
-                switch (sel_col) {
+                switch (sel_col.col) {
                     .star => {
                         for (scan_schema.columns) |sc| {
                             // Skip hidden metadata cols; users must request them explicitly.
@@ -289,8 +289,9 @@ pub const LogicalPlanner = struct {
                         try exprs.append(self.alloc(), .{ .col_idx = src_idx });
                         for (scan_schema.columns) |sc| {
                             if (sc.index == src_idx) {
+                                const out_name = sel_col.alias orelse sc.name;
                                 try proj_cols.append(self.alloc(), .{
-                                    .name = try self.alloc().dupe(u8, sc.name),
+                                    .name = try self.alloc().dupe(u8, out_name),
                                     .table = try self.alloc().dupe(u8, sc.table),
                                     .col_type = sc.col_type,
                                     .nullable = sc.nullable,
@@ -328,8 +329,9 @@ pub const LogicalPlanner = struct {
                             try exprs.append(self.alloc(), .{ .col_idx = src_idx });
                             for (scan_schema.columns) |sc| {
                                 if (sc.index == src_idx) {
+                                    const out_name = sel_col.alias orelse sc.name;
                                     try proj_cols.append(self.alloc(), .{
-                                        .name = try self.alloc().dupe(u8, sc.name),
+                                        .name = try self.alloc().dupe(u8, out_name),
                                         .table = try self.alloc().dupe(u8, sc.table),
                                         .col_type = sc.col_type,
                                         .nullable = sc.nullable,
@@ -343,8 +345,8 @@ pub const LogicalPlanner = struct {
                     .expr => |e| {
                         const resolved = try self.resolveExpr(e, scan_schema);
                         try exprs.append(self.alloc(), resolved);
-                        // Use function name (or a generic label) as the output column name.
-                        const col_name = switch (e) {
+                        // Use alias, function name, or a generic label as the output column name.
+                        const col_name = if (sel_col.alias) |a| a else switch (e) {
                             .func_call => |f| f.name,
                             else => "?",
                         };
@@ -561,7 +563,7 @@ pub const LogicalPlanner = struct {
     fn needsAggregate(stmt: ast.SelectStmt) bool {
         if (stmt.group_by.len > 0) return true;
         for (stmt.columns) |col| {
-            switch (col) {
+            switch (col.col) {
                 .expr => |e| if (containsAggCall(e)) return true,
                 else => {},
             }
@@ -609,7 +611,7 @@ pub const LogicalPlanner = struct {
         // Step 2: collect aggregate function calls from SELECT column expressions.
         var agg_specs: std.ArrayListUnmanaged(AggCallSpec) = .empty;
         for (stmt.columns) |sel_col| {
-            switch (sel_col) {
+            switch (sel_col.col) {
                 .expr => |e| try self.collectAggSpecs(e, scan_schema, &agg_specs),
                 else => {},
             }
@@ -660,7 +662,7 @@ pub const LogicalPlanner = struct {
         var proj_cols: std.ArrayListUnmanaged(SchemaCol) = .empty;
 
         for (stmt.columns) |sel_col| {
-            switch (sel_col) {
+            switch (sel_col.col) {
                 .star => {
                     for (agg_out_cols) |sc| {
                         try proj_exprs.append(self.alloc(), .{ .col_idx = sc.index });
@@ -669,9 +671,10 @@ pub const LogicalPlanner = struct {
                 },
                 .name => |n| {
                     const col_idx = try self.resolveColName(n, agg_out_schema);
+                    const out_name = sel_col.alias orelse agg_out_cols[col_idx].name;
                     try proj_exprs.append(self.alloc(), .{ .col_idx = col_idx });
                     try proj_cols.append(self.alloc(), .{
-                        .name = try self.alloc().dupe(u8, agg_out_cols[col_idx].name),
+                        .name = try self.alloc().dupe(u8, out_name),
                         .table = try self.alloc().dupe(u8, agg_out_cols[col_idx].table),
                         .col_type = agg_out_cols[col_idx].col_type,
                         .nullable = agg_out_cols[col_idx].nullable,
@@ -694,9 +697,10 @@ pub const LogicalPlanner = struct {
                         }
                     } else {
                         const col_idx = try self.resolveQualColName(q.table, q.col.?, agg_out_schema);
+                        const out_name = sel_col.alias orelse agg_out_cols[col_idx].name;
                         try proj_exprs.append(self.alloc(), .{ .col_idx = col_idx });
                         try proj_cols.append(self.alloc(), .{
-                            .name = try self.alloc().dupe(u8, agg_out_cols[col_idx].name),
+                            .name = try self.alloc().dupe(u8, out_name),
                             .table = try self.alloc().dupe(u8, agg_out_cols[col_idx].table),
                             .col_type = agg_out_cols[col_idx].col_type,
                             .nullable = agg_out_cols[col_idx].nullable,
@@ -707,10 +711,8 @@ pub const LogicalPlanner = struct {
                 .expr => |e| {
                     const lp_expr = try self.resolveExprOverAgg(e, scan_schema, agg_specs_slice, group_by.len, agg_out_schema);
                     try proj_exprs.append(self.alloc(), lp_expr);
-                    // For direct aggregate/column references use the canonical name from
-                    // the agg output schema (always lowercase); fall back to the AST name
-                    // for compound expressions.
-                    const col_name: []const u8 = switch (lp_expr) {
+                    // Use alias, or derive name from the expression for direct references.
+                    const col_name: []const u8 = if (sel_col.alias) |a| a else switch (lp_expr) {
                         .col_idx => |idx| if (idx < agg_out_cols.len) agg_out_cols[idx].name else "?",
                         else => switch (e) {
                             .func_call => |f| f.name,

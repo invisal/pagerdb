@@ -14,7 +14,7 @@ test "parse SELECT *" {
     try std.testing.expect(s.table_ref.?.name.schema == null);
     // SELECT * is now represented as a single .star entry
     try std.testing.expectEqual(@as(usize, 1), s.columns.len);
-    try std.testing.expect(s.columns[0] == .star);
+    try std.testing.expect(s.columns[0].col == .star);
     try std.testing.expect(s.where == null);
 }
 
@@ -48,8 +48,8 @@ test "parse SELECT columns with WHERE" {
 
     const s = res.select;
     try std.testing.expectEqual(@as(usize, 2), s.columns.len);
-    try std.testing.expectEqualStrings("name", s.columns[0].name);
-    try std.testing.expectEqualStrings("score", s.columns[1].name);
+    try std.testing.expectEqualStrings("name", s.columns[0].col.name);
+    try std.testing.expectEqualStrings("score", s.columns[1].col.name);
     const w = s.where.?.binary;
     try std.testing.expectEqual(ast.BinaryOp.gt, w.op);
 }

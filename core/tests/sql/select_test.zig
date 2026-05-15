@@ -225,6 +225,50 @@ test "SELECT multiple constants without FROM returns one row with multiple value
     try std.testing.expectEqual(@as(i64, 3), result.result_set.rows[0].values[2].int);
 }
 
+test "SELECT column AS alias renames output column" {
+    const alloc = std.testing.allocator;
+    const h = try makeMemoryDb(alloc, .{ .schema = &.{"CREATE TABLE t (name TEXT NOT NULL, score INT NOT NULL)"} });
+    defer h.deinit();
+
+    try exec(h.db, "INSERT INTO t VALUES ('alice', 42)", alloc);
+
+    var result = try execute(h.db, "SELECT name AS full_name, score AS points FROM t", alloc);
+    defer result.deinit();
+
+    try std.testing.expectEqual(@as(usize, 2), result.result_set.columns.len);
+    try std.testing.expectEqualStrings("full_name", result.result_set.columns[0]);
+    try std.testing.expectEqualStrings("points", result.result_set.columns[1]);
+    try std.testing.expectEqualStrings("alice", result.result_set.rows[0].values[0].text);
+    try std.testing.expectEqual(@as(i64, 42), result.result_set.rows[0].values[1].int);
+}
+
+test "SELECT expression AS alias labels computed column" {
+    const alloc = std.testing.allocator;
+    const h = try makeMemoryDb(alloc, .{});
+    defer h.deinit();
+
+    var result = try execute(h.db, "SELECT 6 + 7 AS tt", alloc);
+    defer result.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), result.result_set.columns.len);
+    try std.testing.expectEqualStrings("tt", result.result_set.columns[0]);
+    try std.testing.expectEqual(@as(i64, 13), result.result_set.rows[0].values[0].int);
+}
+
+test "SELECT table.col AS alias renames qualified column" {
+    const alloc = std.testing.allocator;
+    const h = try makeMemoryDb(alloc, .{ .schema = &.{"CREATE TABLE users (id INT NOT NULL, name TEXT NOT NULL)"} });
+    defer h.deinit();
+
+    try exec(h.db, "INSERT INTO users VALUES (1, 'bob')", alloc);
+
+    var result = try execute(h.db, "SELECT users.name AS username FROM users", alloc);
+    defer result.deinit();
+
+    try std.testing.expectEqualStrings("username", result.result_set.columns[0]);
+    try std.testing.expectEqualStrings("bob", result.result_set.rows[0].values[0].text);
+}
+
 test "SELECT abs() evaluates correctly end-to-end" {
     const alloc = std.testing.allocator;
     const h = try makeMemoryDb(alloc, .{ .schema = &.{"CREATE TABLE t (n INT NOT NULL)"} });
