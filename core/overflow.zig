@@ -111,11 +111,13 @@ pub fn freeChain(pager: *Pager, first_page: u32) !void {
 
 test "overflow round-trip for large row" {
     const DiskPager = @import("pager/disk.zig").DiskPager;
+    const DiskIo = @import("io/disk_io.zig").DiskIo;
     const io = std.testing.io;
     const path = "/tmp/test_overflow_roundtrip.db";
     defer std.Io.Dir.deleteFile(.cwd(), io, path) catch {};
 
-    var pager = try DiskPager.create(std.testing.allocator, io, path, .{});
+    var disk_io = DiskIo.init(std.testing.allocator, io);
+    var pager = try DiskPager.create(std.testing.allocator, disk_io.io(), path, .{});
     defer pager.close();
 
     const big_row = try std.testing.allocator.alloc(u8, 5000);
@@ -133,11 +135,13 @@ test "overflow round-trip for large row" {
 
 test "freeChain returns pages to free list" {
     const DiskPager = @import("pager/disk.zig").DiskPager;
+    const DiskIo = @import("io/disk_io.zig").DiskIo;
     const io = std.testing.io;
     const path = "/tmp/test_overflow_free.db";
     defer std.Io.Dir.deleteFile(.cwd(), io, path) catch {};
 
-    var pager = try DiskPager.create(std.testing.allocator, io, path, .{});
+    var disk_io = DiskIo.init(std.testing.allocator, io);
+    var pager = try DiskPager.create(std.testing.allocator, disk_io.io(), path, .{});
     defer pager.close();
 
     const big_row = [_]u8{0xAB} ** 5000;
@@ -154,11 +158,13 @@ test "freeChain returns pages to free list" {
 
 test "multi-page chain round-trip" {
     const DiskPager = @import("pager/disk.zig").DiskPager;
+    const DiskIo = @import("io/disk_io.zig").DiskIo;
     const io = std.testing.io;
     const path = "/tmp/test_overflow_multipage.db";
     defer std.Io.Dir.deleteFile(.cwd(), io, path) catch {};
 
-    var pager = try DiskPager.create(std.testing.allocator, io, path, .{});
+    var disk_io = DiskIo.init(std.testing.allocator, io);
+    var pager = try DiskPager.create(std.testing.allocator, disk_io.io(), path, .{});
     defer pager.close();
 
     // 3 × DATA_CAP forces at least 3 overflow pages

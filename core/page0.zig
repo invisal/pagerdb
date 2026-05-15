@@ -3,6 +3,7 @@ const t = @import("types.zig");
 const Pager = @import("pager/pager.zig").Pager;
 const PageWriter = @import("page_writer.zig").PageWriter;
 const DiskPager = @import("pager/disk.zig").DiskPager;
+const DiskIo = @import("io/disk_io.zig").DiskIo;
 
 // DbHeader is stored after the PageHeader so page0 participates in the normal
 // WAL delta path: PageWriter stamps an LSN into PageHeader, and recovery uses
@@ -50,12 +51,14 @@ test "create and reopen preserves header" {
     defer Dir.deleteFile(.cwd(), io, path ++ ".wal") catch {};
 
     {
-        var pager = try DiskPager.create(alloc, io, path, .{});
+        var disk_io = DiskIo.init(alloc, io);
+        var pager = try DiskPager.create(alloc, disk_io.io(), path, .{});
         defer pager.close();
         try pager.flush();
     }
     {
-        var pager = try DiskPager.open(alloc, io, path, .{});
+        var disk_io = DiskIo.init(alloc, io);
+        var pager = try DiskPager.open(alloc, disk_io.io(), path, .{});
         defer pager.close();
         const h = try readHeader(&pager);
         try validateHeader(h);
@@ -73,7 +76,8 @@ test "catalog roots round-trip through header" {
     defer Dir.deleteFile(.cwd(), io, path ++ ".wal") catch {};
 
     {
-        var pager = try DiskPager.create(alloc, io, path, .{});
+        var disk_io = DiskIo.init(alloc, io);
+        var pager = try DiskPager.create(alloc, disk_io.io(), path, .{});
         defer pager.close();
         pager.sys_tables_root = 1;
         pager.sys_columns_root = 2;
@@ -81,7 +85,8 @@ test "catalog roots round-trip through header" {
         try pager.flush();
     }
     {
-        var pager = try DiskPager.open(alloc, io, path, .{});
+        var disk_io = DiskIo.init(alloc, io);
+        var pager = try DiskPager.open(alloc, disk_io.io(), path, .{});
         defer pager.close();
         try std.testing.expectEqual(pager.sys_tables_root, 1);
         try std.testing.expectEqual(pager.sys_columns_root, 2);

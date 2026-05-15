@@ -4,10 +4,9 @@ const page0 = @import("../page0.zig");
 const Pager = @import("pager.zig").Pager;
 const WAL = @import("wal.zig").WAL;
 const Delta = @import("../page_writer.zig").Delta;
-
-const Io = std.Io;
-const Dir = std.Io.Dir;
-const File = std.Io.File;
+const io_mod = @import("../io/io.zig");
+const Io = io_mod.Io;
+const File = io_mod.File;
 const Allocator = std.mem.Allocator;
 
 pub const DEFAULT_POOL_SIZE: usize = 64;
@@ -31,13 +30,10 @@ const Frame = struct {
 
 pub const DiskPager = struct {
     file: File,
-    io: Io,
     allocator: Allocator,
     // Heap-allocated slice; length equals the pool_size passed at creation.
     pool: []Frame,
     tick: u64,
-    fault_after: ?u32 = null,
-    fault_write_count: u32 = 0,
     // No-steal: when true, dirty frames are not evicted during pool pressure.
     // This keeps data pages in the buffer pool until commit, so the database
     // file always reflects only committed state.
@@ -55,11 +51,11 @@ pub const DiskPager = struct {
     };
 
     pub fn create(allocator: Allocator, io: Io, path: []const u8, config: Config) !Pager {
-        const file = try Dir.cwd().createFile(io, path, .{ .read = true });
-        errdefer file.close(io);
+        const file = try io.createFile(path);
+        errdefer file.close();
         const self = try allocator.create(DiskPager);
         errdefer allocator.destroy(self);
-        try initSelf(self, file, io, allocator, config.pool_size);
+        try initSelf(self, file, allocator, config.pool_size);
         errdefer allocator.free(self.pool);
 
         self.wal = config.wal;
@@ -72,20 +68,21 @@ pub const DiskPager = struct {
             .sys_tables_root = 0,
             .sys_columns_root = 0,
         };
+        // Write a zero-filled page 0 to initialise the file.
         const blank = [_]u8{0} ** t.PAGE_SIZE;
-        try file.writeStreamingAll(io, &blank);
+        try file.writeAt(&blank, 0);
         pager.total_pages = 1;
         try page0.writeHeader(&pager);
         return pager;
     }
 
     pub fn open(allocator: Allocator, io: Io, path: []const u8, config: Config) !Pager {
-        const file = try Dir.cwd().openFile(io, path, .{ .mode = .read_write });
-        errdefer file.close(io);
-        const file_size = try file.length(io);
+        const file = try io.openFile(path);
+        errdefer file.close();
+        const file_size = try file.length();
         const self = try allocator.create(DiskPager);
         errdefer allocator.destroy(self);
-        try initSelf(self, file, io, allocator, config.pool_size);
+        try initSelf(self, file, allocator, config.pool_size);
         errdefer allocator.free(self.pool);
         var pager = Pager{
             .ptr = self,
@@ -105,13 +102,10 @@ pub const DiskPager = struct {
         return pager;
     }
 
-    fn initSelf(self: *DiskPager, file: File, io: Io, allocator: Allocator, pool_size: usize) !void {
+    fn initSelf(self: *DiskPager, file: File, allocator: Allocator, pool_size: usize) !void {
         self.file = file;
-        self.io = io;
         self.allocator = allocator;
         self.tick = 0;
-        self.fault_after = null;
-        self.fault_write_count = 0;
         self.txn_active = false;
         self.wal = null;
         self.pool = try allocator.alloc(Frame, pool_size);
@@ -155,18 +149,13 @@ pub const DiskPager = struct {
 
     fn readPageRaw(self: *DiskPager, page_id: u32, buf: *[t.PAGE_SIZE]u8) !void {
         const offset: u64 = @as(u64, page_id) * t.PAGE_SIZE;
-        const n = try self.file.readPositionalAll(self.io, buf, offset);
+        const n = try self.file.readAt(buf, offset);
         if (n != t.PAGE_SIZE) return error.IncompleteRead;
     }
 
     fn writePageRaw(self: *DiskPager, page_id: u32, buf: *const [t.PAGE_SIZE]u8) !void {
-        if (self.fault_after) |limit| {
-            const n = self.fault_write_count;
-            self.fault_write_count = n + 1;
-            if (n >= limit) return error.NoSpaceLeft;
-        }
         const offset: u64 = @as(u64, page_id) * t.PAGE_SIZE;
-        try self.file.writePositionalAll(self.io, buf, offset);
+        try self.file.writeAt(buf, offset);
     }
 
     fn diskReadPage(ptr: *anyopaque, page_id: u32, buf: *[t.PAGE_SIZE]u8) anyerror!void {
@@ -234,7 +223,7 @@ pub const DiskPager = struct {
                 frame.dirty = false;
             }
         }
-        try self.file.sync(self.io);
+        try self.file.sync();
 
         // Every WAL record is now applied and on disk.  Reset when the WAL
         // exceeds the checkpoint threshold to bound recovery time.
@@ -262,20 +251,9 @@ pub const DiskPager = struct {
         return @ptrCast(@alignCast(pager.ptr));
     }
 
-    // Discard all dirty in-memory pages and reset fault injection state without
-    // writing anything to disk.  Used by crash simulation tests to mimic a
-    // process crash: the in-memory buffer pool is lost, disk reflects whatever
-    // was written before the simulated fault.
-    pub fn simulateCrash(pager: *Pager) void {
-        const self = asDiskPager(pager);
-        for (self.pool) |*frame| frame.dirty = false;
-        self.fault_after = null;
-        self.fault_write_count = 0;
-    }
-
     fn diskClose(ptr: *anyopaque) void {
         const self: *DiskPager = @ptrCast(@alignCast(ptr));
-        self.file.close(self.io);
+        self.file.close();
         self.allocator.free(self.pool);
         self.allocator.destroy(self);
     }
@@ -283,16 +261,17 @@ pub const DiskPager = struct {
 
 // ── Tests ──────────────────────────────────────────────────────────────────────
 
-const Dir2 = std.Io.Dir;
+const DiskIo = @import("../io/disk_io.zig").DiskIo;
+const Dir = std.Io.Dir;
 
 test "create, write, read page" {
-    const io = std.testing.io;
-    const path = "/tmp/test_pager.db";
-    defer Dir2.deleteFile(.cwd(), io, path) catch {};
-    defer Dir2.deleteFile(.cwd(), io, path ++ ".wal") catch {};
     const alloc = std.testing.allocator;
+    const path = "/tmp/test_pager.db";
+    var disk_io = DiskIo.init(alloc, std.testing.io);
+    defer disk_io.io().deleteFile(path) catch {};
+    defer disk_io.io().deleteFile(path ++ ".wal") catch {};
 
-    var pager = try DiskPager.create(alloc, io, path, .{});
+    var pager = try DiskPager.create(alloc, disk_io.io(), path, .{});
     defer pager.close();
 
     var buf = [_]u8{0} ** t.PAGE_SIZE;
@@ -308,13 +287,13 @@ test "create, write, read page" {
 }
 
 test "allocPage extends file" {
-    const io = std.testing.io;
-    const path = "/tmp/test_alloc.db";
-    defer Dir2.deleteFile(.cwd(), io, path) catch {};
-    defer Dir2.deleteFile(.cwd(), io, path ++ ".wal") catch {};
     const alloc = std.testing.allocator;
+    const path = "/tmp/test_alloc.db";
+    var disk_io = DiskIo.init(alloc, std.testing.io);
+    defer disk_io.io().deleteFile(path) catch {};
+    defer disk_io.io().deleteFile(path ++ ".wal") catch {};
 
-    var pager = try DiskPager.create(alloc, io, path, .{});
+    var pager = try DiskPager.create(alloc, disk_io.io(), path, .{});
     defer pager.close();
 
     const id = try pager.allocPage();
@@ -323,13 +302,13 @@ test "allocPage extends file" {
 }
 
 test "buffer pool hit avoids disk read" {
-    const io = std.testing.io;
-    const path = "/tmp/test_pool.db";
-    defer Dir2.deleteFile(.cwd(), io, path) catch {};
-    defer Dir2.deleteFile(.cwd(), io, path ++ ".wal") catch {};
     const alloc = std.testing.allocator;
+    const path = "/tmp/test_pool.db";
+    var disk_io = DiskIo.init(alloc, std.testing.io);
+    defer disk_io.io().deleteFile(path) catch {};
+    defer disk_io.io().deleteFile(path ++ ".wal") catch {};
 
-    var pager = try DiskPager.create(alloc, io, path, .{});
+    var pager = try DiskPager.create(alloc, disk_io.io(), path, .{});
     defer pager.close();
 
     var buf = std.mem.zeroes([t.PAGE_SIZE]u8);
@@ -342,13 +321,13 @@ test "buffer pool hit avoids disk read" {
 }
 
 test "freePage and allocPage reuse" {
-    const io = std.testing.io;
-    const path = "/tmp/test_free.db";
-    defer Dir2.deleteFile(.cwd(), io, path) catch {};
-    defer Dir2.deleteFile(.cwd(), io, path ++ ".wal") catch {};
     const alloc = std.testing.allocator;
+    const path = "/tmp/test_free.db";
+    var disk_io = DiskIo.init(alloc, std.testing.io);
+    defer disk_io.io().deleteFile(path) catch {};
+    defer disk_io.io().deleteFile(path ++ ".wal") catch {};
 
-    var pager = try DiskPager.create(alloc, io, path, .{});
+    var pager = try DiskPager.create(alloc, disk_io.io(), path, .{});
     defer pager.close();
 
     const id = try pager.allocPage();

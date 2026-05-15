@@ -253,6 +253,7 @@ fn extractRowidEq(expr: lp.Expr, rowid_col_idx: usize) ?u64 {
 
 const Pager = @import("../pager/pager.zig").Pager;
 const DiskPager = @import("../pager/disk.zig").DiskPager;
+const DiskIo = @import("../io/disk_io.zig").DiskIo;
 const Parser = @import("parser.zig").Parser;
 const Dir = std.Io.Dir;
 
@@ -276,7 +277,8 @@ fn makeDb(
 ) !DbHandle {
     const pager = try alloc.create(Pager);
     errdefer alloc.destroy(pager);
-    pager.* = try DiskPager.create(alloc, io, path, .{});
+    var disk_io = DiskIo.init(alloc, io);
+    pager.* = try DiskPager.create(alloc, disk_io.io(), path, .{});
     var cat = catalog.Catalog.init(alloc, pager);
     try cat.bootstrap();
     return .{ .pager = pager, .cat = cat, .alloc = alloc };

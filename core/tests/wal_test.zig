@@ -2,15 +2,19 @@ const std = @import("std");
 const WAL = @import("../pager/wal.zig").WAL;
 const Record = @import("../pager//wal.zig").Record;
 const RECORD_HEADER_SIZE = @import("../pager/wal.zig").RECORD_HEADER_SIZE;
+const DiskIo = @import("../io/disk_io.zig").DiskIo;
+
+const Dir = std.Io.Dir;
 
 test "WAL.open on missing file initializes with lsn=0 and no entries" {
     const io = std.testing.io;
     const alloc = std.testing.allocator;
 
     const path = "/tmp/wal_test_missing.wal";
-    std.Io.Dir.deleteFile(.cwd(), io, path) catch {};
+    Dir.deleteFile(.cwd(), io, path) catch {};
 
-    var wal = try WAL.open(io, path, alloc);
+    var disk_io = DiskIo.init(alloc, io);
+    var wal = try WAL.open(disk_io.io(), path, alloc);
     defer wal.deinit();
 
     try std.testing.expectEqual(0, wal.next_lsn);
@@ -25,11 +29,15 @@ test "WAL.open on empty file initializes with lsn=0 and no entries" {
     const alloc = std.testing.allocator;
 
     const path = "/tmp/wal_test_empty.wal";
-    std.Io.Dir.deleteFile(.cwd(), io, path) catch {};
-    const fs = try std.Io.Dir.createFile(.cwd(), io, path, .{ .read = true });
-    fs.close(io);
+    Dir.deleteFile(.cwd(), io, path) catch {};
 
-    var wal = try WAL.open(io, path, alloc);
+    // Create an empty file (no WAL header) to test edge-case handling.
+    var disk_io = DiskIo.init(alloc, io);
+    const empty = try disk_io.io().createFile(path);
+    empty.close();
+
+    var disk_io2 = DiskIo.init(alloc, io);
+    var wal = try WAL.open(disk_io2.io(), path, alloc);
     defer wal.deinit();
 
     try std.testing.expectEqual(0, wal.next_lsn);
@@ -44,12 +52,13 @@ test "WAL records can be read after flush" {
     const alloc = std.testing.allocator;
 
     const path = "/tmp/wal_records.wal";
-    std.Io.Dir.deleteFile(.cwd(), io, path) catch {};
+    Dir.deleteFile(.cwd(), io, path) catch {};
 
     // Write some WAL records and flush
     var lsn_list: [2]u64 = undefined;
     {
-        var wal = try WAL.open(io, path, alloc);
+        var disk_io = DiskIo.init(alloc, io);
+        var wal = try WAL.open(disk_io.io(), path, alloc);
         defer wal.deinit();
 
         lsn_list[0] = try wal.append(1, 10, "abc");
@@ -58,8 +67,8 @@ test "WAL records can be read after flush" {
     }
 
     // Reopen WAL and replay records
-
-    var wal = try WAL.open(io, path, alloc);
+    var disk_io2 = DiskIo.init(alloc, io);
+    var wal = try WAL.open(disk_io2.io(), path, alloc);
     defer wal.deinit();
 
     var reader = wal.reader();
@@ -79,10 +88,11 @@ test "WAL reader returns InvalidChecksum on corrupted payload" {
     const alloc = std.testing.allocator;
 
     const path = "/tmp/wal_checksum.wal";
-    std.Io.Dir.deleteFile(.cwd(), io, path) catch {};
+    Dir.deleteFile(.cwd(), io, path) catch {};
 
     {
-        var wal = try WAL.open(io, path, alloc);
+        var disk_io = DiskIo.init(alloc, io);
+        var wal = try WAL.open(disk_io.io(), path, alloc);
         defer wal.deinit();
         _ = try wal.append(1, 0, "abc");
         try wal.flush();
@@ -92,12 +102,14 @@ test "WAL reader returns InvalidChecksum on corrupted payload" {
     // Layout: [file header: 8 bytes][record header: RECORD_HEADER_SIZE bytes][payload...]
     const payload_offset = 8 + RECORD_HEADER_SIZE;
     {
-        const file = try std.Io.Dir.cwd().openFile(io, path, .{ .mode = .read_write });
-        defer file.close(io);
-        try file.writePositionalAll(io, &[_]u8{0xFF}, payload_offset);
+        var disk_io = DiskIo.init(alloc, io);
+        const file = try disk_io.io().openFile(path);
+        defer file.close();
+        try file.writeAt(&[_]u8{0xFF}, payload_offset);
     }
 
-    var wal = try WAL.open(io, path, alloc);
+    var disk_io2 = DiskIo.init(alloc, io);
+    var wal = try WAL.open(disk_io2.io(), path, alloc);
     defer wal.deinit();
 
     var reader = wal.reader();
@@ -112,14 +124,16 @@ test "WAL reader can read LSN from header" {
 
     // Create WAL with LSN 100
     {
-        var wal = try WAL.open(io, path, alloc);
+        var disk_io = DiskIo.init(alloc, io);
+        var wal = try WAL.open(disk_io.io(), path, alloc);
         defer wal.deinit();
 
         wal.next_lsn = 100;
         try wal.reset();
     }
 
-    var wal = try WAL.open(io, path, alloc);
+    var disk_io2 = DiskIo.init(alloc, io);
+    var wal = try WAL.open(disk_io2.io(), path, alloc);
     defer wal.deinit();
 
     var reader = wal.reader();

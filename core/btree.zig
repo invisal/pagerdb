@@ -909,11 +909,13 @@ test "cell pointer insert and remove" {
 
 test "right-biased split keeps left page full" {
     const DiskPager = @import("pager/disk.zig").DiskPager;
+    const DiskIo = @import("io/disk_io.zig").DiskIo;
     const io = std.testing.io;
     const path = "/tmp/test_split_right.db";
     defer std.Io.Dir.deleteFile(.cwd(), io, path) catch {};
 
-    var pager = try DiskPager.create(std.testing.allocator, io, path, .{});
+    var disk_io = DiskIo.init(std.testing.allocator, io);
+    var pager = try DiskPager.create(std.testing.allocator, disk_io.io(), path, .{});
     defer pager.close();
 
     const page_id = try pager.allocPage();
@@ -941,11 +943,13 @@ test "right-biased split keeps left page full" {
 
 test "50/50 split distributes cells evenly" {
     const DiskPager = @import("pager/disk.zig").DiskPager;
+    const DiskIo = @import("io/disk_io.zig").DiskIo;
     const io = std.testing.io;
     const path = "/tmp/test_split_half.db";
     defer std.Io.Dir.deleteFile(.cwd(), io, path) catch {};
 
-    var pager = try DiskPager.create(std.testing.allocator, io, path, .{});
+    var disk_io = DiskIo.init(std.testing.allocator, io);
+    var pager = try DiskPager.create(std.testing.allocator, disk_io.io(), path, .{});
     defer pager.close();
 
     const page_id = try pager.allocPage();
@@ -974,11 +978,13 @@ test "50/50 split distributes cells evenly" {
 
 test "root split keeps root_id stable" {
     const DiskPager = @import("pager/disk.zig").DiskPager;
+    const DiskIo = @import("io/disk_io.zig").DiskIo;
     const io = std.testing.io;
     const path = "/tmp/test_split_root.db";
     defer std.Io.Dir.deleteFile(.cwd(), io, path) catch {};
 
-    var pager = try DiskPager.create(std.testing.allocator, io, path, .{});
+    var disk_io = DiskIo.init(std.testing.allocator, io);
+    var pager = try DiskPager.create(std.testing.allocator, disk_io.io(), path, .{});
     defer pager.close();
 
     const root_id = try pager.allocPage();
@@ -1021,11 +1027,13 @@ test "root split keeps root_id stable" {
 
 test "multi-level insert: force root to become internal" {
     const DiskPager = @import("pager/disk.zig").DiskPager;
+    const DiskIo = @import("io/disk_io.zig").DiskIo;
     const io = std.testing.io;
     const path = "/tmp/test_btree_multi.db";
     defer std.Io.Dir.deleteFile(.cwd(), io, path) catch {};
 
-    var pager = try DiskPager.create(std.testing.allocator, io, path, .{});
+    var disk_io = DiskIo.init(std.testing.allocator, io);
+    var pager = try DiskPager.create(std.testing.allocator, disk_io.io(), path, .{});
     defer pager.close();
 
     const root_id = try pager.allocPage();

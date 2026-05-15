@@ -5,11 +5,13 @@
 //             succeeds, so all rows are durably committed before any crash.
 //
 //   Phase 2 — Crash sweep: reopen the DB and arm fault injection at write
-//             count F (0, 1, 2, …).  Insert one more row; the fault fires
-//             inside diskFlush after the WAL has been flushed to disk but
-//             before all dirty pages have been written.  We then simulate a
-//             crash by discarding the in-memory buffer pool without writing
-//             it, then reopen the DB (triggering WAL recovery) and assert:
+//             count F (0, 1, 2, …) targeting the data file only (WAL writes
+//             are not counted).  Insert one more row; the fault fires inside
+//             diskFlush after the WAL has been flushed to disk but before all
+//             dirty pages have been written.  We then simulate a crash by
+//             calling sim_io.crash(), which reverts every file to its last
+//             sync'd state, then reopen the DB (triggering WAL recovery) and
+//             assert:
 //               • every baseline rowid is still readable
 //               • the B-tree structure is valid
 //
@@ -23,7 +25,7 @@ const checker = @import("checker.zig");
 
 const Database = core.Database;
 const DiskPager = core.DiskPager;
-const Dir = std.Io.Dir;
+const SimIo = core.SimIo;
 const WAL = core.WAL;
 
 const TABLE = "items";
@@ -38,9 +40,11 @@ const SCHEMA = [_]core.catalog.ColumnMeta{
 };
 
 pub fn run(io: std.Io, alloc: std.mem.Allocator, num_seeds: u64) !void {
+    _ = io; // SimIo replaces real disk IO for the crash simulation
+
     var seed: u64 = 0;
     while (seed < num_seeds) : (seed += 1) {
-        runSeed(io, alloc, seed) catch |err| {
+        runSeed(alloc, seed) catch |err| {
             std.debug.print("[WAL-SIM] FAILED seed={d}: {s}\n", .{ seed, @errorName(err) });
             std.process.exit(1);
         };
@@ -50,7 +54,7 @@ pub fn run(io: std.Io, alloc: std.mem.Allocator, num_seeds: u64) !void {
     std.debug.print("[WAL-SIM] {d} seeds passed\n", .{num_seeds});
 }
 
-fn runSeed(io: std.Io, alloc: std.mem.Allocator, seed: u64) !void {
+fn runSeed(alloc: std.mem.Allocator, seed: u64) !void {
     var prng = std.Random.DefaultPrng.init(seed);
     const rng = prng.random();
 
@@ -58,16 +62,20 @@ fn runSeed(io: std.Io, alloc: std.mem.Allocator, seed: u64) !void {
     const path = try std.fmt.bufPrint(&path_buf, "/tmp/wal_sim_{d}.db", .{seed});
     var wal_path_buf: [72]u8 = undefined;
     const wal_path = try std.fmt.bufPrint(&wal_path_buf, "{s}.wal", .{path});
-    defer Dir.deleteFile(.cwd(), io, path) catch {};
-    defer Dir.deleteFile(.cwd(), io, wal_path) catch {};
+
+    // SimIo provides an in-memory filesystem shared across all phases.
+    // sim_io.crash() reverts all files to their last sync()'d state,
+    // and files persist across open/close cycles (like real files on disk).
+    var sim_io = SimIo.init(alloc);
+    defer sim_io.deinit();
 
     // ── Phase 1: committed baseline ─────────────────────────────────────────
     var baseline_ids: [BASELINE]u64 = undefined;
     {
-        var wal = try WAL.open(io, wal_path, alloc);
+        var wal = try WAL.open(sim_io.io(), wal_path, alloc);
         defer wal.deinit();
 
-        const db = try Database.init(try DiskPager.create(alloc, io, path, .{ .wal = &wal }), alloc);
+        const db = try Database.init(try DiskPager.create(alloc, sim_io.io(), path, .{ .wal = &wal }), alloc);
         defer db.close();
         try db.createTable(TABLE, &SCHEMA);
         for (&baseline_ids) |*id| {
@@ -77,19 +85,17 @@ fn runSeed(io: std.Io, alloc: std.mem.Allocator, seed: u64) !void {
 
     // ── Phase 2: crash sweep ─────────────────────────────────────────────────
     for (0..MAX_CRASH_POINTS) |crash_point| {
-        var wal1 = WAL.open(io, wal_path, alloc) catch |err| switch (err) {
-            error.FileNotFound => try WAL.create(io, wal_path, alloc),
-            else => return err,
-        };
+        var wal1 = try WAL.open(sim_io.io(), wal_path, alloc);
         defer wal1.deinit();
 
-        // Open the DB and arm fault injection at writePageRaw call #crash_point.
-        var pager = try DiskPager.open(alloc, io, path, .{ .wal = &wal1 });
+        var pager = try DiskPager.open(alloc, sim_io.io(), path, .{ .wal = &wal1 });
         try wal1.recover(&pager, alloc);
 
-        const disk = DiskPager.asDiskPager(&pager);
-        disk.fault_after = @intCast(crash_point);
-        disk.fault_write_count = 0;
+        // Arm fault injection AFTER recovery so that recovery's own page writes
+        // are not counted.  Only writeAt calls to the data file are counted;
+        // WAL writes go to a different file and do not affect the counter.
+        sim_io.setFaultAfterWrites(path, @intCast(crash_point));
+
         const db = try Database.load(pager, alloc);
 
         // Attempt one insert.  If the fault fires inside diskFlush (after the
@@ -97,9 +103,10 @@ fn runSeed(io: std.Io, alloc: std.mem.Allocator, seed: u64) !void {
         // returns an error.
         const fault_fired = if (db.insert(TABLE, &.{.{ .int = rng.intRangeAtMost(i64, 0, 1_000_000) }})) |_| false else |_| true;
 
-        // Simulate crash: discard dirty pool frames without writing to disk.
-        // Then tear down without flushing — mirrors an abrupt process exit.
-        DiskPager.simulateCrash(&db.pager);
+        // Simulate crash: revert all files to last sync()'d state and
+        // tear down without flushing — mirrors an abrupt process exit.
+        sim_io.crash();
+        sim_io.resetFault();
         db.cat.deinit();
         db.pager.close();
         db.allocator.destroy(db);
@@ -110,13 +117,10 @@ fn runSeed(io: std.Io, alloc: std.mem.Allocator, seed: u64) !void {
 
         // ── Recovery check ──────────────────────────────────────────────────
         // Reopen triggers WAL recovery; then verify every committed row survived.
-        var wal2 = WAL.open(io, wal_path, alloc) catch |err| switch (err) {
-            error.FileNotFound => try WAL.create(io, wal_path, alloc),
-            else => return err,
-        };
+        var wal2 = try WAL.open(sim_io.io(), wal_path, alloc);
         defer wal2.deinit();
 
-        var pager2 = try DiskPager.open(alloc, io, path, .{ .wal = &wal2 });
+        var pager2 = try DiskPager.open(alloc, sim_io.io(), path, .{ .wal = &wal2 });
         try wal2.recover(&pager2, alloc);
 
         const rdb = try Database.load(pager2, alloc);
@@ -138,6 +142,16 @@ fn runSeed(io: std.Io, alloc: std.mem.Allocator, seed: u64) !void {
             alloc.free(vals);
         }
 
-        try checker.checkBTreeStructure(io, alloc, rdb, path, TABLE);
+        // B-tree structural check using a second fresh pager (no WAL needed
+        // since recovery has already been applied and flushed above).
+        var pager3 = try DiskPager.open(alloc, sim_io.io(), path, .{});
+        defer pager3.close();
+        core.btree.verifyTree(&pager3, rdb.cat.tables.get(TABLE).?.btree_root) catch |err| {
+            std.debug.print(
+                "[WAL-SIM] seed={d} crash_at={d}: B-tree structure violation: {s}\n",
+                .{ seed, crash_point, @errorName(err) },
+            );
+            return err;
+        };
     }
 }

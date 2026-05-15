@@ -8,6 +8,7 @@
 const std = @import("std");
 const Db = @import("core").Database;
 const DiskPager = @import("core").DiskPager;
+const DiskIo = @import("core").DiskIo;
 const row = @import("core").row;
 const catalog = @import("core").catalog;
 const c = @cImport(@cInclude("sqlite3.h"));
@@ -62,9 +63,10 @@ fn benchPagerdbInsert(n: usize, io: std.Io, alloc: std.mem.Allocator) !InsertRes
     const path = "bench/data/bench_pagerdb_insert.db";
     defer Dir.deleteFile(.cwd(), io, path) catch {};
 
+    var disk_io = DiskIo.init(alloc, io);
     var ns: u64 = 0;
     {
-        const db = try Db.init(try DiskPager.create(alloc, io, path, .{}), alloc);
+        const db = try Db.init(try DiskPager.create(alloc, disk_io.io(), path, .{}), alloc);
         defer db.close();
         try db.createTable("bench", &SCHEMA);
 
@@ -88,9 +90,10 @@ fn benchPagerdbInsertTxn(n: usize, io: std.Io, alloc: std.mem.Allocator) !Insert
     const path = "bench/data/bench_pagerdb_insert_txn.db";
     defer Dir.deleteFile(.cwd(), io, path) catch {};
 
+    var disk_io = DiskIo.init(alloc, io);
     var ns: u64 = 0;
     {
-        const db = try Db.init(try DiskPager.create(alloc, io, path, .{}), alloc);
+        const db = try Db.init(try DiskPager.create(alloc, disk_io.io(), path, .{}), alloc);
         defer db.close();
         try db.createTable("bench", &SCHEMA);
 
@@ -116,7 +119,8 @@ fn benchPagerdbScan(n: usize, io: std.Io, alloc: std.mem.Allocator) !u64 {
     const path = "bench/data/bench_pagerdb_scan.db";
     defer Dir.deleteFile(.cwd(), io, path) catch {};
 
-    const db = try Db.init(try DiskPager.create(alloc, io, path, .{}), alloc);
+    var disk_io = DiskIo.init(alloc, io);
+    const db = try Db.init(try DiskPager.create(alloc, disk_io.io(), path, .{}), alloc);
     defer db.close();
     try db.createTable("bench", &SCHEMA);
 
@@ -148,7 +152,8 @@ fn benchPagerdbWhere(n: usize, io: std.Io, alloc: std.mem.Allocator) !u64 {
     const path = "bench/data/bench_pagerdb_where.db";
     defer Dir.deleteFile(.cwd(), io, path) catch {};
 
-    const db = try Db.init(try DiskPager.create(alloc, io, path, .{}), alloc);
+    var disk_io = DiskIo.init(alloc, io);
+    const db = try Db.init(try DiskPager.create(alloc, disk_io.io(), path, .{}), alloc);
     defer db.close();
     try db.createTable("bench", &SCHEMA);
 
