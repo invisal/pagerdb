@@ -41,71 +41,75 @@ CREATE TABLE order_items (
   unit_price REAL    NOT NULL
 );
 
-INSERT INTO users VALUES (1,  'Alice Nguyen',   'alice@example.com',  '2025-11-03');
-INSERT INTO users VALUES (2,  'Bob Carter',     'bob@example.com',    '2025-12-14');
-INSERT INTO users VALUES (3,  'Clara Diaz',     'clara@example.com',  '2026-01-07');
-INSERT INTO users VALUES (4,  'David Kim',      'david@example.com',  '2026-01-19');
-INSERT INTO users VALUES (5,  'Eva Petrov',     'eva@example.com',    '2026-02-02');
-INSERT INTO users VALUES (6,  'Frank Osei',     'frank@example.com',  '2026-02-11');
-INSERT INTO users VALUES (7,  'Grace Liu',      'grace@example.com',  '2026-02-28');
-INSERT INTO users VALUES (8,  'Hugo Martins',   'hugo@example.com',   '2026-03-05');
-INSERT INTO users VALUES (9,  'Iris Johansson', 'iris@example.com',   '2026-03-18');
-INSERT INTO users VALUES (10, 'James Patel',    'james@example.com',  '2026-04-01');
+INSERT INTO users VALUES
+  (1,  'Alice Nguyen',   'alice@example.com',  '2025-11-03'),
+  (2,  'Bob Carter',     'bob@example.com',    '2025-12-14'),
+  (3,  'Clara Diaz',     'clara@example.com',  '2026-01-07'),
+  (4,  'David Kim',      'david@example.com',  '2026-01-19'),
+  (5,  'Eva Petrov',     'eva@example.com',    '2026-02-02'),
+  (6,  'Frank Osei',     'frank@example.com',  '2026-02-11'),
+  (7,  'Grace Liu',      'grace@example.com',  '2026-02-28'),
+  (8,  'Hugo Martins',   'hugo@example.com',   '2026-03-05'),
+  (9,  'Iris Johansson', 'iris@example.com',   '2026-03-18'),
+  (10, 'James Patel',    'james@example.com',  '2026-04-01');
 
-INSERT INTO products VALUES (1,  'Mechanical Keyboard', 'Electronics', 129.00);
-INSERT INTO products VALUES (2,  'USB-C Hub',           'Electronics',  49.99);
-INSERT INTO products VALUES (3,  'Monitor Stand',       'Accessories',  39.00);
-INSERT INTO products VALUES (4,  'Webcam HD',           'Electronics',  79.99);
-INSERT INTO products VALUES (5,  'Desk Lamp',           'Accessories',  34.50);
-INSERT INTO products VALUES (6,  'Notebook Set',        'Stationery',   12.00);
-INSERT INTO products VALUES (7,  'Mouse Pad XL',        'Accessories',  19.99);
-INSERT INTO products VALUES (8,  'Headphones',          'Electronics',  89.00);
-INSERT INTO products VALUES (9,  'Cable Organiser',     'Accessories',   9.99);
-INSERT INTO products VALUES (10, 'Standing Desk Mat',   'Accessories',  45.00);
+INSERT INTO products VALUES
+  (1,  'Mechanical Keyboard', 'Electronics', 129.00),
+  (2,  'USB-C Hub',           'Electronics',  49.99),
+  (3,  'Monitor Stand',       'Accessories',  39.00),
+  (4,  'Webcam HD',           'Electronics',  79.99),
+  (5,  'Desk Lamp',           'Accessories',  34.50),
+  (6,  'Notebook Set',        'Stationery',   12.00),
+  (7,  'Mouse Pad XL',        'Accessories',  19.99),
+  (8,  'Headphones',          'Electronics',  89.00),
+  (9,  'Cable Organiser',     'Accessories',   9.99),
+  (10, 'Standing Desk Mat',   'Accessories',  45.00);
 
-INSERT INTO orders VALUES (1,  3,  169.99, '2026-01-08');
-INSERT INTO orders VALUES (2,  1,  258.00, '2026-01-15');
-INSERT INTO orders VALUES (3,  5,   49.99, '2026-02-03');
-INSERT INTO orders VALUES (4,  2,  129.00, '2026-02-10');
-INSERT INTO orders VALUES (5,  4,  213.49, '2026-02-14');
-INSERT INTO orders VALUES (6,  3,   89.00, '2026-02-20');
-INSERT INTO orders VALUES (7,  7,  168.99, '2026-03-01');
-INSERT INTO orders VALUES (8,  1,   34.50, '2026-03-07');
-INSERT INTO orders VALUES (9,  6,  109.98, '2026-03-12');
-INSERT INTO orders VALUES (10, 8,   79.99, '2026-03-15');
-INSERT INTO orders VALUES (11, 5,  258.00, '2026-03-22');
-INSERT INTO orders VALUES (12, 9,   54.99, '2026-03-28');
-INSERT INTO orders VALUES (13, 2,  174.50, '2026-04-02');
-INSERT INTO orders VALUES (14, 10, 128.99, '2026-04-05');
-INSERT INTO orders VALUES (15, 4,   89.00, '2026-04-09');
+INSERT INTO orders VALUES
+  (1,  3,  169.99, '2026-01-08'),
+  (2,  1,  258.00, '2026-01-15'),
+  (3,  5,   49.99, '2026-02-03'),
+  (4,  2,  129.00, '2026-02-10'),
+  (5,  4,  213.49, '2026-02-14'),
+  (6,  3,   89.00, '2026-02-20'),
+  (7,  7,  168.99, '2026-03-01'),
+  (8,  1,   34.50, '2026-03-07'),
+  (9,  6,  109.98, '2026-03-12'),
+  (10, 8,   79.99, '2026-03-15'),
+  (11, 5,  258.00, '2026-03-22'),
+  (12, 9,   54.99, '2026-03-28'),
+  (13, 2,  174.50, '2026-04-02'),
+  (14, 10, 128.99, '2026-04-05'),
+  (15, 4,   89.00, '2026-04-09');
 
-INSERT INTO order_items VALUES (1,  1,  2,  1,  49.99);
-INSERT INTO order_items VALUES (2,  1,  4,  1,  79.99);
-INSERT INTO order_items VALUES (3,  1,  9,  4,   9.99);
-INSERT INTO order_items VALUES (4,  2,  1,  2, 129.00);
-INSERT INTO order_items VALUES (5,  3,  2,  1,  49.99);
-INSERT INTO order_items VALUES (6,  4,  1,  1, 129.00);
-INSERT INTO order_items VALUES (7,  5,  8,  1,  89.00);
-INSERT INTO order_items VALUES (8,  5,  3,  2,  39.00);
-INSERT INTO order_items VALUES (9,  5,  7,  2,  19.99);
-INSERT INTO order_items VALUES (10, 6,  8,  1,  89.00);
-INSERT INTO order_items VALUES (11, 7,  1,  1, 129.00);
-INSERT INTO order_items VALUES (12, 7,  7,  2,  19.99);
-INSERT INTO order_items VALUES (13, 8,  5,  1,  34.50);
-INSERT INTO order_items VALUES (14, 9,  6,  5,  12.00);
-INSERT INTO order_items VALUES (15, 9,  7,  1,  19.99);
-INSERT INTO order_items VALUES (16, 9,  9,  5,   9.99);
-INSERT INTO order_items VALUES (17, 10, 4,  1,  79.99);
-INSERT INTO order_items VALUES (18, 11, 1,  2, 129.00);
-INSERT INTO order_items VALUES (19, 12, 5,  1,  34.50);
-INSERT INTO order_items VALUES (20, 12, 9,  2,   9.99);
-INSERT INTO order_items VALUES (21, 13, 3,  1,  39.00);
-INSERT INTO order_items VALUES (22, 13, 8,  1,  89.00);
-INSERT INTO order_items VALUES (23, 13, 10, 1,  45.00);
-INSERT INTO order_items VALUES (24, 14, 2,  1,  49.99);
-INSERT INTO order_items VALUES (25, 14, 7,  2,  19.99);
-INSERT INTO order_items VALUES (26, 14, 9,  4,   9.99);
-INSERT INTO order_items VALUES (27, 15, 8,  1,  89.00);
+INSERT INTO order_items VALUES
+  (1,  1,  2,  1,  49.99),
+  (2,  1,  4,  1,  79.99),
+  (3,  1,  9,  4,   9.99),
+  (4,  2,  1,  2, 129.00),
+  (5,  3,  2,  1,  49.99),
+  (6,  4,  1,  1, 129.00),
+  (7,  5,  8,  1,  89.00),
+  (8,  5,  3,  2,  39.00),
+  (9,  5,  7,  2,  19.99),
+  (10, 6,  8,  1,  89.00),
+  (11, 7,  1,  1, 129.00),
+  (12, 7,  7,  2,  19.99),
+  (13, 8,  5,  1,  34.50),
+  (14, 9,  6,  5,  12.00),
+  (15, 9,  7,  1,  19.99),
+  (16, 9,  9,  5,   9.99),
+  (17, 10, 4,  1,  79.99),
+  (18, 11, 1,  2, 129.00),
+  (19, 12, 5,  1,  34.50),
+  (20, 12, 9,  2,   9.99),
+  (21, 13, 3,  1,  39.00),
+  (22, 13, 8,  1,  89.00),
+  (23, 13, 10, 1,  45.00),
+  (24, 14, 2,  1,  49.99),
+  (25, 14, 7,  2,  19.99),
+  (26, 14, 9,  4,   9.99),
+  (27, 15, 8,  1,  89.00);
 `;
 
 const INITIAL_SQL = `SELECT * FROM __pages; -- internal page storage
