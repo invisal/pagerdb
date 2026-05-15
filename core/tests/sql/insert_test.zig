@@ -32,6 +32,26 @@ test "INSERT with named columns reorders values correctly" {
     try std.testing.expectEqual(@as(i64, 99), sel.result_set.rows[0].values[1].int);
 }
 
+test "INSERT with multiple value rows" {
+    const alloc = std.testing.allocator;
+    const h = try makeMemoryDb(alloc, .{ .schema = &.{"CREATE TABLE t (id INT NOT NULL, name TEXT NOT NULL)"} });
+    defer h.deinit();
+
+    var r = try execute(h.db, "INSERT INTO t VALUES (1, 'alice'), (2, 'bob'), (3, 'carol')", alloc);
+    defer r.deinit();
+    try std.testing.expectEqual(@as(u64, 3), r.affected);
+
+    var sel = try execute(h.db, "SELECT * FROM t", alloc);
+    defer sel.deinit();
+    try std.testing.expectEqual(@as(usize, 3), sel.result_set.rows.len);
+    try std.testing.expectEqual(@as(i64, 1), sel.result_set.rows[0].values[0].int);
+    try std.testing.expectEqualStrings("alice", sel.result_set.rows[0].values[1].text);
+    try std.testing.expectEqual(@as(i64, 2), sel.result_set.rows[1].values[0].int);
+    try std.testing.expectEqualStrings("bob", sel.result_set.rows[1].values[1].text);
+    try std.testing.expectEqual(@as(i64, 3), sel.result_set.rows[2].values[0].int);
+    try std.testing.expectEqualStrings("carol", sel.result_set.rows[2].values[1].text);
+}
+
 test "CREATE TABLE then INSERT via SQL" {
     const alloc = std.testing.allocator;
     const h = try makeMemoryDb(alloc, .{});

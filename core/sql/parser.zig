@@ -346,27 +346,36 @@ pub const Parser = struct {
         }
 
         _ = try self.expect(.kw_values);
-        _ = try self.expect(.lparen);
 
-        var values: std.ArrayList(ast.Expr) = .empty;
+        var rows: std.ArrayList([]ast.Expr) = .empty;
 
         while (true) {
-            if (self.peek().kind == .kw_default) {
+            _ = try self.expect(.lparen);
+
+            var values: std.ArrayList(ast.Expr) = .empty;
+
+            while (true) {
+                if (self.peek().kind == .kw_default) {
+                    _ = self.advance();
+                    try values.append(self.alloc(), .default_value);
+                } else {
+                    try values.append(self.alloc(), try self.parseExpr());
+                }
+
+                if (self.peek().kind != .comma) break;
                 _ = self.advance();
-                try values.append(self.alloc(), .default_value);
-            } else {
-                try values.append(self.alloc(), try self.parseExpr());
             }
+
+            _ = try self.expect(.rparen);
+            try rows.append(self.alloc(), try values.toOwnedSlice(self.alloc()));
 
             if (self.peek().kind != .comma) break;
             _ = self.advance();
         }
 
-        _ = try self.expect(.rparen);
-
         return ast.InsertStmt{
             .table = table,
-            .values = try values.toOwnedSlice(self.alloc()),
+            .values = try rows.toOwnedSlice(self.alloc()),
             .columns = try columns.toOwnedSlice(self.alloc()),
         };
     }

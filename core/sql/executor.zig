@@ -118,13 +118,15 @@ pub const Executor = struct {
     // ── DML ────────────────────────────────────────────────────────────────────
 
     fn execInsert(self: *Executor, n: pp.PhysicalInsert) !u64 {
-        const vals = try self.alloc.alloc(row_mod.Value, n.values.len);
-        defer self.alloc.free(vals);
-        for (n.values, 0..) |expr, i| {
-            vals[i] = try evalToValue(expr, &.{}, self.alloc);
+        for (n.values) |row| {
+            const vals = try self.alloc.alloc(row_mod.Value, row.len);
+            defer self.alloc.free(vals);
+            for (row, 0..) |expr, i| {
+                vals[i] = try evalToValue(expr, &.{}, self.alloc);
+            }
+            _ = try self.db.insert(n.table, vals);
         }
-        _ = try self.db.insert(n.table, vals);
-        return 1;
+        return n.values.len;
     }
 
     fn execUpdate(self: *Executor, n: pp.PhysicalUpdate) !u64 {

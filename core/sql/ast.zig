@@ -165,7 +165,8 @@ pub const SelectStmt = struct {
 pub const InsertStmt = struct {
     table: []const u8, // arena-owned
     columns: [][]const u8, //arena-owned
-    values: []Expr, // positional, one per column
+    // Each element is one row; within a row, values are positional per column.
+    values: [][]Expr,
 };
 
 pub const Assignment = struct {

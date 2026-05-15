@@ -20,9 +20,10 @@ test "plan INSERT resolves values" {
     const lp = try planner.plan(parsed);
     const ins = lp.insert;
     try std.testing.expectEqualStrings("t", ins.table);
-    try std.testing.expectEqual(@as(usize, 2), ins.values.len);
-    try std.testing.expectEqualStrings("alice", ins.values[0].str_lit);
-    try std.testing.expectEqual(@as(i64, 100), ins.values[1].int_lit);
+    try std.testing.expectEqual(@as(usize, 1), ins.values.len);
+    try std.testing.expectEqual(@as(usize, 2), ins.values[0].len);
+    try std.testing.expectEqualStrings("alice", ins.values[0][0].str_lit);
+    try std.testing.expectEqual(@as(i64, 100), ins.values[0][1].int_lit);
 }
 
 test "plan INSERT with specified columns" {
@@ -41,9 +42,10 @@ test "plan INSERT with specified columns" {
     const lp = try planner.plan(parsed);
     const ins = lp.insert;
     try std.testing.expectEqualStrings("t", ins.table);
-    try std.testing.expectEqual(@as(usize, 2), ins.values.len);
-    try std.testing.expectEqualStrings("alice", ins.values[0].str_lit);
-    try std.testing.expectEqual(@as(i64, 100), ins.values[1].int_lit);
+    try std.testing.expectEqual(@as(usize, 1), ins.values.len);
+    try std.testing.expectEqual(@as(usize, 2), ins.values[0].len);
+    try std.testing.expectEqualStrings("alice", ins.values[0][0].str_lit);
+    try std.testing.expectEqual(@as(i64, 100), ins.values[0][1].int_lit);
 }
 
 test "plan INSERT wrong column count returns NoDefaultValue" {
@@ -112,14 +114,14 @@ test "plan INSERT with DEFAULT keyword should use default value" {
     defer p_parser.deinit();
 
     const p = try p_parser.parse();
-    try std.testing.expectEqual(10, (try planner.plan(p)).insert.values[1].int_lit);
+    try std.testing.expectEqual(10, (try planner.plan(p)).insert.values[0][1].int_lit);
 
     var p2_parser = Parser.init("INSERT INTO t VALUES(DEFAULT, DEFAULT);", alloc);
 
     defer p2_parser.deinit();
 
     const p2 = try p2_parser.parse();
-    try std.testing.expectEqual(10, (try planner.plan(p2)).insert.values[1].int_lit);
+    try std.testing.expectEqual(10, (try planner.plan(p2)).insert.values[0][1].int_lit);
 }
 
 test "plan INSERT with partial columns fills missing with NULL" {
@@ -138,11 +140,12 @@ test "plan INSERT with partial columns fills missing with NULL" {
     const lp = try planner.plan(parsed);
     const ins = lp.insert;
     try std.testing.expectEqualStrings("t", ins.table);
-    try std.testing.expectEqual(@as(usize, 3), ins.values.len);
-    try std.testing.expectEqual(@as(i64, 1), ins.values[0].int_lit);
-    try std.testing.expectEqual(@as(i64, 2), ins.values[1].int_lit);
+    try std.testing.expectEqual(@as(usize, 1), ins.values.len);
+    try std.testing.expectEqual(@as(usize, 3), ins.values[0].len);
+    try std.testing.expectEqual(@as(i64, 1), ins.values[0][0].int_lit);
+    try std.testing.expectEqual(@as(i64, 2), ins.values[0][1].int_lit);
     try std.testing.expectEqual(@as(usize, 2), ins.schema.columns[2].index);
-    try std.testing.expect(ins.values[2] == .null_lit);
+    try std.testing.expect(ins.values[0][2] == .null_lit);
 }
 
 test "plan INSERT with nonexistent column returns ColumnNotFound" {

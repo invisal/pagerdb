@@ -30,7 +30,7 @@ pub const PhysicalProject = struct {
 
 pub const PhysicalInsert = struct {
     table: []const u8,
-    values: []lp.Expr,
+    values: [][]lp.Expr, // multiple rows; each inner slice is one row (one Expr per column)
     schema: lp.Schema,
 };
 
@@ -416,7 +416,7 @@ test "INSERT physical plan preserves values" {
 
     const pp = try makePlan("INSERT INTO t VALUES (7)", alloc, &lplanner, &pplanner);
     try std.testing.expectEqual(std.meta.Tag(PhysicalPlan).insert, std.meta.activeTag(pp));
-    try std.testing.expectEqual(@as(i64, 7), pp.insert.values[0].int_lit);
+    try std.testing.expectEqual(@as(i64, 7), pp.insert.values[0][0].int_lit);
 }
 
 test "UPDATE physical plan wraps input" {
