@@ -1,0 +1,55 @@
+# UPDATE and DELETE tests — correctness verified via SELECT.
+
+statement ok
+CREATE TABLE scores (name TEXT NOT NULL, score INTEGER NOT NULL);
+
+statement ok
+INSERT INTO scores VALUES ('alice', 10), ('bob', 20);
+
+# UPDATE changes matching rows
+statement ok
+UPDATE scores SET score = 999 WHERE name = 'alice';
+
+query I
+SELECT score FROM scores WHERE name = 'alice';
+----
+999
+
+# UPDATE with no matching rows leaves table unchanged
+statement ok
+UPDATE scores SET score = 0 WHERE name = 'nobody';
+
+query I
+SELECT COUNT(*) FROM scores;
+----
+2
+
+# DELETE removes matching rows
+statement ok
+CREATE TABLE items (name TEXT NOT NULL);
+
+statement ok
+INSERT INTO items VALUES ('a'), ('b'), ('c');
+
+statement ok
+DELETE FROM items WHERE name = 'b';
+
+query I
+SELECT COUNT(*) FROM items;
+----
+2
+
+query T
+SELECT name FROM items ORDER BY name;
+----
+a
+c
+
+# DELETE with no matching rows leaves table unchanged
+statement ok
+DELETE FROM items WHERE name = 'z';
+
+query I
+SELECT COUNT(*) FROM items;
+----
+2

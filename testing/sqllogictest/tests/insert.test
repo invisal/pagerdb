@@ -1,0 +1,60 @@
+# INSERT tests — correctness verified via SELECT.
+
+statement ok
+CREATE TABLE t (n INTEGER NOT NULL);
+
+statement ok
+INSERT INTO t VALUES (42);
+
+query I
+SELECT n FROM t;
+----
+42
+
+# Named-column INSERT reorders values to match table schema
+statement ok
+CREATE TABLE t_named (name TEXT NOT NULL, score INTEGER NOT NULL);
+
+statement ok
+INSERT INTO t_named(score, name) VALUES (99, 'alice');
+
+query TI
+SELECT * FROM t_named;
+----
+alice
+99
+
+# Multi-row INSERT
+statement ok
+CREATE TABLE t_multi (id INTEGER NOT NULL, name TEXT NOT NULL);
+
+statement ok
+INSERT INTO t_multi VALUES (1, 'alice'), (2, 'bob'), (3, 'carol');
+
+query I
+SELECT COUNT(*) FROM t_multi;
+----
+3
+
+query IT
+SELECT * FROM t_multi ORDER BY id;
+----
+1
+alice
+2
+bob
+3
+carol
+
+# CREATE TABLE via SQL then INSERT
+statement ok
+CREATE TABLE items (id INTEGER NOT NULL, label TEXT);
+
+statement ok
+INSERT INTO items VALUES (1, 'thing');
+
+query IT
+SELECT * FROM items;
+----
+1
+thing

@@ -12,7 +12,7 @@ zig build slt
 zig build slt -- --dir testing/sqllogictest/upstream
 
 # Run a specific file
-zig build slt -- testing/sqllogictest/tests/basic.slt
+zig build slt -- testing/sqllogictest/tests/basic.test
 
 # Show up to N individual failure details per file
 zig build slt -- --show-errors 5
@@ -24,9 +24,9 @@ zig build slt -- --dir testing/sqllogictest/upstream --show-errors 5
 By default the runner prints one summary line per file and a final total — no individual failure lines:
 
 ```
-testing/sqllogictest/tests/aggregate.slt: 19 passed, 0 failed [ok]
-testing/sqllogictest/tests/basic.slt:     13 passed, 0 failed [ok]
-testing/sqllogictest/tests/select.slt:    20 passed, 0 failed [ok]
+testing/sqllogictest/tests/aggregate.test: 19 passed, 0 failed [ok]
+testing/sqllogictest/tests/basic.test:    13 passed, 0 failed [ok]
+testing/sqllogictest/tests/select.test:   20 passed, 0 failed [ok]
 
 52 passed, 0 failed across 3 file(s)
 ```
@@ -34,7 +34,7 @@ testing/sqllogictest/tests/select.slt:    20 passed, 0 failed [ok]
 Add `--show-errors N` to reveal the first N failure details per file:
 
 ```
-FAIL testing/sqllogictest/tests/basic.slt:12: expected ok but got error: no such column: x
+FAIL testing/sqllogictest/tests/basic.test:12: expected ok but got error: no such column: x
   ... and 3 more failure(s) not shown
 ```
 

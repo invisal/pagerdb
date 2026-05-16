@@ -1,0 +1,34 @@
+# DEFAULT column value tests.
+
+statement ok
+CREATE TABLE t (name TEXT, age INTEGER DEFAULT 18);
+
+# Omitted column gets the DEFAULT value
+statement ok
+INSERT INTO t(name) VALUES ('alice');
+
+query I
+SELECT age FROM t WHERE name = 'alice';
+----
+18
+
+# DEFAULT keyword explicitly applies the default
+statement ok
+INSERT INTO t(name, age) VALUES ('bob', DEFAULT);
+
+query I
+SELECT age FROM t WHERE name = 'bob';
+----
+18
+
+# Nullable column omitted from INSERT stores NULL
+statement ok
+CREATE TABLE t_null (name TEXT NOT NULL, score INTEGER);
+
+statement ok
+INSERT INTO t_null(name) VALUES ('carol');
+
+query I
+SELECT score FROM t_null WHERE name = 'carol';
+----
+NULL
