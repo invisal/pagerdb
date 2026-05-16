@@ -31,6 +31,43 @@ fn evalAbs(args: []const EvalValue) EvalError!EvalValue {
     };
 }
 
+// NULLIF(a, b): returns NULL if a equals b, otherwise returns a.
+// Follows SQL three-valued logic: NULLIF(NULL, x) = NULL; NULLIF(x, NULL) = x.
+fn evalNullIf(args: []const EvalValue) EvalError!EvalValue {
+    if (args[0] == .null_) return .{ .null_ = {} };
+    if (args[1] == .null_) return args[0];
+    const equal = switch (args[0]) {
+        .int => |a| switch (args[1]) {
+            .int => |b| a == b,
+            .real => |b| @as(f64, @floatFromInt(a)) == b,
+            else => false,
+        },
+        .real => |a| switch (args[1]) {
+            .real => |b| a == b,
+            .int => |b| a == @as(f64, @floatFromInt(b)),
+            else => false,
+        },
+        .text => |a| switch (args[1]) {
+            .text => |b| std.mem.eql(u8, a, b),
+            else => false,
+        },
+        .bool_ => |a| switch (args[1]) {
+            .bool_ => |b| a == b,
+            else => false,
+        },
+        .null_ => unreachable,
+    };
+    return if (equal) .{ .null_ = {} } else args[0];
+}
+
+// COALESCE(a, b, ...): returns the first non-NULL argument, or NULL if all are NULL.
+fn evalCoalesce(args: []const EvalValue) EvalError!EvalValue {
+    for (args) |a| {
+        if (a != .null_) return a;
+    }
+    return .{ .null_ = {} };
+}
+
 // ── Registry ───────────────────────────────────────────────────────────────────
 //
 // To add a new built-in scalar function:
@@ -40,6 +77,8 @@ fn evalAbs(args: []const EvalValue) EvalError!EvalValue {
 
 const REGISTRY = [_]ScalarFunc{
     .{ .name = "abs", .min_args = 1, .max_args = 1, .eval = &evalAbs },
+    .{ .name = "nullif", .min_args = 2, .max_args = 2, .eval = &evalNullIf },
+    .{ .name = "coalesce", .min_args = 1, .max_args = std.math.maxInt(usize), .eval = &evalCoalesce },
 };
 
 pub fn find(name: []const u8) ?*const ScalarFunc {

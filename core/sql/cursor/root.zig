@@ -264,9 +264,14 @@ pub const AggregateCursor = struct {
 
                 const g = &groups.items[group_idx.?];
                 for (self.agg_specs, 0..) |spec, i| {
-                    const v: ?row_mod.Value = if (spec.col_idx) |col_idx| r.values[col_idx] else null;
+                    // null input_expr = COUNT(*): pass null to signal "count this row".
+                    // Otherwise evaluate the expression to get the per-row value.
+                    const v: ?row_mod.Value = if (spec.input_expr) |expr|
+                        evalValueToRowValue(try eval.evalExpr(expr, r.values, a))
+                    else
+                        null;
                     if (spec.distinct) {
-                        // col_idx is guaranteed non-null for DISTINCT specs (validated by planner).
+                        // input_expr is guaranteed non-null for DISTINCT specs (validated by planner).
                         const val = v.?;
                         // Skip SQL NULLs — same behaviour as the non-distinct path.
                         if (val == .null) continue;

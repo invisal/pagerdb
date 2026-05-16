@@ -162,7 +162,11 @@ fn runQuery(alloc: Allocator, db: *Database, path: []const u8, qry: parser.Query
     if (exec_result == .err) {
         if (print_error) {
             if (report) |buf| {
-                try bufPrint(alloc, buf, "## Failed Query\n\n**Location:** `{s}:{d}`\n\n**SLT:**\n```\nquery {s}{s}\n{s}\n```\n\n**Error:** query returned error: `{s}`\n", .{ path, qry.line, qry.type_string, sort_str, qry.sql, exec_result.err.message });
+                try bufPrint(alloc, buf, "## Failed Query\n\n**Location:** `{s}:{d}`\n\n**SLT:**\n```\nquery {s}{s}\n{s}\n```\n\n**Error:** query returned error: `{s}`\n\n### Expected\n\n", .{ path, qry.line, qry.type_string, sort_str, qry.sql, exec_result.err.message });
+                switch (qry.expected) {
+                    .values => |expected| try appendValuesCodeBlock(alloc, buf, qry.type_string.len, expected),
+                    .hash => |h| try bufPrint(alloc, buf, "{d} values hashing to `{s}`\n", .{ h.count, h.md5 }),
+                }
             } else {
                 std.debug.print("FAIL {s}:{d}: query returned error: {s}\n  sql: {s}\n", .{ path, qry.line, exec_result.err.message, qry.sql });
             }
