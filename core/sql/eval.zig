@@ -57,25 +57,32 @@ fn evalBinary(
     row_values: []const row.Value,
 ) EvalError!EvalValue {
     // SQL uses three-valued logic (TRUE/FALSE/NULL).  For AND/OR we must
-    // short-circuit to avoid evaluating the right side when the left side
-    // already determines the result.  This also prevents type errors when
-    // the right side contains invalid expressions guarded by NULL checks.
-    // Short-circuit AND / OR before evaluating both sides.
+    // short-circuit correctly: a definite FALSE dominates AND, a definite TRUE
+    // dominates OR, even when the other operand is NULL.
+    //
+    //   NULL AND FALSE = FALSE   (not NULL — FALSE dominates)
+    //   NULL AND TRUE  = NULL
+    //   NULL OR  TRUE  = TRUE    (not NULL — TRUE dominates)
+    //   NULL OR  FALSE = NULL
     if (b.op == .and_) {
         const left = try evalExpr(b.left, row_values, undefined);
-        if (left == .bool_ and !left.bool_) return .{ .bool_ = false };
+        // Definite false on the left: short-circuit without evaluating right.
+        if (left != .null_ and !isTruthy(left)) return .{ .bool_ = false };
         const right = try evalExpr(b.right, row_values, undefined);
+        // Definite false on the right (covers NULL AND FALSE = FALSE).
+        if (right != .null_ and !isTruthy(right)) return .{ .bool_ = false };
         if (left == .null_ or right == .null_) return .{ .null_ = {} };
-        return .{ .bool_ = isTruthy(left) and isTruthy(right) };
+        return .{ .bool_ = true };
     }
     if (b.op == .or_) {
         const left = try evalExpr(b.left, row_values, undefined);
-        if (left == .bool_ and left.bool_) return .{ .bool_ = true };
+        // Definite true on the left: short-circuit without evaluating right.
+        if (left != .null_ and isTruthy(left)) return .{ .bool_ = true };
         const right = try evalExpr(b.right, row_values, undefined);
-        if (left == .bool_ and right == .bool_) return .{ .bool_ = left.bool_ or right.bool_ };
-        if (left == .null_ and right == .null_) return .{ .null_ = {} };
-        if (right == .bool_ and right.bool_) return .{ .bool_ = true };
-        return .{ .null_ = {} };
+        // Definite true on the right (covers NULL OR TRUE = TRUE).
+        if (right != .null_ and isTruthy(right)) return .{ .bool_ = true };
+        if (left == .null_ or right == .null_) return .{ .null_ = {} };
+        return .{ .bool_ = false };
     }
 
     const left = try evalExpr(b.left, row_values, undefined);

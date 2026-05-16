@@ -202,7 +202,9 @@ fn formatValue(alloc: Allocator, val: anytype) ![]const u8 {
     return switch (val) {
         .null => alloc.dupe(u8, "NULL"),
         .int => |n| std.fmt.allocPrint(alloc, "{d}", .{n}),
-        .real => |f| std.fmt.allocPrint(alloc, "{d}", .{f}),
+        // Normalize -0.0 → 0.0 so output matches the reference tool (SQLite
+        // treats negative zero as zero for display purposes).
+        .real => |f| std.fmt.allocPrint(alloc, "{d}", .{if (f == 0.0) @as(f64, 0.0) else f}),
         .text => |s| alloc.dupe(u8, s),
         .blob => |b| std.fmt.allocPrint(alloc, "<blob {d}B>", .{b.len}),
     };
