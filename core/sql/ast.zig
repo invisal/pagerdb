@@ -44,11 +44,14 @@ pub const Expr = union(enum) {
     unary: *Unary,
     func_call: *FuncCall,
     cast: *Cast,
+    in_list: *InList,
 
     pub const Binary = struct { op: BinaryOp, left: Expr, right: Expr };
     pub const Unary = struct { op: UnaryOp, operand: Expr };
     pub const FuncCall = struct { name: []const u8, args: []Expr, distinct: bool = false };
     pub const Cast = struct { target_type: t.ColType, operand: Expr };
+    // expr [NOT] IN (val1, val2, ...) — scalar value list, not a subquery.
+    pub const InList = struct { operand: Expr, list: []Expr, negated: bool };
 
     /// Deep-clone the expression to a different allocator.
     /// Used when transferring expressions from the parser's arena to the catalog.
@@ -99,6 +102,17 @@ pub const Expr = union(enum) {
                 node.* = .{ .target_type = c.target_type, .operand = try c.operand.clone(allocator) };
                 break :blk .{ .cast = node };
             },
+            .in_list => |il| blk: {
+                const node = try allocator.create(InList);
+                const cloned_list = try allocator.alloc(Expr, il.list.len);
+                for (il.list, 0..) |item, i| cloned_list[i] = try item.clone(allocator);
+                node.* = .{
+                    .operand = try il.operand.clone(allocator),
+                    .list = cloned_list,
+                    .negated = il.negated,
+                };
+                break :blk .{ .in_list = node };
+            },
         };
     }
 
@@ -129,6 +143,12 @@ pub const Expr = union(enum) {
             .cast => |c| {
                 c.operand.deinit(allocator);
                 allocator.destroy(c);
+            },
+            .in_list => |il| {
+                il.operand.deinit(allocator);
+                for (il.list) |item| item.deinit(allocator);
+                allocator.free(il.list);
+                allocator.destroy(il);
             },
             else => {},
         }

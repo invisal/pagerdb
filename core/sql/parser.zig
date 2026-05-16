@@ -641,6 +641,23 @@ pub const Parser = struct {
 
     fn parseComparison(self: *Parser) ParseError!ast.Expr {
         const left = try self.parseAddSub();
+
+        // Detect NOT IN before the standard comparison operators so that
+        // "expr NOT IN (...)" is parsed as a single predicate rather than
+        // leaving NOT to be consumed by the outer parseNot() level.
+        const is_not_in = self.peek().kind == .kw_not and
+            self.pos + 1 < self.tokens.len and
+            self.tokens[self.pos + 1].kind == .kw_in;
+        if (is_not_in) {
+            _ = self.advance(); // NOT
+            _ = self.advance(); // IN
+            return self.parseInList(left, true);
+        }
+        if (self.peek().kind == .kw_in) {
+            _ = self.advance();
+            return self.parseInList(left, false);
+        }
+
         const op: ast.BinaryOp = switch (self.peek().kind) {
             .op_eq => .eq,
             .op_neq => .neq,
@@ -655,6 +672,26 @@ pub const Parser = struct {
         const node = try self.alloc().create(ast.Expr.Binary);
         node.* = .{ .op = op, .left = left, .right = right };
         return .{ .binary = node };
+    }
+
+    fn parseInList(self: *Parser, operand: ast.Expr, negated: bool) ParseError!ast.Expr {
+        _ = try self.expect(.lparen);
+        var list: std.ArrayList(ast.Expr) = .empty;
+        if (self.peek().kind != .rparen) {
+            try list.append(self.alloc(), try self.parseExpr());
+            while (self.peek().kind == .comma) {
+                _ = self.advance();
+                try list.append(self.alloc(), try self.parseExpr());
+            }
+        }
+        _ = try self.expect(.rparen);
+        const node = try self.alloc().create(ast.Expr.InList);
+        node.* = .{
+            .operand = operand,
+            .list = try list.toOwnedSlice(self.alloc()),
+            .negated = negated,
+        };
+        return .{ .in_list = node };
     }
 
     fn parseAddSub(self: *Parser) ParseError!ast.Expr {

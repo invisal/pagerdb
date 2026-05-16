@@ -38,6 +38,7 @@ pub const Expr = union(enum) {
     unary: *Unary,
     func_call: *FuncCall,
     cast: *Cast,
+    in_list: *InList,
 
     pub const Binary = struct { op: ast.BinaryOp, left: Expr, right: Expr };
     pub const Unary = struct { op: ast.UnaryOp, operand: Expr };
@@ -45,6 +46,7 @@ pub const Expr = union(enum) {
     // the same pattern as VTabScan storing *const VTab.
     pub const FuncCall = struct { func: *const sf.ScalarFunc, args: []Expr };
     pub const Cast = struct { target_type: t.ColType, operand: Expr };
+    pub const InList = struct { operand: Expr, list: []Expr, negated: bool };
 };
 
 // ── Aggregate spec ────────────────────────────────────────────────────────────
@@ -638,6 +640,11 @@ pub const LogicalPlanner = struct {
             },
             .binary => |b| containsAggCall(b.left) or containsAggCall(b.right),
             .unary => |u| containsAggCall(u.operand),
+            .in_list => |il| blk: {
+                if (containsAggCall(il.operand)) break :blk true;
+                for (il.list) |item| if (containsAggCall(item)) break :blk true;
+                break :blk false;
+            },
             else => false,
         };
     }
@@ -828,6 +835,10 @@ pub const LogicalPlanner = struct {
                 try self.collectAggSpecs(b.right, scan_schema, out);
             },
             .unary => |u| try self.collectAggSpecs(u.operand, scan_schema, out),
+            .in_list => |il| {
+                try self.collectAggSpecs(il.operand, scan_schema, out);
+                for (il.list) |item| try self.collectAggSpecs(item, scan_schema, out);
+            },
             else => {},
         }
     }
@@ -921,6 +932,19 @@ pub const LogicalPlanner = struct {
                 };
                 break :blk .{ .cast = node };
             },
+            .in_list => |il| blk: {
+                const node = try self.alloc().create(Expr.InList);
+                const resolved_list = try self.alloc().alloc(Expr, il.list.len);
+                for (il.list, 0..) |item, i| {
+                    resolved_list[i] = try self.resolveExprOverAgg(item, scan_schema, agg_specs, group_by_count, agg_out_schema);
+                }
+                node.* = .{
+                    .operand = try self.resolveExprOverAgg(il.operand, scan_schema, agg_specs, group_by_count, agg_out_schema),
+                    .list = resolved_list,
+                    .negated = il.negated,
+                };
+                break :blk .{ .in_list = node };
+            },
             .star => return PlanError.WildcardInExpression,
             .default_value => std.debug.panic("DEFAULT must be resolved during planning", .{}),
         };
@@ -982,6 +1006,17 @@ pub const LogicalPlanner = struct {
                     .operand = try self.resolveExpr(c.operand, schema),
                 };
                 break :blk .{ .cast = node };
+            },
+            .in_list => |il| blk: {
+                const node = try self.alloc().create(Expr.InList);
+                const resolved_list = try self.alloc().alloc(Expr, il.list.len);
+                for (il.list, 0..) |item, i| resolved_list[i] = try self.resolveExpr(item, schema);
+                node.* = .{
+                    .operand = try self.resolveExpr(il.operand, schema),
+                    .list = resolved_list,
+                    .negated = il.negated,
+                };
+                break :blk .{ .in_list = node };
             },
             // DEFAULT should have been rewritten to the column's default expression
             // during INSERT/UPDATE planning. It must not reach this stage.

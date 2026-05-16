@@ -23,6 +23,7 @@ pub fn evalExpr(
         .unary => |u| try evalUnary(u, row_values),
         .func_call => |f| try evalFunc(f, row_values, alloc),
         .cast => |c| try evalCast(c, row_values, alloc),
+        .in_list => |il| try evalInList(il, row_values, alloc),
     };
 }
 
@@ -95,6 +96,34 @@ fn evalBinary(
         .div => try evalArith(.div, left, right),
         .and_, .or_ => unreachable,
     };
+}
+
+// SQL IN semantics (three-valued logic):
+//   - If operand is NULL → NULL
+//   - If any list element equals operand → TRUE (or FALSE if negated)
+//   - If any list element is NULL (and none matched) → NULL
+//   - Otherwise → FALSE (or TRUE if negated)
+fn evalInList(
+    il: *lp.Expr.InList,
+    row_values: []const row.Value,
+    alloc: std.mem.Allocator,
+) EvalError!EvalValue {
+    const operand = try evalExpr(il.operand, row_values, alloc);
+    if (operand == .null_) return .{ .null_ = {} };
+
+    var saw_null = false;
+    for (il.list) |item| {
+        const val = try evalExpr(item, row_values, alloc);
+        if (val == .null_) {
+            saw_null = true;
+            continue;
+        }
+        if (compareValues(operand, val) == .eq) {
+            return .{ .bool_ = !il.negated };
+        }
+    }
+    if (saw_null) return .{ .null_ = {} };
+    return .{ .bool_ = il.negated };
 }
 
 fn evalUnary(

@@ -42,6 +42,7 @@ pub const TokenKind = enum {
     kw_distinct,
     kw_all,
     kw_cast,
+    kw_in,
     // Literals
     lit_int, // int_val is valid
     lit_float, // float_val is valid
@@ -110,6 +111,7 @@ pub const TokenKind = enum {
             .kw_distinct => "DISTINCT",
             .kw_all => "ALL",
             .kw_cast => "CAST",
+            .kw_in => "IN",
             .identifier => "identifier",
             .lit_int => "integer",
             .lit_float => "float",
@@ -195,6 +197,7 @@ const keyword_pairs = [_]struct { text: []const u8, kind: TokenKind }{
     .{ .text = "distinct", .kind = .kw_distinct },
     .{ .text = "all", .kind = .kw_all },
     .{ .text = "cast", .kind = .kw_cast },
+    .{ .text = "in", .kind = .kw_in },
 };
 
 fn lookupKeyword(word: []const u8) ?TokenKind {
