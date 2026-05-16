@@ -289,6 +289,103 @@ fn evalValueToRowValue(v: eval.EvalValue) row_mod.Value {
     };
 }
 
+// ── Sort cursor ────────────────────────────────────────────────────────────────
+
+// Compare two Values for ORDER BY.  Nulls sort before all non-null values
+// (NULLS FIRST semantics).  int and real are compared numerically with cross-
+// type promotion.  text and blob are compared lexicographically.
+fn compareValues(a: row_mod.Value, b: row_mod.Value) std.math.Order {
+    const a_null = a == .null;
+    const b_null = b == .null;
+    if (a_null and b_null) return .eq;
+    if (a_null) return .lt;
+    if (b_null) return .gt;
+    return switch (a) {
+        .int => |ai| switch (b) {
+            .int => |bi| std.math.order(ai, bi),
+            .real => |bf| std.math.order(@as(f64, @floatFromInt(ai)), bf),
+            else => .lt, // int < text < blob
+        },
+        .real => |af| switch (b) {
+            .real => |bf| std.math.order(af, bf),
+            .int => |bi| std.math.order(af, @as(f64, @floatFromInt(bi))),
+            else => .lt,
+        },
+        .text => |as| switch (b) {
+            .text => |bs| std.mem.order(u8, as, bs),
+            .int, .real => .gt, // text > int/real
+            else => .lt, // text < blob
+        },
+        .blob => |ab| switch (b) {
+            .blob => |bb| std.mem.order(u8, ab, bb),
+            else => .gt, // blob > everything else
+        },
+        .null => unreachable, // handled above
+    };
+}
+
+// Blocking sort: consumes all input rows, pre-evaluates sort key expressions,
+// sorts in-place, then streams the result out in BATCH_SIZE chunks.
+// Sits above Project so col_idx values in sort keys index into the projected
+// values array (0-based position in SELECT output), not the raw scan columns.
+pub const SortCursor = struct {
+    input: *Cursor,
+    keys: []lp.SortKey,
+    result: ?[]Row, // null until first next() triggers compute()
+    pos: usize,
+
+    pub fn next(self: *SortCursor, a: Allocator) !?[]Row {
+        if (self.result == null) self.result = try self.compute(a);
+        const rows = self.result.?;
+        if (self.pos >= rows.len) return null;
+        const end = @min(self.pos + BATCH_SIZE, rows.len);
+        defer self.pos = end;
+        return rows[self.pos..end];
+    }
+
+    pub fn deinit(self: *SortCursor, a: Allocator) void {
+        self.input.deinit(a);
+        a.destroy(self.input);
+    }
+
+    // Pairs a row with its pre-evaluated sort key values so the comparison
+    // function can run without error propagation.
+    const SortRow = struct {
+        row: Row,
+        key_values: []row_mod.Value,
+    };
+
+    fn compute(self: *SortCursor, a: Allocator) ![]Row {
+        var sort_rows: std.ArrayList(SortRow) = .empty;
+
+        // Materialise all rows and eagerly evaluate the sort key expressions.
+        while (try self.input.next(a)) |batch| {
+            for (batch) |r| {
+                const key_vals = try a.alloc(row_mod.Value, self.keys.len);
+                for (self.keys, 0..) |key, i| {
+                    const ev = try eval.evalExpr(key.expr, r.values, a);
+                    key_vals[i] = evalValueToRowValue(ev);
+                }
+                try sort_rows.append(a, .{ .row = r, .key_values = key_vals });
+            }
+        }
+
+        std.sort.block(SortRow, sort_rows.items, self.keys, struct {
+            fn lessThan(keys: []lp.SortKey, l: SortRow, r: SortRow) bool {
+                for (keys, 0..) |key, i| {
+                    const ord = compareValues(l.key_values[i], r.key_values[i]);
+                    if (ord != .eq) return if (key.descending) ord == .gt else ord == .lt;
+                }
+                return false; // all keys equal: preserve original order
+            }
+        }.lessThan);
+
+        const out = try a.alloc(Row, sort_rows.items.len);
+        for (sort_rows.items, 0..) |sr, i| out[i] = sr.row;
+        return out;
+    }
+};
+
 // ── Join cursor ────────────────────────────────────────────────────────────────
 
 // Nested-loop inner join with a materialized right side.
@@ -366,6 +463,7 @@ pub const Cursor = union(enum) {
     filter: *FilterCursor,
     project: *ProjectCursor,
     aggregate: *AggregateCursor,
+    sort: *SortCursor,
     join: *JoinCursor,
 
     pub fn open(plan: pp.PhysicalPlan, db: *Db, a: Allocator) !Cursor {
@@ -415,6 +513,13 @@ pub const Cursor = union(enum) {
                 };
                 break :blk .{ .aggregate = ac };
             },
+            .sort => |n| blk: {
+                const sc = try a.create(SortCursor);
+                const input_ptr = try a.create(Cursor);
+                input_ptr.* = try open(n.input.*, db, a);
+                sc.* = .{ .input = input_ptr, .keys = n.keys, .result = null, .pos = 0 };
+                break :blk .{ .sort = sc };
+            },
             .join => |n| blk: {
                 // Materialize the right side once so each left row can scan it
                 // without re-opening a cursor.
@@ -447,6 +552,7 @@ pub const Cursor = union(enum) {
             .filter => |f| f.next(a),
             .project => |p| p.next(a),
             .aggregate => |ag| ag.next(a),
+            .sort => |s| s.next(a),
             .join => |j| j.next(a),
         };
     }
@@ -456,6 +562,7 @@ pub const Cursor = union(enum) {
             .filter => |f| f.deinit(a),
             .project => |p| p.deinit(a),
             .aggregate => |ag| ag.deinit(a),
+            .sort => |s| s.deinit(a),
             .join => |j| j.deinit(a),
             else => {},
         }

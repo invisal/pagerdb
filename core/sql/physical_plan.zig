@@ -72,6 +72,12 @@ pub const PhysicalAggregate = struct {
     schema: lp.Schema,
 };
 
+pub const PhysicalSort = struct {
+    input: *PhysicalPlan,
+    keys: []lp.SortKey,
+    schema: lp.Schema,
+};
+
 pub const PhysicalPlan = union(enum) {
     seq_scan: PhysicalSeqScan,
     vtab_scan: PhysicalVTabScan,
@@ -80,6 +86,7 @@ pub const PhysicalPlan = union(enum) {
     filter: *PhysicalFilter,
     project: *PhysicalProject,
     aggregate: *PhysicalAggregate,
+    sort: *PhysicalSort,
     join: *PhysicalJoin,
     insert: PhysicalInsert,
     update: PhysicalUpdate,
@@ -98,6 +105,7 @@ pub const PhysicalPlan = union(enum) {
             .filter => |n| n.schema,
             .project => |n| n.schema,
             .aggregate => |n| n.schema,
+            .sort => |n| n.schema,
             .join => |n| n.schema,
             .insert => |n| n.schema,
             .update => |n| n.schema,
@@ -132,6 +140,7 @@ pub const PhysicalPlanner = struct {
             .filter => |n| try self.planFilter(n),
             .project => |n| try self.planProject(n),
             .aggregate => |n| try self.planAggregate(n),
+            .sort => |n| try self.planSort(n),
             .join => |n| try self.planJoin(n),
             .insert => |n| .{ .insert = .{ .table = n.table, .values = n.values, .schema = n.schema } },
             .update => |n| try self.planUpdate(n),
@@ -200,6 +209,14 @@ pub const PhysicalPlanner = struct {
             .schema = node.schema,
         };
         return .{ .aggregate = agg };
+    }
+
+    fn planSort(self: *PhysicalPlanner, node: *lp.Sort) !PhysicalPlan {
+        const phys_input = try self.alloc().create(PhysicalPlan);
+        phys_input.* = try self.plan(node.input.*);
+        const sort = try self.alloc().create(PhysicalSort);
+        sort.* = .{ .input = phys_input, .keys = node.keys, .schema = node.schema };
+        return .{ .sort = sort };
     }
 
     fn planJoin(self: *PhysicalPlanner, node: *lp.Join) !PhysicalPlan {

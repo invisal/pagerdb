@@ -35,6 +35,9 @@ pub const TokenKind = enum {
     kw_as,
     kw_group,
     kw_by,
+    kw_order,
+    kw_asc,
+    kw_desc,
     // Literals
     lit_int, // int_val is valid
     lit_float, // float_val is valid
@@ -115,6 +118,9 @@ const keyword_pairs = [_]struct { text: []const u8, kind: TokenKind }{
     .{ .text = "as", .kind = .kw_as },
     .{ .text = "group", .kind = .kw_group },
     .{ .text = "by", .kind = .kw_by },
+    .{ .text = "order", .kind = .kw_order },
+    .{ .text = "asc", .kind = .kw_asc },
+    .{ .text = "desc", .kind = .kw_desc },
 };
 
 fn lookupKeyword(word: []const u8) ?TokenKind {

@@ -159,12 +159,20 @@ pub const JoinClause = struct {
     condition: Expr, // ON predicate
 };
 
+pub const OrderDirection = enum { asc, desc };
+
+pub const OrderByItem = struct {
+    expr: Expr,
+    direction: OrderDirection,
+};
+
 pub const SelectStmt = struct {
     table_ref: ?TableRef, // null means SELECT without FROM (e.g. SELECT 1)
     joins: []JoinClause, // INNER JOIN clauses in order (empty = no joins)
     columns: []SelectCol, // len = 0 means SELECT *
     where: ?Expr,
     group_by: []Expr = &.{}, // GROUP BY expressions; empty = no grouping
+    order_by: []OrderByItem = &.{}, // ORDER BY items; empty = no ordering
 };
 
 pub const InsertStmt = struct {

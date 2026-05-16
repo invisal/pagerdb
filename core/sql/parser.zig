@@ -173,29 +173,87 @@ pub const Parser = struct {
             _ = self.advance();
         }
 
-        const from_tok = self.advance();
-        switch (from_tok.kind) {
-            .kw_from => {},
-            .eof => {
-                // SELECT without FROM
-                return ast.SelectStmt{
-                    .table_ref = null,
-                    .joins = &.{},
-                    .columns = try columns.toOwnedSlice(self.alloc()),
-                    .where = null,
-                    .group_by = &.{},
-                };
-            },
-            else => {
-                self.error_message = try std.fmt.allocPrint(self.alloc(), "[{d}] Unexpected token FROM but found {s}", .{ from_tok.start, self.tokenText(from_tok) });
+        // A SELECT can omit FROM entirely (e.g. SELECT 1 + 2, SELECT 1 ORDER BY 1).
+        // Peek at the next token instead of consuming it so that ORDER BY / GROUP BY
+        // / WHERE that immediately follow columns are handled by the shared parsing
+        // below rather than triggering an error here.
+        const has_from = self.peek().kind == .kw_from;
+        if (!has_from) {
+            // Only allow clause keywords or EOF after the column list when there is no FROM.
+            const nk = self.peek().kind;
+            if (nk != .eof and nk != .kw_order and nk != .kw_group and nk != .kw_where) {
+                const tok = self.advance();
+                self.error_message = try std.fmt.allocPrint(self.alloc(), "[{d}] Unexpected token FROM but found {s}", .{ tok.start, self.tokenText(tok) });
                 return ParseError.UnexpectedToken;
-            },
+            }
+        }
+
+        // If there is no FROM clause we skip the table-ref / join parsing
+        // and go straight to the optional WHERE / GROUP BY / ORDER BY below.
+        var opt_table_ref: ?ast.TableRef = null;
+        var joins: std.ArrayList(ast.JoinClause) = .empty;
+        if (has_from) {
+            _ = self.advance(); // consume FROM
+        }
+
+        if (!has_from) {
+            // Jump to optional clause parsing (WHERE / GROUP BY / ORDER BY).
+            // Declare the variables that the shared block below expects.
+            var where: ?ast.Expr = null;
+            var group_by: std.ArrayList(ast.Expr) = .empty;
+
+            if (self.peek().kind == .kw_where) {
+                _ = self.advance();
+                where = try self.parseExpr();
+            }
+
+            if (self.peek().kind == .kw_group) {
+                _ = self.advance();
+                _ = try self.expect(.kw_by);
+                while (true) {
+                    try group_by.append(self.alloc(), try self.parseExpr());
+                    if (self.peek().kind != .comma) break;
+                    _ = self.advance();
+                }
+            }
+
+            var order_by: std.ArrayList(ast.OrderByItem) = .empty;
+            if (self.peek().kind == .kw_order) {
+                _ = self.advance();
+                _ = try self.expect(.kw_by);
+                while (true) {
+                    const expr = try self.parseExpr();
+                    const direction: ast.OrderDirection = switch (self.peek().kind) {
+                        .kw_desc => blk: {
+                            _ = self.advance();
+                            break :blk .desc;
+                        },
+                        .kw_asc => blk: {
+                            _ = self.advance();
+                            break :blk .asc;
+                        },
+                        else => .asc,
+                    };
+                    try order_by.append(self.alloc(), .{ .expr = expr, .direction = direction });
+                    if (self.peek().kind != .comma) break;
+                    _ = self.advance();
+                }
+            }
+
+            return ast.SelectStmt{
+                .table_ref = null,
+                .joins = &.{},
+                .columns = try columns.toOwnedSlice(self.alloc()),
+                .where = where,
+                .group_by = try group_by.toOwnedSlice(self.alloc()),
+                .order_by = try order_by.toOwnedSlice(self.alloc()),
+            };
         }
 
         const qualified_name = try self.parseQualifiedName();
 
         // Parse optional TVF args and optional AS alias for the FROM table.
-        const table_ref: ast.TableRef = if (self.peek().kind == .lparen) blk: {
+        opt_table_ref = if (self.peek().kind == .lparen) blk: {
             _ = self.advance();
             var args: std.ArrayList(ast.Expr) = .empty;
             if (self.peek().kind != .rparen) {
@@ -220,7 +278,6 @@ pub const Parser = struct {
 
         // Parse optional INNER JOIN clauses. Each right-hand side can be a plain
         // table or a TVF, both with an optional AS alias.
-        var joins: std.ArrayList(ast.JoinClause) = .empty;
         while (self.peek().kind == .kw_inner) {
             _ = self.advance(); // consume INNER
             _ = try self.expect(.kw_join);
@@ -269,12 +326,36 @@ pub const Parser = struct {
             }
         }
 
+        var order_by: std.ArrayList(ast.OrderByItem) = .empty;
+        if (self.peek().kind == .kw_order) {
+            _ = self.advance();
+            _ = try self.expect(.kw_by);
+            while (true) {
+                const expr = try self.parseExpr();
+                const direction: ast.OrderDirection = switch (self.peek().kind) {
+                    .kw_desc => blk: {
+                        _ = self.advance();
+                        break :blk .desc;
+                    },
+                    .kw_asc => blk: {
+                        _ = self.advance();
+                        break :blk .asc;
+                    },
+                    else => .asc,
+                };
+                try order_by.append(self.alloc(), .{ .expr = expr, .direction = direction });
+                if (self.peek().kind != .comma) break;
+                _ = self.advance();
+            }
+        }
+
         return ast.SelectStmt{
-            .table_ref = table_ref,
+            .table_ref = opt_table_ref,
             .joins = try joins.toOwnedSlice(self.alloc()),
             .columns = try columns.toOwnedSlice(self.alloc()),
             .where = where,
             .group_by = try group_by.toOwnedSlice(self.alloc()),
+            .order_by = try order_by.toOwnedSlice(self.alloc()),
         };
     }
 
