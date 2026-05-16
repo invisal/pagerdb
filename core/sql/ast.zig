@@ -153,10 +153,14 @@ pub const TableRef = union(enum) {
     func: TableFunc, // TVF:          FROM __page_slots(1)
 };
 
-// One INNER JOIN clause: the right-hand table and its ON condition.
+pub const JoinType = enum { inner, cross };
+
+// One JOIN clause: join type, right-hand table, and optional ON condition.
+// CROSS JOIN (explicit or via comma syntax) has no condition; INNER JOIN always does.
 pub const JoinClause = struct {
-    table_ref: TableRef, // right-hand table
-    condition: Expr, // ON predicate
+    join_type: JoinType,
+    table_ref: TableRef,
+    condition: ?Expr, // null for CROSS JOIN
 };
 
 pub const OrderDirection = enum { asc, desc };
@@ -169,7 +173,7 @@ pub const OrderByItem = struct {
 pub const SelectStmt = struct {
     distinct: bool = false, // SELECT DISTINCT removes duplicate output rows
     table_ref: ?TableRef, // null means SELECT without FROM (e.g. SELECT 1)
-    joins: []JoinClause, // INNER JOIN clauses in order (empty = no joins)
+    joins: []JoinClause, // JOIN clauses in order (empty = no joins)
     columns: []SelectCol, // len = 0 means SELECT *
     where: ?Expr,
     group_by: []Expr = &.{}, // GROUP BY expressions; empty = no grouping

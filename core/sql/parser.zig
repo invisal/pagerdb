@@ -255,63 +255,28 @@ pub const Parser = struct {
             };
         }
 
-        const qualified_name = try self.parseQualifiedName();
+        opt_table_ref = try self.parseTableRef();
 
-        // Parse optional TVF args and optional AS alias for the FROM table.
-        opt_table_ref = if (self.peek().kind == .lparen) blk: {
-            _ = self.advance();
-            var args: std.ArrayList(ast.Expr) = .empty;
-            if (self.peek().kind != .rparen) {
-                while (true) {
-                    try args.append(self.alloc(), try self.parseExpr());
-                    if (self.peek().kind != .comma) break;
-                    _ = self.advance();
-                }
-            }
-            _ = try self.expect(.rparen);
-            break :blk .{ .func = .{
-                .schema = qualified_name.schema,
-                .name = qualified_name.name,
-                .args = try args.toOwnedSlice(self.alloc()),
-                .alias = try self.parseOptionalAlias(),
-            } };
-        } else .{ .name = .{
-            .schema = qualified_name.schema,
-            .name = qualified_name.name,
-            .alias = try self.parseOptionalAlias(),
-        } };
-
-        // Parse optional INNER JOIN clauses. Each right-hand side can be a plain
-        // table or a TVF, both with an optional AS alias.
-        while (self.peek().kind == .kw_inner) {
-            _ = self.advance(); // consume INNER
-            _ = try self.expect(.kw_join);
-            const join_qname = try self.parseQualifiedName();
-            const join_table_ref: ast.TableRef = if (self.peek().kind == .lparen) blk: {
-                _ = self.advance();
-                var args: std.ArrayList(ast.Expr) = .empty;
-                if (self.peek().kind != .rparen) {
-                    while (true) {
-                        try args.append(self.alloc(), try self.parseExpr());
-                        if (self.peek().kind != .comma) break;
-                        _ = self.advance();
-                    }
-                }
-                _ = try self.expect(.rparen);
-                break :blk .{ .func = .{
-                    .schema = join_qname.schema,
-                    .name = join_qname.name,
-                    .args = try args.toOwnedSlice(self.alloc()),
-                    .alias = try self.parseOptionalAlias(),
-                } };
-            } else .{ .name = .{
-                .schema = join_qname.schema,
-                .name = join_qname.name,
-                .alias = try self.parseOptionalAlias(),
-            } };
-            _ = try self.expect(.kw_on);
-            const condition = try self.parseExpr();
-            try joins.append(self.alloc(), .{ .table_ref = join_table_ref, .condition = condition });
+        // Parse optional JOIN clauses: INNER JOIN … ON …, CROSS JOIN …, or
+        // comma-separated tables (implicit CROSS JOIN: FROM a, b).
+        while (true) {
+            if (self.peek().kind == .comma) {
+                _ = self.advance(); // consume ','
+                const tref = try self.parseTableRef();
+                try joins.append(self.alloc(), .{ .join_type = .cross, .table_ref = tref, .condition = null });
+            } else if (self.peek().kind == .kw_inner) {
+                _ = self.advance(); // consume INNER
+                _ = try self.expect(.kw_join);
+                const tref = try self.parseTableRef();
+                _ = try self.expect(.kw_on);
+                const condition = try self.parseExpr();
+                try joins.append(self.alloc(), .{ .join_type = .inner, .table_ref = tref, .condition = condition });
+            } else if (self.peek().kind == .kw_cross) {
+                _ = self.advance(); // consume CROSS
+                _ = try self.expect(.kw_join);
+                const tref = try self.parseTableRef();
+                try joins.append(self.alloc(), .{ .join_type = .cross, .table_ref = tref, .condition = null });
+            } else break;
         }
 
         var where: ?ast.Expr = null;
@@ -401,6 +366,35 @@ pub const Parser = struct {
             return try self.alloc().dupe(u8, self.tokenText(tok));
         }
         return null;
+    }
+
+    // Parse a table reference: a qualified name optionally followed by TVF args
+    // and an optional AS alias.  Used for both the FROM table and JOIN tables.
+    fn parseTableRef(self: *Parser) ParseError!ast.TableRef {
+        const qname = try self.parseQualifiedName();
+        if (self.peek().kind == .lparen) {
+            _ = self.advance();
+            var args: std.ArrayList(ast.Expr) = .empty;
+            if (self.peek().kind != .rparen) {
+                while (true) {
+                    try args.append(self.alloc(), try self.parseExpr());
+                    if (self.peek().kind != .comma) break;
+                    _ = self.advance();
+                }
+            }
+            _ = try self.expect(.rparen);
+            return .{ .func = .{
+                .schema = qname.schema,
+                .name = qname.name,
+                .args = try args.toOwnedSlice(self.alloc()),
+                .alias = try self.parseOptionalAlias(),
+            } };
+        }
+        return .{ .name = .{
+            .schema = qname.schema,
+            .name = qname.name,
+            .alias = try self.parseOptionalAlias(),
+        } };
     }
 
     // ── INSERT ────────────────────────────────────────────────────────────────

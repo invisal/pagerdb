@@ -471,7 +471,7 @@ pub const JoinCursor = struct {
     right_pos: usize, // current position within right_rows for this left row
     left_batch: []Row, // current batch pulled from left cursor
     left_pos: usize, // position within left_batch
-    condition: lp.Expr,
+    condition: ?lp.Expr, // null for CROSS JOIN (every left/right pair emitted)
 
     // Pull combined (left ++ right) rows that satisfy the join condition.
     // Returns up to BATCH_SIZE rows per call, or null when exhausted.
@@ -502,8 +502,11 @@ pub const JoinCursor = struct {
                 @memcpy(combined[0..left_row.values.len], left_row.values);
                 @memcpy(combined[left_row.values.len..], right_row.values);
 
-                const ev = try eval.evalExpr(self.condition, combined, a);
-                if (eval.isTruthy(ev)) {
+                const should_emit = if (self.condition) |cond| blk: {
+                    const ev = try eval.evalExpr(cond, combined, a);
+                    break :blk eval.isTruthy(ev);
+                } else true;
+                if (should_emit) {
                     try out.append(a, .{ .rowid = left_row.rowid, .values = combined });
                 }
 

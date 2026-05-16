@@ -128,6 +128,76 @@ test "INNER JOIN with WHERE filters after join" {
     try std.testing.expectEqual(@as(usize, 2), result.result_set.rows.len);
 }
 
+test "CROSS JOIN explicit syntax produces cartesian product" {
+    const alloc = std.testing.allocator;
+    const h = try makeMemoryDb(alloc, .{
+        .schema = &.{
+            "CREATE TABLE colors (name TEXT NOT NULL)",
+            "CREATE TABLE sizes (label TEXT NOT NULL)",
+        },
+    });
+    defer h.deinit();
+
+    try exec(alloc, h.db, "INSERT INTO colors VALUES ('red')");
+    try exec(alloc, h.db, "INSERT INTO colors VALUES ('blue')");
+    try exec(alloc, h.db, "INSERT INTO sizes VALUES ('S')");
+    try exec(alloc, h.db, "INSERT INTO sizes VALUES ('M')");
+    try exec(alloc, h.db, "INSERT INTO sizes VALUES ('L')");
+
+    var result = try execute(alloc, h.db, "SELECT * FROM colors CROSS JOIN sizes");
+    defer result.deinit();
+
+    // 2 colors × 3 sizes = 6 rows
+    try std.testing.expectEqual(@as(usize, 6), result.result_set.rows.len);
+    try std.testing.expectEqual(@as(usize, 2), result.result_set.rows[0].values.len);
+}
+
+test "CROSS JOIN comma syntax produces cartesian product" {
+    const alloc = std.testing.allocator;
+    const h = try makeMemoryDb(alloc, .{
+        .schema = &.{
+            "CREATE TABLE a (x INT NOT NULL)",
+            "CREATE TABLE b (y INT NOT NULL)",
+        },
+    });
+    defer h.deinit();
+
+    try exec(alloc, h.db, "INSERT INTO a VALUES (1)");
+    try exec(alloc, h.db, "INSERT INTO a VALUES (2)");
+    try exec(alloc, h.db, "INSERT INTO b VALUES (10)");
+    try exec(alloc, h.db, "INSERT INTO b VALUES (20)");
+    try exec(alloc, h.db, "INSERT INTO b VALUES (30)");
+
+    var result = try execute(alloc, h.db, "SELECT * FROM a, b");
+    defer result.deinit();
+
+    // 2 rows × 3 rows = 6 rows
+    try std.testing.expectEqual(@as(usize, 6), result.result_set.rows.len);
+    try std.testing.expectEqual(@as(usize, 2), result.result_set.rows[0].values.len);
+}
+
+test "CROSS JOIN with WHERE filters after cartesian product" {
+    const alloc = std.testing.allocator;
+    const h = try makeMemoryDb(alloc, .{
+        .schema = &.{
+            "CREATE TABLE a (x INT NOT NULL)",
+            "CREATE TABLE b (y INT NOT NULL)",
+        },
+    });
+    defer h.deinit();
+
+    try exec(alloc, h.db, "INSERT INTO a VALUES (1)");
+    try exec(alloc, h.db, "INSERT INTO a VALUES (2)");
+    try exec(alloc, h.db, "INSERT INTO b VALUES (1)");
+    try exec(alloc, h.db, "INSERT INTO b VALUES (2)");
+
+    // Cartesian product is 4 rows; WHERE a.x = b.y keeps only matching pairs
+    var result = try execute(alloc, h.db, "SELECT * FROM a, b WHERE a.x = b.y");
+    defer result.deinit();
+
+    try std.testing.expectEqual(@as(usize, 2), result.result_set.rows.len);
+}
+
 test "INNER JOIN with qualified SELECT columns" {
     const alloc = std.testing.allocator;
     const h = try makeMemoryDb(alloc, .{

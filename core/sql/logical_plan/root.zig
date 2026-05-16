@@ -150,12 +150,13 @@ pub const Distinct = struct {
     schema: Schema, // same shape as input
 };
 
-// Nested-loop inner join.  The schema merges both tables' columns with
-// right-side indices offset by the number of left-side columns.
+// Nested-loop join.  The schema merges both tables' columns with right-side
+// indices offset by the number of left-side columns.  condition is null for
+// CROSS JOIN (every left/right pair is emitted).
 pub const Join = struct {
     left: *LogicalPlan,
     right: *LogicalPlan,
-    condition: Expr, // ON predicate; col_idx values reference the merged schema
+    condition: ?Expr, // null for CROSS JOIN; ON predicate for INNER JOIN
     schema: Schema, // combined schema (left cols then right cols)
 };
 
@@ -252,16 +253,19 @@ pub const LogicalPlanner = struct {
         var scan_schema = first.schema;
         var current = first.plan;
 
-        // Build Join nodes for each INNER JOIN clause.  Each join merges the
-        // accumulated schema on the left with the new table schema on the right,
-        // offsetting right-side column indices so they don't collide with left-
-        // side indices in the combined values array produced by JoinCursor.
+        // Build Join nodes for each JOIN clause.  Each join merges the accumulated
+        // schema on the left with the new table schema on the right, offsetting
+        // right-side column indices so they don't collide with left-side indices
+        // in the combined values array produced by JoinCursor.
         for (stmt.joins) |join_clause| {
             const right = try self.buildScan(join_clause.table_ref);
 
             const left_count = scan_schema.columns.len;
             const merged_schema = try self.mergeSchemas(scan_schema, right.schema, left_count);
-            const condition = try self.resolveExpr(join_clause.condition, merged_schema);
+            const condition = if (join_clause.condition) |cond|
+                try self.resolveExpr(cond, merged_schema)
+            else
+                null;
             const join_node = try self.alloc().create(Join);
             join_node.* = .{
                 .left = try self.box(current),
