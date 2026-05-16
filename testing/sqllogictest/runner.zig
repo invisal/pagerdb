@@ -33,7 +33,8 @@ pub const RunResult = struct {
 
 // show_errors: print up to this many individual failure messages per file.
 // 0 = suppress all individual failure output (summary-only mode).
-pub fn runFile(alloc: Allocator, io: std.Io, path: []const u8, show_errors: usize) !RunResult {
+// fail_fast: stop at the first failure, print full expected/got tables, then dump DB state.
+pub fn runFile(alloc: Allocator, io: std.Io, path: []const u8, show_errors: usize, fail_fast: bool) !RunResult {
     const std_file = try Dir.cwd().openFile(io, path, .{ .mode = .read_only });
     defer std_file.close(io);
 
@@ -67,13 +68,17 @@ pub fn runFile(alloc: Allocator, io: std.Io, path: []const u8, show_errors: usiz
                     skip_next = false;
                     continue;
                 }
-                const print_err = show_errors > 0 and failures_shown < show_errors;
+                const print_err = fail_fast or (show_errors > 0 and failures_shown < show_errors);
                 const ok = try runStatement(alloc, db, path, stmt, print_err);
                 if (ok) {
                     result.passed += 1;
                 } else {
-                    if (print_err) failures_shown += 1;
+                    if (print_err and !fail_fast) failures_shown += 1;
                     result.failed += 1;
+                    if (fail_fast) {
+                        dumpTables(alloc, db);
+                        return result;
+                    }
                 }
             },
             .query => |qry| {
@@ -81,13 +86,17 @@ pub fn runFile(alloc: Allocator, io: std.Io, path: []const u8, show_errors: usiz
                     skip_next = false;
                     continue;
                 }
-                const print_err = show_errors > 0 and failures_shown < show_errors;
-                const ok = try runQuery(alloc, db, path, qry, print_err);
+                const print_err = fail_fast or (show_errors > 0 and failures_shown < show_errors);
+                const ok = try runQuery(alloc, db, path, qry, print_err, fail_fast);
                 if (ok) {
                     result.passed += 1;
                 } else {
-                    if (print_err) failures_shown += 1;
+                    if (print_err and !fail_fast) failures_shown += 1;
                     result.failed += 1;
+                    if (fail_fast) {
+                        dumpTables(alloc, db);
+                        return result;
+                    }
                 }
             },
         }
@@ -120,7 +129,7 @@ fn runStatement(alloc: Allocator, db: *Database, path: []const u8, stmt: parser.
     return true;
 }
 
-fn runQuery(alloc: Allocator, db: *Database, path: []const u8, qry: parser.QueryRecord, print_error: bool) !bool {
+fn runQuery(alloc: Allocator, db: *Database, path: []const u8, qry: parser.QueryRecord, print_error: bool, verbose: bool) !bool {
     var exec_result = try execute(alloc, db, qry.sql);
     defer exec_result.deinit();
 
@@ -160,36 +169,50 @@ fn runQuery(alloc: Allocator, db: *Database, path: []const u8, qry: parser.Query
     switch (qry.expected) {
         .values => |expected| {
             if (actual.items.len != expected.len) {
-                if (print_error)
+                if (print_error) {
                     std.debug.print("FAIL {s}:{d}: expected {d} values, got {d}\n  sql: {s}\n", .{
                         path, qry.line, expected.len, actual.items.len, qry.sql,
                     });
+                    if (verbose) {
+                        printValues("expected", expected, col_count);
+                        printValues("got", actual.items, col_count);
+                    }
+                }
                 return false;
             }
             for (actual.items, expected, 0..) |act, exp, idx| {
                 if (!std.mem.eql(u8, act, exp)) {
-                    if (print_error)
+                    if (print_error) {
                         std.debug.print("FAIL {s}:{d}: value[{d}] expected '{s}', got '{s}'\n  sql: {s}\n", .{
                             path, qry.line, idx, exp, act, qry.sql,
                         });
+                        if (verbose) {
+                            printValues("expected", expected, col_count);
+                            printValues("got", actual.items, col_count);
+                        }
+                    }
                     return false;
                 }
             }
         },
         .hash => |h| {
             if (actual.items.len != h.count) {
-                if (print_error)
+                if (print_error) {
                     std.debug.print("FAIL {s}:{d}: expected {d} values, got {d}\n  sql: {s}\n", .{
                         path, qry.line, h.count, actual.items.len, qry.sql,
                     });
+                    if (verbose) printValues("got", actual.items, col_count);
+                }
                 return false;
             }
             const digest = md5OfValues(actual.items);
             if (!std.mem.eql(u8, &digest, h.md5)) {
-                if (print_error)
+                if (print_error) {
                     std.debug.print("FAIL {s}:{d}: hash mismatch (expected {s}, got {s})\n  sql: {s}\n", .{
                         path, qry.line, h.md5, digest, qry.sql,
                     });
+                    if (verbose) printValues("got", actual.items, col_count);
+                }
                 return false;
             }
         },
@@ -244,6 +267,94 @@ fn sortValues(values: [][]const u8) void {
             return std.mem.order(u8, a, b) == .lt;
         }
     }.lt);
+}
+
+// Prints a flat list of values as rows, used for verbose failure output.
+fn printValues(label: []const u8, values: []const []const u8, col_count: usize) void {
+    const rows = if (col_count > 0) values.len / col_count else 0;
+    std.debug.print("  {s} ({d} row(s)):\n", .{ label, rows });
+    if (values.len == 0 or col_count == 0) {
+        std.debug.print("    (empty)\n", .{});
+        return;
+    }
+    var i: usize = 0;
+    while (i < values.len) : (i += col_count) {
+        std.debug.print("    ", .{});
+        const end = @min(i + col_count, values.len);
+        for (values[i..end]) |v| {
+            std.debug.print("{s:<20}", .{v});
+        }
+        std.debug.print("\n", .{});
+    }
+}
+
+// Dumps every user table's contents using information_schema and SELECT *.
+fn dumpTables(alloc: Allocator, db: *Database) void {
+    std.debug.print("\n--- Database state ---\n", .{});
+
+    var tables_result = execute(alloc, db, "SELECT table_name FROM information_schema.tables") catch |err| {
+        std.debug.print("(could not list tables: {s})\n", .{@errorName(err)});
+        std.debug.print("---\n", .{});
+        return;
+    };
+    defer tables_result.deinit();
+
+    if (tables_result != .result_set or tables_result.result_set.rows.len == 0) {
+        std.debug.print("(no tables)\n", .{});
+        std.debug.print("---\n", .{});
+        return;
+    }
+
+    for (tables_result.result_set.rows) |row| {
+        const name = switch (row.values[0]) {
+            .text => |s| s,
+            else => continue,
+        };
+
+        std.debug.print("table: {s}\n", .{name});
+
+        var sql_buf: [256]u8 = undefined;
+        const sql = std.fmt.bufPrint(&sql_buf, "SELECT * FROM {s}", .{name}) catch {
+            std.debug.print("  (table name too long)\n", .{});
+            continue;
+        };
+
+        var data = execute(alloc, db, sql) catch |err| {
+            std.debug.print("  (error: {s})\n", .{@errorName(err)});
+            continue;
+        };
+        defer data.deinit();
+
+        if (data != .result_set) {
+            std.debug.print("  (no result)\n", .{});
+            continue;
+        }
+
+        const rs = &data.result_set;
+
+        for (rs.columns, 0..) |col, i| {
+            if (i > 0) std.debug.print("  ", .{});
+            std.debug.print("{s}", .{col});
+        }
+        std.debug.print("\n", .{});
+
+        if (rs.rows.len == 0) {
+            std.debug.print("  (empty)\n", .{});
+            continue;
+        }
+
+        for (rs.rows) |data_row| {
+            for (data_row.values, 0..) |val, i| {
+                if (i > 0) std.debug.print("  ", .{});
+                const s = formatValue(alloc, val) catch "?";
+                defer alloc.free(s);
+                std.debug.print("{s}", .{s});
+            }
+            std.debug.print("\n", .{});
+        }
+    }
+
+    std.debug.print("---\n", .{});
 }
 
 // Computes the MD5 of all values joined by newlines (each value followed by '\n'),
