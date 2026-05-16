@@ -24,6 +24,12 @@ pub fn evalExpr(
         .func_call => |f| try evalFunc(f, row_values, alloc),
         .cast => |c| try evalCast(c, row_values, alloc),
         .in_list => |il| try evalInList(il, row_values, alloc),
+        .case_ => |c| try evalCase(c, row_values, alloc),
+        .is_null => |n| blk: {
+            const v = try evalExpr(n.operand, row_values, alloc);
+            const is_null_val = v == .null_;
+            break :blk .{ .bool_ = if (n.negated) !is_null_val else is_null_val };
+        },
     };
 }
 
@@ -183,6 +189,20 @@ fn evalCast(
             .null_ => unreachable,
         },
     };
+}
+
+// Searched CASE: evaluate each WHEN condition in order; return the THEN value
+// for the first true condition.  If none match, return the ELSE value (or NULL).
+fn evalCase(
+    c: *lp.Expr.Case,
+    row_values: []const row.Value,
+    alloc: std.mem.Allocator,
+) EvalError!EvalValue {
+    for (c.when_clauses) |w| {
+        const cond = try evalExpr(w.cond, row_values, alloc);
+        if (isTruthy(cond)) return evalExpr(w.then, row_values, alloc);
+    }
+    return if (c.else_) |e| evalExpr(e, row_values, alloc) else .{ .null_ = {} };
 }
 
 fn evalFunc(

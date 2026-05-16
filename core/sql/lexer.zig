@@ -44,6 +44,12 @@ pub const TokenKind = enum {
     kw_cast,
     kw_in,
     kw_between,
+    kw_case,
+    kw_when,
+    kw_then,
+    kw_else,
+    kw_end,
+    kw_is,
     // Literals
     lit_int, // int_val is valid
     lit_float, // float_val is valid
@@ -114,6 +120,12 @@ pub const TokenKind = enum {
             .kw_cast => "CAST",
             .kw_in => "IN",
             .kw_between => "BETWEEN",
+            .kw_case => "CASE",
+            .kw_when => "WHEN",
+            .kw_then => "THEN",
+            .kw_else => "ELSE",
+            .kw_end => "END",
+            .kw_is => "IS",
             .identifier => "identifier",
             .lit_int => "integer",
             .lit_float => "float",
@@ -201,6 +213,12 @@ const keyword_pairs = [_]struct { text: []const u8, kind: TokenKind }{
     .{ .text = "cast", .kind = .kw_cast },
     .{ .text = "in", .kind = .kw_in },
     .{ .text = "between", .kind = .kw_between },
+    .{ .text = "case", .kind = .kw_case },
+    .{ .text = "when", .kind = .kw_when },
+    .{ .text = "then", .kind = .kw_then },
+    .{ .text = "else", .kind = .kw_else },
+    .{ .text = "end", .kind = .kw_end },
+    .{ .text = "is", .kind = .kw_is },
 };
 
 fn lookupKeyword(word: []const u8) ?TokenKind {

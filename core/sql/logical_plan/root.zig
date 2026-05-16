@@ -39,6 +39,8 @@ pub const Expr = union(enum) {
     func_call: *FuncCall,
     cast: *Cast,
     in_list: *InList,
+    case_: *Case,
+    is_null: *IsNull,
 
     pub const Binary = struct { op: ast.BinaryOp, left: Expr, right: Expr };
     pub const Unary = struct { op: ast.UnaryOp, operand: Expr };
@@ -47,16 +49,22 @@ pub const Expr = union(enum) {
     pub const FuncCall = struct { func: *const sf.ScalarFunc, args: []Expr };
     pub const Cast = struct { target_type: t.ColType, operand: Expr };
     pub const InList = struct { operand: Expr, list: []Expr, negated: bool };
+    pub const Case = struct {
+        pub const WhenClause = struct { cond: Expr, then: Expr };
+        when_clauses: []WhenClause,
+        else_: ?Expr,
+    };
+    pub const IsNull = struct { operand: Expr, negated: bool };
 };
 
 // ── Aggregate spec ────────────────────────────────────────────────────────────
 //
-// Pairs a resolved aggregate function with its input column.
-// col_idx == null means COUNT(*) — count every row regardless of value.
+// Pairs a resolved aggregate function with its per-row input expression.
+// input_expr == null means COUNT(*) — count every row regardless of value.
 // distinct == true means only unique non-null values are fed to step().
 pub const AggCallSpec = struct {
     func: *const agg_mod.AggFunc,
-    col_idx: ?usize,
+    input_expr: ?Expr, // null = COUNT(*); otherwise evaluated per row
     distinct: bool = false,
 };
 
@@ -653,6 +661,15 @@ pub const LogicalPlanner = struct {
                 break :blk false;
             },
             .between => |b| containsAggCall(b.operand) or containsAggCall(b.low) or containsAggCall(b.high),
+            .case_ => |c| blk: {
+                for (c.when_clauses) |w| {
+                    if (containsAggCall(w.cond) or containsAggCall(w.then)) break :blk true;
+                }
+                if (c.else_) |e| if (containsAggCall(e)) break :blk true;
+                break :blk false;
+            },
+            .is_null => |n| containsAggCall(n.operand),
+            .cast => |c| containsAggCall(c.operand),
             // Literals, column references, and other leaves can never be aggregates.
             else => false,
         };
@@ -831,10 +848,10 @@ pub const LogicalPlanner = struct {
         switch (expr) {
             .func_call => |f| {
                 if (agg_mod.find(f.name)) |agg_func| {
-                    const col_idx = try self.resolveAggArgToColIdx(f.args, scan_schema);
-                    // DISTINCT requires a real column argument, not a wildcard/no-arg.
-                    if (f.distinct and col_idx == null) return PlanError.WrongArgCount;
-                    try out.append(self.alloc(), .{ .func = agg_func, .col_idx = col_idx, .distinct = f.distinct });
+                    const input_expr = try self.resolveAggArg(f.args, scan_schema);
+                    // DISTINCT requires a real argument, not a wildcard/no-arg.
+                    if (f.distinct and input_expr == null) return PlanError.WrongArgCount;
+                    try out.append(self.alloc(), .{ .func = agg_func, .input_expr = input_expr, .distinct = f.distinct });
                 } else {
                     for (f.args) |arg| try self.collectAggSpecs(arg, scan_schema, out);
                 }
@@ -853,22 +870,29 @@ pub const LogicalPlanner = struct {
                 try self.collectAggSpecs(b.low, scan_schema, out);
                 try self.collectAggSpecs(b.high, scan_schema, out);
             },
+            .case_ => |c| {
+                for (c.when_clauses) |w| {
+                    try self.collectAggSpecs(w.cond, scan_schema, out);
+                    try self.collectAggSpecs(w.then, scan_schema, out);
+                }
+                if (c.else_) |e| try self.collectAggSpecs(e, scan_schema, out);
+            },
+            .is_null => |n| try self.collectAggSpecs(n.operand, scan_schema, out),
+            .cast => |c| try self.collectAggSpecs(c.operand, scan_schema, out),
             else => {},
         }
     }
 
-    // Resolve the argument list of an aggregate call to a nullable column index.
+    // Resolve the argument list of an aggregate call to a nullable resolved Expr.
     // Zero args → null (behaves like COUNT(*)).
     // One star arg → null (COUNT(*)).
-    // One col_ref arg → resolved column index.
-    fn resolveAggArgToColIdx(self: *LogicalPlanner, args: []const ast.Expr, scan_schema: Schema) PlanError!?usize {
+    // Any other scalar expression → resolved Expr evaluated per row.
+    fn resolveAggArg(self: *LogicalPlanner, args: []const ast.Expr, scan_schema: Schema) PlanError!?Expr {
         if (args.len == 0) return null;
         if (args.len > 1) return PlanError.WrongArgCount;
         return switch (args[0]) {
             .star => null,
-            .col_ref => |n| try self.resolveColName(n, scan_schema),
-            .qual_col_ref => |q| if (q.col) |c| try self.resolveQualColName(q.table, c, scan_schema) else PlanError.WildcardInExpression,
-            else => PlanError.TypeMismatch,
+            else => try self.resolveExpr(args[0], scan_schema),
         };
     }
 
@@ -915,10 +939,10 @@ pub const LogicalPlanner = struct {
                 if (agg_mod.find(f.name)) |_| {
                     // Aggregate call: find the matching AggCallSpec and return a
                     // col_idx into the aggregate output values slice.
-                    const arg_col_idx = try self.resolveAggArgToColIdx(f.args, scan_schema);
+                    const arg_expr = try self.resolveAggArg(f.args, scan_schema);
                     for (agg_specs, 0..) |spec, i| {
                         if (std.ascii.eqlIgnoreCase(spec.func.name, f.name) and
-                            spec.col_idx == arg_col_idx and
+                            exprEql(spec.input_expr, arg_expr) and
                             spec.distinct == f.distinct)
                         {
                             break :blk Expr{ .col_idx = group_by_count + i };
@@ -977,6 +1001,29 @@ pub const LogicalPlanner = struct {
                     combined.* = .{ .op = .or_, .left = .{ .binary = cmp_lo }, .right = .{ .binary = cmp_hi } };
                 }
                 break :blk Expr{ .binary = combined };
+            },
+            .case_ => |c| blk: {
+                const node = try self.alloc().create(Expr.Case);
+                const resolved_whens = try self.alloc().alloc(Expr.Case.WhenClause, c.when_clauses.len);
+                for (c.when_clauses, 0..) |w, i| {
+                    resolved_whens[i] = .{
+                        .cond = try self.resolveExprOverAgg(w.cond, scan_schema, agg_specs, group_by_count, agg_out_schema),
+                        .then = try self.resolveExprOverAgg(w.then, scan_schema, agg_specs, group_by_count, agg_out_schema),
+                    };
+                }
+                node.* = .{
+                    .when_clauses = resolved_whens,
+                    .else_ = if (c.else_) |e| try self.resolveExprOverAgg(e, scan_schema, agg_specs, group_by_count, agg_out_schema) else null,
+                };
+                break :blk .{ .case_ = node };
+            },
+            .is_null => |n| blk: {
+                const node = try self.alloc().create(Expr.IsNull);
+                node.* = .{
+                    .operand = try self.resolveExprOverAgg(n.operand, scan_schema, agg_specs, group_by_count, agg_out_schema),
+                    .negated = n.negated,
+                };
+                break :blk .{ .is_null = node };
             },
             .star => return PlanError.WildcardInExpression,
             .default_value => std.debug.panic("DEFAULT must be resolved during planning", .{}),
@@ -1056,6 +1103,26 @@ pub const LogicalPlanner = struct {
             // The operand is resolved twice (two col_idx nodes pointing at the same
             // column), which is safe because evaluation is pure — no side effects.
             .between => |b| try self.resolveBetween(b.operand, b.low, b.high, b.negated, schema),
+            .case_ => |c| blk: {
+                const node = try self.alloc().create(Expr.Case);
+                const resolved_whens = try self.alloc().alloc(Expr.Case.WhenClause, c.when_clauses.len);
+                for (c.when_clauses, 0..) |w, i| {
+                    resolved_whens[i] = .{
+                        .cond = try self.resolveExpr(w.cond, schema),
+                        .then = try self.resolveExpr(w.then, schema),
+                    };
+                }
+                node.* = .{
+                    .when_clauses = resolved_whens,
+                    .else_ = if (c.else_) |e| try self.resolveExpr(e, schema) else null,
+                };
+                break :blk .{ .case_ = node };
+            },
+            .is_null => |n| blk: {
+                const node = try self.alloc().create(Expr.IsNull);
+                node.* = .{ .operand = try self.resolveExpr(n.operand, schema), .negated = n.negated };
+                break :blk .{ .is_null = node };
+            },
             // DEFAULT should have been rewritten to the column's default expression
             // during INSERT/UPDATE planning. It must not reach this stage.
             .default_value => std.debug.panic("DEFAULT must be resolved during planning", .{}),
@@ -1306,3 +1373,60 @@ pub const LogicalPlanner = struct {
         return ptr;
     }
 };
+
+// Structural equality for nullable aggregate input expressions.
+// Used to deduplicate identical aggregate calls within the same SELECT list
+// (e.g. COUNT(*) + COUNT(*) shares a single Aggregate output column).
+fn exprEql(a: ?Expr, b: ?Expr) bool {
+    if (a == null and b == null) return true;
+    if (a == null or b == null) return false;
+    return exprEqlInner(a.?, b.?);
+}
+
+fn exprEqlInner(a: Expr, b: Expr) bool {
+    return switch (a) {
+        .int_lit => |av| b == .int_lit and b.int_lit == av,
+        .float_lit => |av| b == .float_lit and b.float_lit == av,
+        .str_lit => |av| b == .str_lit and std.mem.eql(u8, av, b.str_lit),
+        .bool_lit => |av| b == .bool_lit and b.bool_lit == av,
+        .null_lit => b == .null_lit,
+        .col_idx => |av| b == .col_idx and b.col_idx == av,
+        .binary => |av| b == .binary and
+            av.op == b.binary.op and
+            exprEqlInner(av.left, b.binary.left) and
+            exprEqlInner(av.right, b.binary.right),
+        .unary => |av| b == .unary and
+            av.op == b.unary.op and
+            exprEqlInner(av.operand, b.unary.operand),
+        .func_call => |av| b == .func_call and
+            av.func == b.func_call.func and
+            av.args.len == b.func_call.args.len and blk: {
+            for (av.args, b.func_call.args) |aa, ba| {
+                if (!exprEqlInner(aa, ba)) break :blk false;
+            }
+            break :blk true;
+        },
+        .cast => |av| b == .cast and
+            av.target_type == b.cast.target_type and
+            exprEqlInner(av.operand, b.cast.operand),
+        .in_list => |av| b == .in_list and
+            av.negated == b.in_list.negated and
+            av.list.len == b.in_list.list.len and
+            exprEqlInner(av.operand, b.in_list.operand) and blk: {
+            for (av.list, b.in_list.list) |ai, bi| {
+                if (!exprEqlInner(ai, bi)) break :blk false;
+            }
+            break :blk true;
+        },
+        .is_null => |av| b == .is_null and av.negated == b.is_null.negated and exprEqlInner(av.operand, b.is_null.operand),
+        .case_ => |av| b == .case_ and
+            av.when_clauses.len == b.case_.when_clauses.len and blk: {
+            for (av.when_clauses, b.case_.when_clauses) |aw, bw| {
+                if (!exprEqlInner(aw.cond, bw.cond) or !exprEqlInner(aw.then, bw.then)) break :blk false;
+            }
+            const else_eql = (av.else_ == null and b.case_.else_ == null) or
+                (av.else_ != null and b.case_.else_ != null and exprEqlInner(av.else_.?, b.case_.else_.?));
+            break :blk else_eql;
+        },
+    };
+}

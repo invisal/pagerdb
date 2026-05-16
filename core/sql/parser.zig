@@ -675,6 +675,17 @@ pub const Parser = struct {
             return self.parseBetween(left, false);
         }
 
+        // IS [NOT] NULL — SQL null check, parsed before the regular comparison operators.
+        if (self.peek().kind == .kw_is) {
+            _ = self.advance(); // consume IS
+            const negated = self.peek().kind == .kw_not;
+            if (negated) _ = self.advance(); // consume NOT
+            _ = try self.expect(.kw_null);
+            const node = try self.alloc().create(ast.Expr.IsNull);
+            node.* = .{ .operand = left, .negated = negated };
+            return .{ .is_null = node };
+        }
+
         const op: ast.BinaryOp = switch (self.peek().kind) {
             .op_eq => .eq,
             .op_neq => .neq,
@@ -866,6 +877,40 @@ pub const Parser = struct {
                 const node = try self.alloc().create(ast.Expr.Cast);
                 node.* = .{ .target_type = target_type, .operand = operand };
                 return .{ .cast = node };
+            },
+            .kw_case => {
+                _ = self.advance();
+                // Simple CASE (CASE input WHEN val ...) vs searched CASE (CASE WHEN cond ...).
+                // Both are normalised to searched CASE here: simple WHEN clauses become
+                // WHEN input = val, so the rest of the pipeline only handles one form.
+                const input: ?ast.Expr = if (self.peek().kind != .kw_when)
+                    try self.parseExpr()
+                else
+                    null;
+                var when_clauses: std.ArrayList(ast.Expr.Case.WhenClause) = .empty;
+                while (self.peek().kind == .kw_when) {
+                    _ = self.advance(); // consume WHEN
+                    var cond = try self.parseExpr();
+                    if (input) |inp| {
+                        const eq_node = try self.alloc().create(ast.Expr.Binary);
+                        eq_node.* = .{ .op = .eq, .left = inp, .right = cond };
+                        cond = .{ .binary = eq_node };
+                    }
+                    _ = try self.expect(.kw_then);
+                    const then_ = try self.parseExpr();
+                    try when_clauses.append(self.alloc(), .{ .cond = cond, .then = then_ });
+                }
+                const else_: ?ast.Expr = if (self.peek().kind == .kw_else) blk: {
+                    _ = self.advance();
+                    break :blk try self.parseExpr();
+                } else null;
+                _ = try self.expect(.kw_end);
+                const node = try self.alloc().create(ast.Expr.Case);
+                node.* = .{
+                    .when_clauses = try when_clauses.toOwnedSlice(self.alloc()),
+                    .else_ = else_,
+                };
+                return .{ .case_ = node };
             },
             .lparen => {
                 _ = self.advance();

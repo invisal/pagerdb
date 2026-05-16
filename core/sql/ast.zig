@@ -46,6 +46,8 @@ pub const Expr = union(enum) {
     cast: *Cast,
     in_list: *InList,
     between: *Between,
+    case_: *Case,
+    is_null: *IsNull,
 
     pub const Binary = struct { op: BinaryOp, left: Expr, right: Expr };
     pub const Unary = struct { op: UnaryOp, operand: Expr };
@@ -55,6 +57,16 @@ pub const Expr = union(enum) {
     pub const InList = struct { operand: Expr, list: []Expr, negated: bool };
     // expr [NOT] BETWEEN low AND high — desugars to (>= low AND <= high) in the planner.
     pub const Between = struct { operand: Expr, low: Expr, high: Expr, negated: bool };
+    // expr IS [NOT] NULL — SQL null check (distinct from = NULL which returns NULL).
+    pub const IsNull = struct { operand: Expr, negated: bool };
+    // CASE WHEN cond THEN result ... [ELSE result] END (searched form).
+    // Simple CASE (CASE input WHEN val THEN result END) is converted to
+    // the searched form during parsing by rewriting each WHEN val as WHEN input = val.
+    pub const Case = struct {
+        pub const WhenClause = struct { cond: Expr, then: Expr };
+        when_clauses: []WhenClause,
+        else_: ?Expr, // null means no ELSE (result is NULL when no clause matches)
+    };
 
     /// Deep-clone the expression to a different allocator.
     /// Used when transferring expressions from the parser's arena to the catalog.
@@ -126,6 +138,26 @@ pub const Expr = union(enum) {
                 };
                 break :blk .{ .between = node };
             },
+            .is_null => |n| blk: {
+                const node = try allocator.create(IsNull);
+                node.* = .{ .operand = try n.operand.clone(allocator), .negated = n.negated };
+                break :blk .{ .is_null = node };
+            },
+            .case_ => |c| blk: {
+                const node = try allocator.create(Case);
+                const cloned_whens = try allocator.alloc(Case.WhenClause, c.when_clauses.len);
+                for (c.when_clauses, 0..) |w, i| {
+                    cloned_whens[i] = .{
+                        .cond = try w.cond.clone(allocator),
+                        .then = try w.then.clone(allocator),
+                    };
+                }
+                node.* = .{
+                    .when_clauses = cloned_whens,
+                    .else_ = if (c.else_) |e| try e.clone(allocator) else null,
+                };
+                break :blk .{ .case_ = node };
+            },
         };
     }
 
@@ -168,6 +200,19 @@ pub const Expr = union(enum) {
                 b.low.deinit(allocator);
                 b.high.deinit(allocator);
                 allocator.destroy(b);
+            },
+            .is_null => |n| {
+                n.operand.deinit(allocator);
+                allocator.destroy(n);
+            },
+            .case_ => |c| {
+                for (c.when_clauses) |w| {
+                    w.cond.deinit(allocator);
+                    w.then.deinit(allocator);
+                }
+                allocator.free(c.when_clauses);
+                if (c.else_) |e| e.deinit(allocator);
+                allocator.destroy(c);
             },
             else => {},
         }
