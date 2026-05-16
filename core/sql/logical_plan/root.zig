@@ -125,6 +125,22 @@ pub const Aggregate = struct {
     schema: Schema, // [group_key cols, agg result cols]
 };
 
+// One key in an ORDER BY clause, resolved against the Project's output schema.
+// col_idx values in expr refer to 0-based positions in the projected values
+// slice (not scan-level indices), so the SortCursor can index into them directly.
+pub const SortKey = struct {
+    expr: Expr,
+    descending: bool,
+};
+
+// Blocking sort node: consumes all input rows then emits them sorted.
+// Sits above Project so ORDER BY positions refer to SELECT output columns.
+pub const Sort = struct {
+    input: *LogicalPlan,
+    keys: []SortKey,
+    schema: Schema, // same shape as input; Sort doesn't add or remove columns
+};
+
 // Nested-loop inner join.  The schema merges both tables' columns with
 // right-side indices offset by the number of left-side columns.
 pub const Join = struct {
@@ -141,6 +157,7 @@ pub const LogicalPlan = union(enum) {
     filter: *Filter,
     project: *Project,
     aggregate: *Aggregate,
+    sort: *Sort,
     join: *Join,
     insert: LogicalInsert,
     update: LogicalUpdate,
@@ -157,11 +174,12 @@ pub const LogicalPlan = union(enum) {
             .filter => |n| n.schema,
             .project => |n| n.schema,
             .aggregate => |n| n.schema,
+            .sort => |n| n.schema,
             .join => |n| n.schema,
             .insert => |n| n.schema,
             .update => |n| n.schema,
             .delete => |n| n.schema,
-            .create_table, .begin, .commit, .rollback => Schema{ .table = "", .columns = &.{} },
+            .const_scan, .create_table, .begin, .commit, .rollback => Schema{ .table = "", .columns = &.{} },
         };
     }
 };
@@ -259,7 +277,15 @@ pub const LogicalPlanner = struct {
         // If the query has GROUP BY or aggregate function calls in the SELECT list,
         // route to the aggregate planning path which inserts an Aggregate node.
         if (needsAggregate(stmt)) {
-            return self.planSelectAgg(stmt, current, scan_schema);
+            var result = try self.planSelectAgg(stmt, current, scan_schema);
+            if (stmt.order_by.len > 0) {
+                const proj_schema = result.schema();
+                const keys = try self.resolveOrderByKeys(stmt.order_by, proj_schema.columns, proj_schema.table);
+                const sort_node = try self.alloc().create(Sort);
+                sort_node.* = .{ .input = try self.box(result), .keys = keys, .schema = proj_schema };
+                result = .{ .sort = sort_node };
+            }
+            return result;
         }
 
         // Always wrap in Project so hidden metadata cols (__rowid etc.) are
@@ -372,6 +398,14 @@ pub const LogicalPlanner = struct {
                 .schema = proj_schema,
             };
             current = .{ .project = project };
+        }
+
+        if (stmt.order_by.len > 0) {
+            const proj_schema = current.schema();
+            const keys = try self.resolveOrderByKeys(stmt.order_by, proj_schema.columns, proj_schema.table);
+            const sort_node = try self.alloc().create(Sort);
+            sort_node.* = .{ .input = try self.box(current), .keys = keys, .schema = proj_schema };
+            current = .{ .sort = sort_node };
         }
 
         return current;
@@ -917,6 +951,48 @@ pub const LogicalPlanner = struct {
         }
         self.setError("Column '{s}' does not exist", .{name});
         return PlanError.ColumnNotFound;
+    }
+
+    // Build SortKey slice from ORDER BY AST items, resolved against the Project's
+    // output columns.  A "projected resolution schema" is synthesised where each
+    // column's index equals its 0-based position in the projected values slice so
+    // that col_idx values in the resulting Expr nodes index correctly into the row
+    // values produced by ProjectCursor.
+    fn resolveOrderByKeys(
+        self: *LogicalPlanner,
+        order_by: []const ast.OrderByItem,
+        proj_cols: []const SchemaCol,
+        proj_table: []const u8,
+    ) PlanError![]SortKey {
+        // Build a resolution schema where index = position in projected output.
+        const res_cols = try self.alloc().alloc(SchemaCol, proj_cols.len);
+        for (proj_cols, 0..) |col, i| {
+            res_cols[i] = .{
+                .name = col.name,
+                .table = col.table,
+                .col_type = col.col_type,
+                .nullable = col.nullable,
+                .index = i,
+            };
+        }
+        const res_schema = Schema{ .table = proj_table, .columns = res_cols };
+
+        const keys = try self.alloc().alloc(SortKey, order_by.len);
+        for (order_by, 0..) |item, i| {
+            const expr: Expr = switch (item.expr) {
+                // Positional reference: ORDER BY 1 → col at position 0.
+                .int_lit => |pos| blk: {
+                    if (pos < 1 or @as(usize, @intCast(pos)) > proj_cols.len) {
+                        self.setError("ORDER BY position {d} is out of range (query has {d} output columns)", .{ pos, proj_cols.len });
+                        return PlanError.ColumnNotFound;
+                    }
+                    break :blk .{ .col_idx = @intCast(pos - 1) };
+                },
+                else => try self.resolveExpr(item.expr, res_schema),
+            };
+            keys[i] = .{ .expr = expr, .descending = item.direction == .desc };
+        }
+        return keys;
     }
 
     // Resolve a table-qualified column reference (tbl.col) to its merged index.
