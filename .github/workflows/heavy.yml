@@ -53,7 +53,28 @@ jobs:
           rm -rf /tmp/slt-upstream
       - name: Run sqllogictest suite
         run: |
+          mkdir -p pages
           echo '## SQLLogicTest Results' >> "$GITHUB_STEP_SUMMARY"
           printf '```\n' >> "$GITHUB_STEP_SUMMARY"
-          zig build slt -- --dir testing/sqllogictest/upstream 2>&1 | tee -a "$GITHUB_STEP_SUMMARY" || true
+          zig build slt -- --dir testing/sqllogictest/upstream --json pages/sqllogictest.json --commit ${{ github.sha }} 2>&1 | tee -a "$GITHUB_STEP_SUMMARY" || true
           printf '```\n' >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload Pages artifact
+        if: always()
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: pages/
+
+  deploy-slt-results:
+    name: Deploy SLT Results to Pages
+    needs: sqllogictest
+    if: always()
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/deploy-pages@v4
+        id: deploy
