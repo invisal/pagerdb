@@ -147,8 +147,9 @@ pub const Parser = struct {
     fn parseSelect(self: *Parser) ParseError!ast.SelectStmt {
         _ = try self.expect(.kw_select);
 
+        // DISTINCT keeps only unique rows; ALL (the default) keeps all rows.
         const distinct = self.peek().kind == .kw_distinct;
-        if (distinct) _ = self.advance();
+        if (distinct or self.peek().kind == .kw_all) _ = self.advance();
 
         var columns: std.ArrayList(ast.SelectCol) = .empty;
 
