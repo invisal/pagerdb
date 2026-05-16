@@ -10,4 +10,5 @@ test {
     _ = @import("alias_test.zig");
     _ = @import("agg_test.zig");
     _ = @import("order_by_test.zig");
+    _ = @import("distinct_test.zig");
 }

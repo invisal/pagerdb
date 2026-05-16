@@ -67,7 +67,7 @@ pub const Executor = struct {
 
     pub fn exec(self: *Executor, plan: pp.PhysicalPlan) !ExecResult {
         return switch (plan) {
-            .seq_scan, .vtab_scan, .const_scan, .point_lookup, .filter, .project, .aggregate, .sort, .join => .{ .result_set = try self.execQuery(plan) },
+            else => .{ .result_set = try self.execQuery(plan) },
             .insert => |n| .{ .affected = try self.execInsert(n) },
             .update => |n| .{ .affected = try self.execUpdate(n) },
             .delete => |n| .{ .affected = try self.execDelete(n) },

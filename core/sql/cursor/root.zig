@@ -386,6 +386,79 @@ pub const SortCursor = struct {
     }
 };
 
+// ── Distinct cursor ────────────────────────────────────────────────────────────
+
+// Blocking deduplication: materializes all input rows into a hash-based seen
+// set, then streams out the first occurrence of each unique row.  Uses the
+// same hash+collision-chain strategy as AggregateCursor so NULL, text, and
+// blob values are compared correctly (not just by pointer).
+pub const DistinctCursor = struct {
+    input: *Cursor,
+    col_count: usize,
+    result: ?[]Row,
+    pos: usize,
+
+    pub fn next(self: *DistinctCursor, a: Allocator) !?[]Row {
+        if (self.result == null) self.result = try self.compute(a);
+        const rows = self.result.?;
+        if (self.pos >= rows.len) return null;
+        const end = @min(self.pos + BATCH_SIZE, rows.len);
+        defer self.pos = end;
+        return rows[self.pos..end];
+    }
+
+    pub fn deinit(self: *DistinctCursor, a: Allocator) void {
+        self.input.deinit(a);
+        a.destroy(self.input);
+    }
+
+    fn compute(self: *DistinctCursor, a: Allocator) ![]Row {
+        // Build a full-column index array so we can reuse hashGroupRow/groupKeyMatches.
+        const all_cols = try a.alloc(usize, self.col_count);
+        defer a.free(all_cols);
+        for (all_cols, 0..) |*c, i| c.* = i;
+
+        // seen_keys: one entry per unique row, holds a copy of that row's values.
+        // buckets: maps hash → list of indices into seen_keys (collision chain).
+        var seen_keys: std.ArrayList([]row_mod.Value) = .empty;
+        var buckets = std.AutoHashMap(u64, std.ArrayListUnmanaged(usize)).init(a);
+        defer {
+            var it = buckets.valueIterator();
+            while (it.next()) |b| b.deinit(a);
+            buckets.deinit();
+        }
+
+        var output: std.ArrayList(Row) = .empty;
+
+        while (try self.input.next(a)) |batch| {
+            for (batch) |r| {
+                const h = hashGroupRow(r.values, all_cols);
+                var found = false;
+                if (buckets.getPtr(h)) |bucket| {
+                    for (bucket.items) |idx| {
+                        if (groupKeyMatches(seen_keys.items[idx], r.values, all_cols)) {
+                            found = true;
+                            break;
+                        }
+                    }
+                }
+                if (!found) {
+                    const key_copy = try a.alloc(row_mod.Value, r.values.len);
+                    for (r.values, 0..) |v, i| key_copy[i] = try v.clone(a);
+                    try seen_keys.append(a, key_copy);
+                    const new_idx = seen_keys.items.len - 1;
+                    const gop = try buckets.getOrPut(h);
+                    if (!gop.found_existing) gop.value_ptr.* = .empty;
+                    try gop.value_ptr.append(a, new_idx);
+                    try output.append(a, r);
+                }
+            }
+        }
+
+        return try output.toOwnedSlice(a);
+    }
+};
+
 // ── Join cursor ────────────────────────────────────────────────────────────────
 
 // Nested-loop inner join with a materialized right side.
@@ -464,6 +537,7 @@ pub const Cursor = union(enum) {
     project: *ProjectCursor,
     aggregate: *AggregateCursor,
     sort: *SortCursor,
+    distinct: *DistinctCursor,
     join: *JoinCursor,
 
     pub fn open(plan: pp.PhysicalPlan, db: *Db, a: Allocator) !Cursor {
@@ -520,6 +594,13 @@ pub const Cursor = union(enum) {
                 sc.* = .{ .input = input_ptr, .keys = n.keys, .result = null, .pos = 0 };
                 break :blk .{ .sort = sc };
             },
+            .distinct => |n| blk: {
+                const dc = try a.create(DistinctCursor);
+                const input_ptr = try a.create(Cursor);
+                input_ptr.* = try open(n.input.*, db, a);
+                dc.* = .{ .input = input_ptr, .col_count = n.schema.columns.len, .result = null, .pos = 0 };
+                break :blk .{ .distinct = dc };
+            },
             .join => |n| blk: {
                 // Materialize the right side once so each left row can scan it
                 // without re-opening a cursor.
@@ -553,6 +634,7 @@ pub const Cursor = union(enum) {
             .project => |p| p.next(a),
             .aggregate => |ag| ag.next(a),
             .sort => |s| s.next(a),
+            .distinct => |d| d.next(a),
             .join => |j| j.next(a),
         };
     }
@@ -563,6 +645,7 @@ pub const Cursor = union(enum) {
             .project => |p| p.deinit(a),
             .aggregate => |ag| ag.deinit(a),
             .sort => |s| s.deinit(a),
+            .distinct => |d| d.deinit(a),
             .join => |j| j.deinit(a),
             else => {},
         }
