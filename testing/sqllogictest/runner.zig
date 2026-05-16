@@ -100,9 +100,9 @@ fn runStatement(alloc: Allocator, db: *Database, path: []const u8, stmt: parser.
     if (got_err != want_err) {
         if (print_error) {
             if (want_err) {
-                std.debug.print("FAIL {s}:{d}: expected error but statement succeeded\n", .{ path, stmt.line });
+                std.debug.print("FAIL {s}:{d}: expected error but statement succeeded\n  sql: {s}\n", .{ path, stmt.line, stmt.sql });
             } else {
-                std.debug.print("FAIL {s}:{d}: expected ok but got error: {s}\n", .{ path, stmt.line, exec_result.err.message });
+                std.debug.print("FAIL {s}:{d}: expected ok but got error: {s}\n  sql: {s}\n", .{ path, stmt.line, exec_result.err.message, stmt.sql });
             }
         }
         return false;
@@ -116,12 +116,12 @@ fn runQuery(alloc: Allocator, db: *Database, path: []const u8, qry: parser.Query
 
     if (exec_result == .err) {
         if (print_error)
-            std.debug.print("FAIL {s}:{d}: query returned error: {s}\n", .{ path, qry.line, exec_result.err.message });
+            std.debug.print("FAIL {s}:{d}: query returned error: {s}\n  sql: {s}\n", .{ path, qry.line, exec_result.err.message, qry.sql });
         return false;
     }
     if (exec_result != .result_set) {
         if (print_error)
-            std.debug.print("FAIL {s}:{d}: query did not return a result set\n", .{ path, qry.line });
+            std.debug.print("FAIL {s}:{d}: query did not return a result set\n  sql: {s}\n", .{ path, qry.line, qry.sql });
         return false;
     }
 
@@ -151,16 +151,16 @@ fn runQuery(alloc: Allocator, db: *Database, path: []const u8, qry: parser.Query
         .values => |expected| {
             if (actual.items.len != expected.len) {
                 if (print_error)
-                    std.debug.print("FAIL {s}:{d}: expected {d} values, got {d}\n", .{
-                        path, qry.line, expected.len, actual.items.len,
+                    std.debug.print("FAIL {s}:{d}: expected {d} values, got {d}\n  sql: {s}\n", .{
+                        path, qry.line, expected.len, actual.items.len, qry.sql,
                     });
                 return false;
             }
             for (actual.items, expected, 0..) |act, exp, idx| {
                 if (!std.mem.eql(u8, act, exp)) {
                     if (print_error)
-                        std.debug.print("FAIL {s}:{d}: value[{d}] expected '{s}', got '{s}'\n", .{
-                            path, qry.line, idx, exp, act,
+                        std.debug.print("FAIL {s}:{d}: value[{d}] expected '{s}', got '{s}'\n  sql: {s}\n", .{
+                            path, qry.line, idx, exp, act, qry.sql,
                         });
                     return false;
                 }
@@ -169,16 +169,16 @@ fn runQuery(alloc: Allocator, db: *Database, path: []const u8, qry: parser.Query
         .hash => |h| {
             if (actual.items.len != h.count) {
                 if (print_error)
-                    std.debug.print("FAIL {s}:{d}: expected {d} values, got {d}\n", .{
-                        path, qry.line, h.count, actual.items.len,
+                    std.debug.print("FAIL {s}:{d}: expected {d} values, got {d}\n  sql: {s}\n", .{
+                        path, qry.line, h.count, actual.items.len, qry.sql,
                     });
                 return false;
             }
             const digest = md5OfValues(actual.items);
             if (!std.mem.eql(u8, &digest, h.md5)) {
                 if (print_error)
-                    std.debug.print("FAIL {s}:{d}: hash mismatch (expected {s}, got {s})\n", .{
-                        path, qry.line, h.md5, digest,
+                    std.debug.print("FAIL {s}:{d}: hash mismatch (expected {s}, got {s})\n  sql: {s}\n", .{
+                        path, qry.line, h.md5, digest, qry.sql,
                     });
                 return false;
             }
