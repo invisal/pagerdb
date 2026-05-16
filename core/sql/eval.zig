@@ -22,6 +22,7 @@ pub fn evalExpr(
         .binary => |b| try evalBinary(b, row_values),
         .unary => |u| try evalUnary(u, row_values),
         .func_call => |f| try evalFunc(f, row_values, alloc),
+        .cast => |c| try evalCast(c, row_values, alloc),
     };
 }
 
@@ -112,6 +113,38 @@ fn evalUnary(
             .real => |f| .{ .real = -f },
             .null_ => .{ .null_ = {} },
             else => EvalError.TypeMismatch,
+        },
+    };
+}
+
+fn evalCast(
+    c: *lp.Expr.Cast,
+    row_values: []const row.Value,
+    alloc: std.mem.Allocator,
+) EvalError!EvalValue {
+    const val = try evalExpr(c.operand, row_values, alloc);
+    if (val == .null_) return .{ .null_ = {} };
+    return switch (c.target_type) {
+        .int => switch (val) {
+            .int => val,
+            .real => |f| .{ .int = @intFromFloat(f) },
+            .bool_ => |b| .{ .int = if (b) 1 else 0 },
+            .text => |s| .{ .int = std.fmt.parseInt(i64, s, 10) catch return EvalError.TypeMismatch },
+            .null_ => unreachable,
+        },
+        .real => switch (val) {
+            .real => val,
+            .int => |n| .{ .real = @floatFromInt(n) },
+            .bool_ => |b| .{ .real = if (b) 1.0 else 0.0 },
+            .text => |s| .{ .real = std.fmt.parseFloat(f64, s) catch return EvalError.TypeMismatch },
+            .null_ => unreachable,
+        },
+        .text, .blob => switch (val) {
+            .text => val,
+            .int => |n| .{ .text = try std.fmt.allocPrint(alloc, "{d}", .{n}) },
+            .real => |f| .{ .text = try std.fmt.allocPrint(alloc, "{d}", .{f}) },
+            .bool_ => |b| .{ .text = if (b) "1" else "0" },
+            .null_ => unreachable,
         },
     };
 }

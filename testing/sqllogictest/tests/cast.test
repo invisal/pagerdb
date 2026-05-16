@@ -1,0 +1,106 @@
+# CAST expression tests
+
+# CAST(NULL AS type) always returns NULL regardless of target type
+query I
+SELECT CAST(NULL AS INTEGER);
+----
+NULL
+
+query I
+SELECT CAST(NULL AS INT);
+----
+NULL
+
+query I
+SELECT CAST(NULL AS REAL);
+----
+NULL
+
+query I
+SELECT CAST(NULL AS TEXT);
+----
+NULL
+
+# Integer to real
+query I
+SELECT CAST(42 AS REAL);
+----
+42
+
+# Real to integer (truncation)
+query I
+SELECT CAST(3.7 AS INTEGER);
+----
+3
+
+query I
+SELECT CAST(-2.9 AS INTEGER);
+----
+-2
+
+# String to integer
+query I
+SELECT CAST('123' AS INTEGER);
+----
+123
+
+query I
+SELECT CAST('-99' AS INTEGER);
+----
+-99
+
+# String to real
+query I
+SELECT CAST('3.14' AS REAL);
+----
+3.14
+
+# Integer to text
+query T
+SELECT CAST(42 AS TEXT);
+----
+42
+
+query T
+SELECT CAST(-7 AS TEXT);
+----
+-7
+
+# Real to text
+query T
+SELECT CAST(3.14 AS TEXT);
+----
+3.14
+
+# CAST inside expressions
+query I
+SELECT CAST(10 AS REAL) + CAST(5 AS REAL);
+----
+15
+
+# CAST with column values
+statement ok
+CREATE TABLE nums (n INTEGER NOT NULL, r REAL NOT NULL, s TEXT NOT NULL);
+
+statement ok
+INSERT INTO nums VALUES (42, 3.14, '100');
+
+query I
+SELECT CAST(n AS REAL) FROM nums;
+----
+42
+
+query I
+SELECT CAST(r AS INTEGER) FROM nums;
+----
+3
+
+query I
+SELECT CAST(s AS INTEGER) FROM nums;
+----
+100
+
+query T
+SELECT CAST(n AS TEXT) FROM nums;
+----
+42

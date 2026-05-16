@@ -37,16 +37,18 @@ pub const Expr = union(enum) {
     // argument to an aggregate function; the planner rejects it elsewhere.
     star: void,
 
-    // Binary, unary, and func_call nodes are heap-allocated so the Expr union
-    // stays small (two pointers).  This keeps stack frames shallow during deep
-    // recursion in the parser, and makes moving Expr values cheap (no deep copy).
+    // Binary, unary, func_call, and cast nodes are heap-allocated so the Expr
+    // union stays small (two pointers).  This keeps stack frames shallow during
+    // deep recursion in the parser, and makes moving Expr values cheap (no deep copy).
     binary: *Binary,
     unary: *Unary,
     func_call: *FuncCall,
+    cast: *Cast,
 
     pub const Binary = struct { op: BinaryOp, left: Expr, right: Expr };
     pub const Unary = struct { op: UnaryOp, operand: Expr };
     pub const FuncCall = struct { name: []const u8, args: []Expr };
+    pub const Cast = struct { target_type: t.ColType, operand: Expr };
 
     /// Deep-clone the expression to a different allocator.
     /// Used when transferring expressions from the parser's arena to the catalog.
@@ -91,6 +93,11 @@ pub const Expr = union(enum) {
                 };
                 break :blk .{ .func_call = node };
             },
+            .cast => |c| blk: {
+                const node = try allocator.create(Cast);
+                node.* = .{ .target_type = c.target_type, .operand = try c.operand.clone(allocator) };
+                break :blk .{ .cast = node };
+            },
         };
     }
 
@@ -117,6 +124,10 @@ pub const Expr = union(enum) {
                 for (f.args) |arg| arg.deinit(allocator);
                 allocator.free(f.args);
                 allocator.destroy(f);
+            },
+            .cast => |c| {
+                c.operand.deinit(allocator);
+                allocator.destroy(c);
             },
             else => {},
         }

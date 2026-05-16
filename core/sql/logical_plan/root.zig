@@ -37,12 +37,14 @@ pub const Expr = union(enum) {
     binary: *Binary,
     unary: *Unary,
     func_call: *FuncCall,
+    cast: *Cast,
 
     pub const Binary = struct { op: ast.BinaryOp, left: Expr, right: Expr };
     pub const Unary = struct { op: ast.UnaryOp, operand: Expr };
     // func points directly into scalar_func.REGISTRY, resolved at plan time —
     // the same pattern as VTabScan storing *const VTab.
     pub const FuncCall = struct { func: *const sf.ScalarFunc, args: []Expr };
+    pub const Cast = struct { target_type: t.ColType, operand: Expr };
 };
 
 // ── Aggregate spec ────────────────────────────────────────────────────────────
@@ -906,6 +908,14 @@ pub const LogicalPlanner = struct {
                     break :blk Expr{ .func_call = node };
                 }
             },
+            .cast => |c| blk: {
+                const node = try self.alloc().create(Expr.Cast);
+                node.* = .{
+                    .target_type = c.target_type,
+                    .operand = try self.resolveExprOverAgg(c.operand, scan_schema, agg_specs, group_by_count, agg_out_schema),
+                };
+                break :blk .{ .cast = node };
+            },
             .star => return PlanError.WildcardInExpression,
             .default_value => std.debug.panic("DEFAULT must be resolved during planning", .{}),
         };
@@ -959,6 +969,14 @@ pub const LogicalPlanner = struct {
                 const node = try self.alloc().create(Expr.FuncCall);
                 node.* = .{ .func = func, .args = resolved_args };
                 break :blk .{ .func_call = node };
+            },
+            .cast => |c| blk: {
+                const node = try self.alloc().create(Expr.Cast);
+                node.* = .{
+                    .target_type = c.target_type,
+                    .operand = try self.resolveExpr(c.operand, schema),
+                };
+                break :blk .{ .cast = node };
             },
             // DEFAULT should have been rewritten to the column's default expression
             // during INSERT/UPDATE planning. It must not reach this stage.

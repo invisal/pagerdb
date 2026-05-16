@@ -183,9 +183,9 @@ pub const Parser = struct {
         // below rather than triggering an error here.
         const has_from = self.peek().kind == .kw_from;
         if (!has_from) {
-            // Only allow clause keywords or EOF after the column list when there is no FROM.
+            // Only allow clause keywords, semicolon, or EOF after the column list when there is no FROM.
             const nk = self.peek().kind;
-            if (nk != .eof and nk != .kw_order and nk != .kw_group and nk != .kw_where) {
+            if (nk != .eof and nk != .semicolon and nk != .kw_order and nk != .kw_group and nk != .kw_where) {
                 const tok = self.advance();
                 self.error_message = try std.fmt.allocPrint(self.alloc(), "[{d}] Unexpected token FROM but found {s}", .{ tok.start, self.tokenText(tok) });
                 return ParseError.UnexpectedToken;
@@ -776,6 +776,25 @@ pub const Parser = struct {
                     }
                 }
                 return .{ .col_ref = name };
+            },
+            .kw_cast => {
+                _ = self.advance();
+                _ = try self.expect(.lparen);
+                const operand = try self.parseExpr();
+                _ = try self.expect(.kw_as);
+                const type_tok = self.peek();
+                const target_type: t.ColType = switch (type_tok.kind) {
+                    .kw_int => .int,
+                    .kw_real => .real,
+                    .kw_text => .text,
+                    .kw_blob => .blob,
+                    else => return ParseError.UnexpectedToken,
+                };
+                _ = self.advance();
+                _ = try self.expect(.rparen);
+                const node = try self.alloc().create(ast.Expr.Cast);
+                node.* = .{ .target_type = target_type, .operand = operand };
+                return .{ .cast = node };
             },
             .lparen => {
                 _ = self.advance();
