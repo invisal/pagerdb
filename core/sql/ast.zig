@@ -45,6 +45,7 @@ pub const Expr = union(enum) {
     func_call: *FuncCall,
     cast: *Cast,
     in_list: *InList,
+    between: *Between,
 
     pub const Binary = struct { op: BinaryOp, left: Expr, right: Expr };
     pub const Unary = struct { op: UnaryOp, operand: Expr };
@@ -52,6 +53,8 @@ pub const Expr = union(enum) {
     pub const Cast = struct { target_type: t.ColType, operand: Expr };
     // expr [NOT] IN (val1, val2, ...) — scalar value list, not a subquery.
     pub const InList = struct { operand: Expr, list: []Expr, negated: bool };
+    // expr [NOT] BETWEEN low AND high — desugars to (>= low AND <= high) in the planner.
+    pub const Between = struct { operand: Expr, low: Expr, high: Expr, negated: bool };
 
     /// Deep-clone the expression to a different allocator.
     /// Used when transferring expressions from the parser's arena to the catalog.
@@ -113,6 +116,16 @@ pub const Expr = union(enum) {
                 };
                 break :blk .{ .in_list = node };
             },
+            .between => |b| blk: {
+                const node = try allocator.create(Between);
+                node.* = .{
+                    .operand = try b.operand.clone(allocator),
+                    .low = try b.low.clone(allocator),
+                    .high = try b.high.clone(allocator),
+                    .negated = b.negated,
+                };
+                break :blk .{ .between = node };
+            },
         };
     }
 
@@ -149,6 +162,12 @@ pub const Expr = union(enum) {
                 for (il.list) |item| item.deinit(allocator);
                 allocator.free(il.list);
                 allocator.destroy(il);
+            },
+            .between => |b| {
+                b.operand.deinit(allocator);
+                b.low.deinit(allocator);
+                b.high.deinit(allocator);
+                allocator.destroy(b);
             },
             else => {},
         }

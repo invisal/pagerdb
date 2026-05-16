@@ -1,0 +1,72 @@
+# Tests for expr [NOT] BETWEEN low AND high.
+
+statement ok
+CREATE TABLE t (id INTEGER NOT NULL, val REAL NOT NULL);
+
+statement ok
+INSERT INTO t VALUES (1, 1.5);
+
+statement ok
+INSERT INTO t VALUES (2, 2.5);
+
+statement ok
+INSERT INTO t VALUES (3, 3.5);
+
+statement ok
+INSERT INTO t VALUES (4, 4.5);
+
+statement ok
+INSERT INTO t VALUES (5, 5.5);
+
+# Basic BETWEEN (inclusive bounds)
+query I rowsort
+SELECT id FROM t WHERE id BETWEEN 2 AND 4;
+----
+2
+3
+4
+
+# NOT BETWEEN
+query I rowsort
+SELECT id FROM t WHERE id NOT BETWEEN 2 AND 4;
+----
+1
+5
+
+# BETWEEN on reals
+query I rowsort
+SELECT id FROM t WHERE val BETWEEN 2.0 AND 4.0;
+----
+2
+3
+
+# Bounds are inclusive: exact match on low bound
+query I
+SELECT id FROM t WHERE id BETWEEN 3 AND 3;
+----
+3
+
+# BETWEEN NULL AND NULL → NULL (no rows pass)
+query I
+SELECT id FROM t WHERE id BETWEEN NULL AND NULL;
+----
+
+# NOT BETWEEN NULL AND NULL → NULL (no rows pass)
+query I
+SELECT id FROM t WHERE id NOT BETWEEN NULL AND NULL;
+----
+
+# BETWEEN with arithmetic bounds
+query I rowsort
+SELECT id FROM t WHERE id BETWEEN 1 + 1 AND 5 - 1;
+----
+2
+3
+4
+
+# Combined with other predicates
+query I rowsort
+SELECT id FROM t WHERE id BETWEEN 1 AND 3 AND id <> 2;
+----
+1
+3

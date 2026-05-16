@@ -642,20 +642,30 @@ pub const Parser = struct {
     fn parseComparison(self: *Parser) ParseError!ast.Expr {
         const left = try self.parseAddSub();
 
-        // Detect NOT IN before the standard comparison operators so that
-        // "expr NOT IN (...)" is parsed as a single predicate rather than
-        // leaving NOT to be consumed by the outer parseNot() level.
-        const is_not_in = self.peek().kind == .kw_not and
-            self.pos + 1 < self.tokens.len and
-            self.tokens[self.pos + 1].kind == .kw_in;
-        if (is_not_in) {
-            _ = self.advance(); // NOT
-            _ = self.advance(); // IN
-            return self.parseInList(left, true);
+        // Detect NOT IN / NOT BETWEEN before the standard comparison operators
+        // so that the NOT is consumed here rather than by the outer parseNot().
+        if (self.peek().kind == .kw_not and self.pos + 1 < self.tokens.len) {
+            switch (self.tokens[self.pos + 1].kind) {
+                .kw_in => {
+                    _ = self.advance(); // NOT
+                    _ = self.advance(); // IN
+                    return self.parseInList(left, true);
+                },
+                .kw_between => {
+                    _ = self.advance(); // NOT
+                    _ = self.advance(); // BETWEEN
+                    return self.parseBetween(left, true);
+                },
+                else => {},
+            }
         }
         if (self.peek().kind == .kw_in) {
             _ = self.advance();
             return self.parseInList(left, false);
+        }
+        if (self.peek().kind == .kw_between) {
+            _ = self.advance();
+            return self.parseBetween(left, false);
         }
 
         const op: ast.BinaryOp = switch (self.peek().kind) {
@@ -672,6 +682,15 @@ pub const Parser = struct {
         const node = try self.alloc().create(ast.Expr.Binary);
         node.* = .{ .op = op, .left = left, .right = right };
         return .{ .binary = node };
+    }
+
+    fn parseBetween(self: *Parser, operand: ast.Expr, negated: bool) ParseError!ast.Expr {
+        const low = try self.parseAddSub();
+        _ = try self.expect(.kw_and);
+        const high = try self.parseAddSub();
+        const node = try self.alloc().create(ast.Expr.Between);
+        node.* = .{ .operand = operand, .low = low, .high = high, .negated = negated };
+        return .{ .between = node };
     }
 
     fn parseInList(self: *Parser, operand: ast.Expr, negated: bool) ParseError!ast.Expr {
