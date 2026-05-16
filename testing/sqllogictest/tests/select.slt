@@ -1,0 +1,110 @@
+# SELECT tests: WHERE filters, ORDER BY, column aliases, JOINs.
+
+statement ok
+CREATE TABLE users (id INTEGER NOT NULL, name TEXT NOT NULL, score INTEGER NOT NULL);
+
+statement ok
+INSERT INTO users VALUES (1, 'alice', 90);
+
+statement ok
+INSERT INTO users VALUES (2, 'bob', 75);
+
+statement ok
+INSERT INTO users VALUES (3, 'carol', 85);
+
+statement ok
+INSERT INTO users VALUES (4, 'dave', 75);
+
+# WHERE with comparison
+query IT
+SELECT id, name FROM users WHERE score > 80 ORDER BY id;
+----
+1
+alice
+3
+carol
+
+# WHERE with equality
+query T
+SELECT name FROM users WHERE id = 2;
+----
+bob
+
+# ORDER BY ascending (include score in SELECT so it can be used in ORDER BY)
+query TI
+SELECT name, score FROM users ORDER BY score, name;
+----
+bob
+75
+dave
+75
+carol
+85
+alice
+90
+
+# ORDER BY descending
+query TI
+SELECT name, score FROM users ORDER BY score DESC, name;
+----
+alice
+90
+carol
+85
+bob
+75
+dave
+75
+
+# Column alias
+query T
+SELECT name AS username FROM users WHERE id = 1;
+----
+alice
+
+# Multiple conditions with AND
+query I
+SELECT COUNT(*) FROM users WHERE score >= 85 AND id < 4;
+----
+2
+
+# NULL handling: nullable column
+statement ok
+CREATE TABLE maybe (id INTEGER NOT NULL, val INTEGER);
+
+statement ok
+INSERT INTO maybe VALUES (1, 10);
+
+statement ok
+INSERT INTO maybe VALUES (2, NULL);
+
+statement ok
+INSERT INTO maybe VALUES (3, 30);
+
+query IT rowsort
+SELECT id, val FROM maybe;
+----
+1
+10
+2
+NULL
+3
+30
+
+# JOIN
+statement ok
+CREATE TABLE scores (user_id INTEGER NOT NULL, points INTEGER NOT NULL);
+
+statement ok
+INSERT INTO scores VALUES (1, 100);
+
+statement ok
+INSERT INTO scores VALUES (2, 200);
+
+query TI rowsort
+SELECT users.name, scores.points FROM users INNER JOIN scores ON users.id = scores.user_id;
+----
+alice
+100
+bob
+200

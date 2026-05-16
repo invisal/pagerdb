@@ -1,0 +1,90 @@
+# Aggregate function tests: COUNT, SUM, MIN, MAX, GROUP BY.
+
+statement ok
+CREATE TABLE sales (id INTEGER NOT NULL, region TEXT NOT NULL, amount INTEGER NOT NULL);
+
+statement ok
+INSERT INTO sales VALUES (1, 'north', 100);
+
+statement ok
+INSERT INTO sales VALUES (2, 'south', 200);
+
+statement ok
+INSERT INTO sales VALUES (3, 'north', 150);
+
+statement ok
+INSERT INTO sales VALUES (4, 'south', 300);
+
+statement ok
+INSERT INTO sales VALUES (5, 'east', 50);
+
+# COUNT all rows
+query I
+SELECT COUNT(*) FROM sales;
+----
+5
+
+# SUM
+query I
+SELECT SUM(amount) FROM sales;
+----
+800
+
+# MIN and MAX
+query II
+SELECT MIN(amount), MAX(amount) FROM sales;
+----
+50
+300
+
+# GROUP BY with COUNT
+query TI rowsort
+SELECT region, COUNT(*) FROM sales GROUP BY region;
+----
+east
+1
+north
+2
+south
+2
+
+# GROUP BY with SUM
+query TI rowsort
+SELECT region, SUM(amount) FROM sales GROUP BY region;
+----
+east
+50
+north
+250
+south
+500
+
+# Transactions: changes inside a committed transaction are visible
+statement ok
+BEGIN;
+
+statement ok
+INSERT INTO sales VALUES (6, 'west', 400);
+
+statement ok
+COMMIT;
+
+query I
+SELECT COUNT(*) FROM sales;
+----
+6
+
+# Transactions: changes inside a rolled-back transaction are discarded
+statement ok
+BEGIN;
+
+statement ok
+INSERT INTO sales VALUES (7, 'west', 999);
+
+statement ok
+ROLLBACK;
+
+query I
+SELECT COUNT(*) FROM sales;
+----
+6
