@@ -14,7 +14,17 @@ const InMemoryPager = core.InMemoryPager;
 const execute = core.execute;
 const Dir = std.Io.Dir;
 
-const ENGINE = "visaldb";
+// Engines we identify as. "postgresql" is included so that onlyif/skipif
+// directives written for Postgres apply to us too — we target SQL compatibility
+// with general ANSI SQL and PostgreSQL, not MySQL or SQLite dialects.
+const ENGINES = [_][]const u8{ "pagerdb", "postgresql" };
+
+fn engineMatches(engine: []const u8) bool {
+    for (ENGINES) |e| {
+        if (std.mem.eql(u8, engine, e)) return true;
+    }
+    return false;
+}
 
 pub const RunResult = struct {
     passed: usize,
@@ -45,11 +55,11 @@ pub fn runFile(alloc: Allocator, io: std.Io, path: []const u8, show_errors: usiz
     for (parsed.records) |record| {
         switch (record) {
             .skipif => |engine| {
-                if (std.mem.eql(u8, engine, ENGINE)) skip_next = true;
+                if (engineMatches(engine)) skip_next = true;
                 continue;
             },
             .onlyif => |engine| {
-                if (!std.mem.eql(u8, engine, ENGINE)) skip_next = true;
+                if (!engineMatches(engine)) skip_next = true;
                 continue;
             },
             .statement => |stmt| {

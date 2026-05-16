@@ -136,8 +136,10 @@ pub fn main(init: std.process.Init) !void {
         try writeJson(alloc, io, path, commit, all_files.items, file_results);
     }
 
-    std.debug.print("\n{d} passed, {d} failed across {d} file(s)\n", .{
-        total_passed, total_failed, all_files.items.len,
+    const total = total_passed + total_failed;
+    const pct: f64 = if (total == 0) 100.0 else @as(f64, @floatFromInt(total_passed)) / @as(f64, @floatFromInt(total)) * 100.0;
+    std.debug.print("\n{d} passed, {d} failed across {d} file(s) ({d:.1}%)\n", .{
+        total_passed, total_failed, all_files.items.len, pct,
     });
 
     if (total_failed > 0) std.process.exit(1);
