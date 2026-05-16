@@ -78,3 +78,38 @@ jobs:
     steps:
       - uses: actions/deploy-pages@v4
         id: deploy
+
+  deploy-site:
+    name: Deploy Site
+    needs: deploy-slt-results
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: Production
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/setup-zig
+
+      - name: Build WASM
+        run: zig build wasm
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: site/package-lock.json
+
+      - name: Install dependencies
+        working-directory: site
+        run: npm ci
+
+      - name: Build site
+        working-directory: site
+        run: npm run build
+
+      - name: Deploy to Cloudflare Workers
+        working-directory: site
+        run: npx wrangler deploy
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
