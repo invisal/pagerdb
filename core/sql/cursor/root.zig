@@ -1,10 +1,10 @@
 const std = @import("std");
-const db_mod = @import("../db.zig");
-const row_mod = @import("../row.zig");
-const lp = @import("../sql/logical_plan.zig");
-const pp = @import("../sql/physical_plan.zig");
-const eval = @import("../sql/eval.zig");
-const vtab_mod = @import("../vtable/root.zig");
+const db_mod = @import("../../db.zig");
+const row_mod = @import("../../row.zig");
+const lp = @import("../logical_plan.zig");
+const pp = @import("../physical_plan.zig");
+const eval = @import("../eval.zig");
+const vtab_mod = @import("../../vtable/root.zig");
 const agg_mod = @import("agg_func.zig");
 
 const Db = db_mod.Db;

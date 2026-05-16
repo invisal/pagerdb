@@ -4,7 +4,7 @@ const ast = @import("../ast.zig");
 const catalog = @import("../../catalog.zig");
 const vtab_mod = @import("../../vtable/root.zig");
 const sf = @import("../scalar_func.zig");
-const agg_mod = @import("../../cursor/agg_func.zig");
+const agg_mod = @import("../cursor/agg_func.zig");
 
 // ── Schema ─────────────────────────────────────────────────────────────────────
 
