@@ -9,4 +9,4 @@ pub const EvalValue = union(enum) {
     null_: void,
 };
 
-pub const EvalError = error{ TypeMismatch, DivisionByZero };
+pub const EvalError = error{ TypeMismatch, DivisionByZero, OutOfMemory };

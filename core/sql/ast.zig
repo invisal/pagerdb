@@ -37,16 +37,24 @@ pub const Expr = union(enum) {
     // argument to an aggregate function; the planner rejects it elsewhere.
     star: void,
 
-    // Binary, unary, and func_call nodes are heap-allocated so the Expr union
-    // stays small (two pointers).  This keeps stack frames shallow during deep
-    // recursion in the parser, and makes moving Expr values cheap (no deep copy).
+    // Binary, unary, func_call, and cast nodes are heap-allocated so the Expr
+    // union stays small (two pointers).  This keeps stack frames shallow during
+    // deep recursion in the parser, and makes moving Expr values cheap (no deep copy).
     binary: *Binary,
     unary: *Unary,
     func_call: *FuncCall,
+    cast: *Cast,
+    in_list: *InList,
+    between: *Between,
 
     pub const Binary = struct { op: BinaryOp, left: Expr, right: Expr };
     pub const Unary = struct { op: UnaryOp, operand: Expr };
-    pub const FuncCall = struct { name: []const u8, args: []Expr };
+    pub const FuncCall = struct { name: []const u8, args: []Expr, distinct: bool = false };
+    pub const Cast = struct { target_type: t.ColType, operand: Expr };
+    // expr [NOT] IN (val1, val2, ...) — scalar value list, not a subquery.
+    pub const InList = struct { operand: Expr, list: []Expr, negated: bool };
+    // expr [NOT] BETWEEN low AND high — desugars to (>= low AND <= high) in the planner.
+    pub const Between = struct { operand: Expr, low: Expr, high: Expr, negated: bool };
 
     /// Deep-clone the expression to a different allocator.
     /// Used when transferring expressions from the parser's arena to the catalog.
@@ -88,8 +96,35 @@ pub const Expr = union(enum) {
                 node.* = .{
                     .name = try allocator.dupe(u8, f.name),
                     .args = cloned_args,
+                    .distinct = f.distinct,
                 };
                 break :blk .{ .func_call = node };
+            },
+            .cast => |c| blk: {
+                const node = try allocator.create(Cast);
+                node.* = .{ .target_type = c.target_type, .operand = try c.operand.clone(allocator) };
+                break :blk .{ .cast = node };
+            },
+            .in_list => |il| blk: {
+                const node = try allocator.create(InList);
+                const cloned_list = try allocator.alloc(Expr, il.list.len);
+                for (il.list, 0..) |item, i| cloned_list[i] = try item.clone(allocator);
+                node.* = .{
+                    .operand = try il.operand.clone(allocator),
+                    .list = cloned_list,
+                    .negated = il.negated,
+                };
+                break :blk .{ .in_list = node };
+            },
+            .between => |b| blk: {
+                const node = try allocator.create(Between);
+                node.* = .{
+                    .operand = try b.operand.clone(allocator),
+                    .low = try b.low.clone(allocator),
+                    .high = try b.high.clone(allocator),
+                    .negated = b.negated,
+                };
+                break :blk .{ .between = node };
             },
         };
     }
@@ -117,6 +152,22 @@ pub const Expr = union(enum) {
                 for (f.args) |arg| arg.deinit(allocator);
                 allocator.free(f.args);
                 allocator.destroy(f);
+            },
+            .cast => |c| {
+                c.operand.deinit(allocator);
+                allocator.destroy(c);
+            },
+            .in_list => |il| {
+                il.operand.deinit(allocator);
+                for (il.list) |item| item.deinit(allocator);
+                allocator.free(il.list);
+                allocator.destroy(il);
+            },
+            .between => |b| {
+                b.operand.deinit(allocator);
+                b.low.deinit(allocator);
+                b.high.deinit(allocator);
+                allocator.destroy(b);
             },
             else => {},
         }
@@ -153,10 +204,14 @@ pub const TableRef = union(enum) {
     func: TableFunc, // TVF:          FROM __page_slots(1)
 };
 
-// One INNER JOIN clause: the right-hand table and its ON condition.
+pub const JoinType = enum { inner, cross };
+
+// One JOIN clause: join type, right-hand table, and optional ON condition.
+// CROSS JOIN (explicit or via comma syntax) has no condition; INNER JOIN always does.
 pub const JoinClause = struct {
-    table_ref: TableRef, // right-hand table
-    condition: Expr, // ON predicate
+    join_type: JoinType,
+    table_ref: TableRef,
+    condition: ?Expr, // null for CROSS JOIN
 };
 
 pub const OrderDirection = enum { asc, desc };
@@ -169,7 +224,7 @@ pub const OrderByItem = struct {
 pub const SelectStmt = struct {
     distinct: bool = false, // SELECT DISTINCT removes duplicate output rows
     table_ref: ?TableRef, // null means SELECT without FROM (e.g. SELECT 1)
-    joins: []JoinClause, // INNER JOIN clauses in order (empty = no joins)
+    joins: []JoinClause, // JOIN clauses in order (empty = no joins)
     columns: []SelectCol, // len = 0 means SELECT *
     where: ?Expr,
     group_by: []Expr = &.{}, // GROUP BY expressions; empty = no grouping

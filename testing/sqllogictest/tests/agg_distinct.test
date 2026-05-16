@@ -1,0 +1,101 @@
+# Aggregate DISTINCT and ALL modifier tests.
+
+statement ok
+CREATE TABLE t (id INTEGER NOT NULL, grp TEXT NOT NULL, val INTEGER);
+
+statement ok
+INSERT INTO t VALUES (1, 'a', 10);
+
+statement ok
+INSERT INTO t VALUES (2, 'a', 20);
+
+statement ok
+INSERT INTO t VALUES (3, 'a', 10);
+
+statement ok
+INSERT INTO t VALUES (4, 'b', 30);
+
+statement ok
+INSERT INTO t VALUES (5, 'b', 30);
+
+statement ok
+INSERT INTO t VALUES (6, 'b', 40);
+
+# NULL values are excluded from DISTINCT counts.
+statement ok
+INSERT INTO t VALUES (7, 'c', NULL);
+
+statement ok
+INSERT INTO t VALUES (8, 'c', NULL);
+
+statement ok
+INSERT INTO t VALUES (9, 'c', 50);
+
+# COUNT(DISTINCT col) — counts unique non-null values.
+# Distinct non-null values: 10, 20, 30, 40, 50 → 5.
+query I
+SELECT COUNT(DISTINCT val) FROM t;
+----
+5
+
+# COUNT(ALL col) — same as COUNT(col), counts non-null values.
+# Non-null values: 10, 20, 10, 30, 30, 40, 50 → 7.
+query I
+SELECT COUNT(ALL val) FROM t;
+----
+7
+
+# COUNT(col) without modifier is the same as COUNT(ALL col).
+query I
+SELECT COUNT(val) FROM t;
+----
+7
+
+# COUNT(*) counts all rows regardless of modifier.
+query I
+SELECT COUNT(ALL *) FROM t;
+----
+9
+
+# SUM(DISTINCT val) — sums only unique non-null values.
+# Distinct non-null values: 10+20+30+40+50 = 150.
+query I
+SELECT SUM(DISTINCT val) FROM t;
+----
+150
+
+# SUM(ALL val) — same as SUM(val): 10+20+10+30+30+40+50 = 190.
+query I
+SELECT SUM(ALL val) FROM t;
+----
+190
+
+# COUNT(DISTINCT val) with GROUP BY.
+query TI rowsort
+SELECT grp, COUNT(DISTINCT val) FROM t GROUP BY grp;
+----
+a
+2
+b
+2
+c
+1
+
+# SUM(DISTINCT val) with GROUP BY.
+query TI rowsort
+SELECT grp, SUM(DISTINCT val) FROM t GROUP BY grp;
+----
+a
+30
+b
+70
+c
+50
+
+# Both DISTINCT and non-DISTINCT aggregates in the same query.
+query III
+SELECT COUNT(DISTINCT val), COUNT(val), COUNT(*) FROM t;
+----
+5
+7
+9

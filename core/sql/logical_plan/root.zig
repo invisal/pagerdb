@@ -37,21 +37,27 @@ pub const Expr = union(enum) {
     binary: *Binary,
     unary: *Unary,
     func_call: *FuncCall,
+    cast: *Cast,
+    in_list: *InList,
 
     pub const Binary = struct { op: ast.BinaryOp, left: Expr, right: Expr };
     pub const Unary = struct { op: ast.UnaryOp, operand: Expr };
     // func points directly into scalar_func.REGISTRY, resolved at plan time —
     // the same pattern as VTabScan storing *const VTab.
     pub const FuncCall = struct { func: *const sf.ScalarFunc, args: []Expr };
+    pub const Cast = struct { target_type: t.ColType, operand: Expr };
+    pub const InList = struct { operand: Expr, list: []Expr, negated: bool };
 };
 
 // ── Aggregate spec ────────────────────────────────────────────────────────────
 //
 // Pairs a resolved aggregate function with its input column.
 // col_idx == null means COUNT(*) — count every row regardless of value.
+// distinct == true means only unique non-null values are fed to step().
 pub const AggCallSpec = struct {
     func: *const agg_mod.AggFunc,
     col_idx: ?usize,
+    distinct: bool = false,
 };
 
 // ── Plan nodes ─────────────────────────────────────────────────────────────────
@@ -150,12 +156,13 @@ pub const Distinct = struct {
     schema: Schema, // same shape as input
 };
 
-// Nested-loop inner join.  The schema merges both tables' columns with
-// right-side indices offset by the number of left-side columns.
+// Nested-loop join.  The schema merges both tables' columns with right-side
+// indices offset by the number of left-side columns.  condition is null for
+// CROSS JOIN (every left/right pair is emitted).
 pub const Join = struct {
     left: *LogicalPlan,
     right: *LogicalPlan,
-    condition: Expr, // ON predicate; col_idx values reference the merged schema
+    condition: ?Expr, // null for CROSS JOIN; ON predicate for INNER JOIN
     schema: Schema, // combined schema (left cols then right cols)
 };
 
@@ -252,16 +259,19 @@ pub const LogicalPlanner = struct {
         var scan_schema = first.schema;
         var current = first.plan;
 
-        // Build Join nodes for each INNER JOIN clause.  Each join merges the
-        // accumulated schema on the left with the new table schema on the right,
-        // offsetting right-side column indices so they don't collide with left-
-        // side indices in the combined values array produced by JoinCursor.
+        // Build Join nodes for each JOIN clause.  Each join merges the accumulated
+        // schema on the left with the new table schema on the right, offsetting
+        // right-side column indices so they don't collide with left-side indices
+        // in the combined values array produced by JoinCursor.
         for (stmt.joins) |join_clause| {
             const right = try self.buildScan(join_clause.table_ref);
 
             const left_count = scan_schema.columns.len;
             const merged_schema = try self.mergeSchemas(scan_schema, right.schema, left_count);
-            const condition = try self.resolveExpr(join_clause.condition, merged_schema);
+            const condition = if (join_clause.condition) |cond|
+                try self.resolveExpr(cond, merged_schema)
+            else
+                null;
             const join_node = try self.alloc().create(Join);
             join_node.* = .{
                 .left = try self.box(current),
@@ -622,14 +632,28 @@ pub const LogicalPlanner = struct {
         return false;
     }
 
+    // Returns true if expr contains an aggregate function call anywhere in its
+    // subtree (e.g. COUNT, SUM, AVG).  Used by needsAggregate to decide whether
+    // to insert an Aggregate plan node — the planner must recurse into every
+    // expression variant that has child expressions so no nested aggregate is missed.
     fn containsAggCall(expr: ast.Expr) bool {
         return switch (expr) {
+            // A function call is an aggregate if it's in the agg registry.
+            // For scalar functions, recurse into the arguments in case an
+            // aggregate is nested inside, e.g. abs(COUNT(*)).
             .func_call => |f| agg_mod.find(f.name) != null or blk: {
                 for (f.args) |arg| if (containsAggCall(arg)) break :blk true;
                 break :blk false;
             },
             .binary => |b| containsAggCall(b.left) or containsAggCall(b.right),
             .unary => |u| containsAggCall(u.operand),
+            .in_list => |il| blk: {
+                if (containsAggCall(il.operand)) break :blk true;
+                for (il.list) |item| if (containsAggCall(item)) break :blk true;
+                break :blk false;
+            },
+            .between => |b| containsAggCall(b.operand) or containsAggCall(b.low) or containsAggCall(b.high),
+            // Literals, column references, and other leaves can never be aggregates.
             else => false,
         };
     }
@@ -808,7 +832,9 @@ pub const LogicalPlanner = struct {
             .func_call => |f| {
                 if (agg_mod.find(f.name)) |agg_func| {
                     const col_idx = try self.resolveAggArgToColIdx(f.args, scan_schema);
-                    try out.append(self.alloc(), .{ .func = agg_func, .col_idx = col_idx });
+                    // DISTINCT requires a real column argument, not a wildcard/no-arg.
+                    if (f.distinct and col_idx == null) return PlanError.WrongArgCount;
+                    try out.append(self.alloc(), .{ .func = agg_func, .col_idx = col_idx, .distinct = f.distinct });
                 } else {
                     for (f.args) |arg| try self.collectAggSpecs(arg, scan_schema, out);
                 }
@@ -818,6 +844,15 @@ pub const LogicalPlanner = struct {
                 try self.collectAggSpecs(b.right, scan_schema, out);
             },
             .unary => |u| try self.collectAggSpecs(u.operand, scan_schema, out),
+            .in_list => |il| {
+                try self.collectAggSpecs(il.operand, scan_schema, out);
+                for (il.list) |item| try self.collectAggSpecs(item, scan_schema, out);
+            },
+            .between => |b| {
+                try self.collectAggSpecs(b.operand, scan_schema, out);
+                try self.collectAggSpecs(b.low, scan_schema, out);
+                try self.collectAggSpecs(b.high, scan_schema, out);
+            },
             else => {},
         }
     }
@@ -883,7 +918,8 @@ pub const LogicalPlanner = struct {
                     const arg_col_idx = try self.resolveAggArgToColIdx(f.args, scan_schema);
                     for (agg_specs, 0..) |spec, i| {
                         if (std.ascii.eqlIgnoreCase(spec.func.name, f.name) and
-                            spec.col_idx == arg_col_idx)
+                            spec.col_idx == arg_col_idx and
+                            spec.distinct == f.distinct)
                         {
                             break :blk Expr{ .col_idx = group_by_count + i };
                         }
@@ -901,6 +937,46 @@ pub const LogicalPlanner = struct {
                     node.* = .{ .func = func, .args = resolved_args };
                     break :blk Expr{ .func_call = node };
                 }
+            },
+            .cast => |c| blk: {
+                const node = try self.alloc().create(Expr.Cast);
+                node.* = .{
+                    .target_type = c.target_type,
+                    .operand = try self.resolveExprOverAgg(c.operand, scan_schema, agg_specs, group_by_count, agg_out_schema),
+                };
+                break :blk .{ .cast = node };
+            },
+            .in_list => |il| blk: {
+                const node = try self.alloc().create(Expr.InList);
+                const resolved_list = try self.alloc().alloc(Expr, il.list.len);
+                for (il.list, 0..) |item, i| {
+                    resolved_list[i] = try self.resolveExprOverAgg(item, scan_schema, agg_specs, group_by_count, agg_out_schema);
+                }
+                node.* = .{
+                    .operand = try self.resolveExprOverAgg(il.operand, scan_schema, agg_specs, group_by_count, agg_out_schema),
+                    .list = resolved_list,
+                    .negated = il.negated,
+                };
+                break :blk .{ .in_list = node };
+            },
+            .between => |b| blk: {
+                const operand_lo = try self.resolveExprOverAgg(b.operand, scan_schema, agg_specs, group_by_count, agg_out_schema);
+                const operand_hi = try self.resolveExprOverAgg(b.operand, scan_schema, agg_specs, group_by_count, agg_out_schema);
+                const lo = try self.resolveExprOverAgg(b.low, scan_schema, agg_specs, group_by_count, agg_out_schema);
+                const hi = try self.resolveExprOverAgg(b.high, scan_schema, agg_specs, group_by_count, agg_out_schema);
+                const cmp_lo = try self.alloc().create(Expr.Binary);
+                const cmp_hi = try self.alloc().create(Expr.Binary);
+                const combined = try self.alloc().create(Expr.Binary);
+                if (!b.negated) {
+                    cmp_lo.* = .{ .op = .gte, .left = operand_lo, .right = lo };
+                    cmp_hi.* = .{ .op = .lte, .left = operand_hi, .right = hi };
+                    combined.* = .{ .op = .and_, .left = .{ .binary = cmp_lo }, .right = .{ .binary = cmp_hi } };
+                } else {
+                    cmp_lo.* = .{ .op = .lt, .left = operand_lo, .right = lo };
+                    cmp_hi.* = .{ .op = .gt, .left = operand_hi, .right = hi };
+                    combined.* = .{ .op = .or_, .left = .{ .binary = cmp_lo }, .right = .{ .binary = cmp_hi } };
+                }
+                break :blk Expr{ .binary = combined };
             },
             .star => return PlanError.WildcardInExpression,
             .default_value => std.debug.panic("DEFAULT must be resolved during planning", .{}),
@@ -956,10 +1032,65 @@ pub const LogicalPlanner = struct {
                 node.* = .{ .func = func, .args = resolved_args };
                 break :blk .{ .func_call = node };
             },
+            .cast => |c| blk: {
+                const node = try self.alloc().create(Expr.Cast);
+                node.* = .{
+                    .target_type = c.target_type,
+                    .operand = try self.resolveExpr(c.operand, schema),
+                };
+                break :blk .{ .cast = node };
+            },
+            .in_list => |il| blk: {
+                const node = try self.alloc().create(Expr.InList);
+                const resolved_list = try self.alloc().alloc(Expr, il.list.len);
+                for (il.list, 0..) |item, i| resolved_list[i] = try self.resolveExpr(item, schema);
+                node.* = .{
+                    .operand = try self.resolveExpr(il.operand, schema),
+                    .list = resolved_list,
+                    .negated = il.negated,
+                };
+                break :blk .{ .in_list = node };
+            },
+            // BETWEEN desugars to (operand >= low AND operand <= high).
+            // NOT BETWEEN desugars to (operand < low OR operand > high).
+            // The operand is resolved twice (two col_idx nodes pointing at the same
+            // column), which is safe because evaluation is pure — no side effects.
+            .between => |b| try self.resolveBetween(b.operand, b.low, b.high, b.negated, schema),
             // DEFAULT should have been rewritten to the column's default expression
             // during INSERT/UPDATE planning. It must not reach this stage.
             .default_value => std.debug.panic("DEFAULT must be resolved during planning", .{}),
         };
+    }
+
+    fn resolveBetween(
+        self: *LogicalPlanner,
+        operand: ast.Expr,
+        low: ast.Expr,
+        high: ast.Expr,
+        negated: bool,
+        schema: Schema,
+    ) PlanError!Expr {
+        const op_lo = try self.resolveExpr(operand, schema);
+        const op_hi = try self.resolveExpr(operand, schema);
+        const lo = try self.resolveExpr(low, schema);
+        const hi = try self.resolveExpr(high, schema);
+
+        const cmp_lo = try self.alloc().create(Expr.Binary);
+        const cmp_hi = try self.alloc().create(Expr.Binary);
+        const combined = try self.alloc().create(Expr.Binary);
+
+        if (!negated) {
+            // operand >= low AND operand <= high
+            cmp_lo.* = .{ .op = .gte, .left = op_lo, .right = lo };
+            cmp_hi.* = .{ .op = .lte, .left = op_hi, .right = hi };
+            combined.* = .{ .op = .and_, .left = .{ .binary = cmp_lo }, .right = .{ .binary = cmp_hi } };
+        } else {
+            // operand < low OR operand > high
+            cmp_lo.* = .{ .op = .lt, .left = op_lo, .right = lo };
+            cmp_hi.* = .{ .op = .gt, .left = op_hi, .right = hi };
+            combined.* = .{ .op = .or_, .left = .{ .binary = cmp_lo }, .right = .{ .binary = cmp_hi } };
+        }
+        return .{ .binary = combined };
     }
 
     fn resolveColName(self: *LogicalPlanner, name: []const u8, schema: Schema) PlanError!usize {

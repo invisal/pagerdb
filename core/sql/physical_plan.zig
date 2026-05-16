@@ -61,7 +61,7 @@ pub const PhysicalCreateTable = struct {
 pub const PhysicalJoin = struct {
     left: PhysicalPlan,
     right: PhysicalPlan,
-    condition: lp.Expr,
+    condition: ?lp.Expr, // null for CROSS JOIN
     schema: lp.Schema,
 };
 

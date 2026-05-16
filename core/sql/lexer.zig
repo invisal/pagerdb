@@ -29,6 +29,7 @@ pub const TokenKind = enum {
     kw_begin,
     kw_commit,
     kw_rollback,
+    kw_cross,
     kw_inner,
     kw_join,
     kw_on,
@@ -40,6 +41,9 @@ pub const TokenKind = enum {
     kw_desc,
     kw_distinct,
     kw_all,
+    kw_cast,
+    kw_in,
+    kw_between,
     // Literals
     lit_int, // int_val is valid
     lit_float, // float_val is valid
@@ -94,6 +98,7 @@ pub const TokenKind = enum {
             .kw_begin => "BEGIN",
             .kw_commit => "COMMIT",
             .kw_rollback => "ROLLBACK",
+            .kw_cross => "CROSS",
             .kw_inner => "INNER",
             .kw_join => "JOIN",
             .kw_on => "ON",
@@ -106,6 +111,9 @@ pub const TokenKind = enum {
             .kw_desc => "DESC",
             .kw_distinct => "DISTINCT",
             .kw_all => "ALL",
+            .kw_cast => "CAST",
+            .kw_in => "IN",
+            .kw_between => "BETWEEN",
             .identifier => "identifier",
             .lit_int => "integer",
             .lit_float => "float",
@@ -178,6 +186,7 @@ const keyword_pairs = [_]struct { text: []const u8, kind: TokenKind }{
     .{ .text = "begin", .kind = .kw_begin },
     .{ .text = "commit", .kind = .kw_commit },
     .{ .text = "rollback", .kind = .kw_rollback },
+    .{ .text = "cross", .kind = .kw_cross },
     .{ .text = "inner", .kind = .kw_inner },
     .{ .text = "join", .kind = .kw_join },
     .{ .text = "on", .kind = .kw_on },
@@ -189,6 +198,9 @@ const keyword_pairs = [_]struct { text: []const u8, kind: TokenKind }{
     .{ .text = "desc", .kind = .kw_desc },
     .{ .text = "distinct", .kind = .kw_distinct },
     .{ .text = "all", .kind = .kw_all },
+    .{ .text = "cast", .kind = .kw_cast },
+    .{ .text = "in", .kind = .kw_in },
+    .{ .text = "between", .kind = .kw_between },
 };
 
 fn lookupKeyword(word: []const u8) ?TokenKind {

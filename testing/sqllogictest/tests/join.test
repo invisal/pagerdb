@@ -1,0 +1,172 @@
+# INNER JOIN and CROSS JOIN tests.
+#
+# The orders/users tables are shared across all inner-join cases.
+# CROSS JOIN cases use their own tables to keep data independent.
+
+statement ok
+CREATE TABLE orders (id INTEGER NOT NULL, user_id INTEGER NOT NULL);
+
+statement ok
+CREATE TABLE users (id INTEGER NOT NULL, name TEXT NOT NULL);
+
+statement ok
+INSERT INTO users VALUES (1, 'alice'), (2, 'bob');
+
+statement ok
+INSERT INTO orders VALUES (10, 1), (11, 2), (12, 1);
+
+# Three matching rows (alice has 2 orders, bob has 1)
+query I
+SELECT COUNT(*) FROM orders INNER JOIN users ON orders.user_id = users.id;
+----
+3
+
+# SELECT * exposes all columns from both tables (4 per row)
+query IITI rowsort
+SELECT orders.id, orders.user_id, users.id, users.name
+FROM orders INNER JOIN users ON orders.user_id = users.id;
+----
+10
+1
+1
+alice
+11
+2
+2
+bob
+12
+1
+1
+alice
+
+# WHERE filters after the join
+query II
+SELECT orders.id, users.id
+FROM orders INNER JOIN users ON orders.user_id = users.id
+WHERE orders.id > 10
+ORDER BY orders.id;
+----
+11
+2
+12
+1
+
+# Qualified column selection
+query IT
+SELECT orders.id, users.name
+FROM orders INNER JOIN users ON orders.user_id = users.id
+WHERE orders.id = 10;
+----
+10
+alice
+
+# No matching rows
+statement ok
+CREATE TABLE t_no_match_a (x INTEGER NOT NULL);
+
+statement ok
+CREATE TABLE t_no_match_b (y INTEGER NOT NULL);
+
+statement ok
+INSERT INTO t_no_match_a VALUES (1);
+
+statement ok
+INSERT INTO t_no_match_b VALUES (99);
+
+query I
+SELECT COUNT(*) FROM t_no_match_a INNER JOIN t_no_match_b ON t_no_match_a.x = t_no_match_b.y;
+----
+0
+
+# INNER JOIN — dept/emp with five columns
+statement ok
+CREATE TABLE dept (dept_id INTEGER NOT NULL, dept_name TEXT NOT NULL);
+
+statement ok
+CREATE TABLE emp (emp_id INTEGER NOT NULL, dept_id INTEGER NOT NULL, emp_name TEXT NOT NULL);
+
+statement ok
+INSERT INTO dept VALUES (1, 'engineering'), (2, 'sales');
+
+statement ok
+INSERT INTO emp VALUES (100, 1, 'alice'), (101, 1, 'bob'), (102, 2, 'carol');
+
+# 2 engineering + 1 sales = 3 rows, 5 columns
+query I
+SELECT COUNT(*) FROM dept INNER JOIN emp ON dept.dept_id = emp.dept_id;
+----
+3
+
+query ITITIT rowsort
+SELECT dept.dept_id, dept.dept_name, emp.emp_id, emp.dept_id, emp.emp_name
+FROM dept INNER JOIN emp ON dept.dept_id = emp.dept_id;
+----
+1
+engineering
+100
+1
+alice
+1
+engineering
+101
+1
+bob
+2
+sales
+102
+2
+carol
+
+# CROSS JOIN explicit syntax: 2 colors × 3 sizes = 6 rows
+statement ok
+CREATE TABLE colors (name TEXT NOT NULL);
+
+statement ok
+CREATE TABLE sizes (label TEXT NOT NULL);
+
+statement ok
+INSERT INTO colors VALUES ('red'), ('blue');
+
+statement ok
+INSERT INTO sizes VALUES ('S'), ('M'), ('L');
+
+query I
+SELECT COUNT(*) FROM colors CROSS JOIN sizes;
+----
+6
+
+# Comma syntax produces the same cartesian product
+statement ok
+CREATE TABLE p (x INTEGER NOT NULL);
+
+statement ok
+CREATE TABLE q (y INTEGER NOT NULL);
+
+statement ok
+INSERT INTO p VALUES (1), (2);
+
+statement ok
+INSERT INTO q VALUES (10), (20), (30);
+
+query I
+SELECT COUNT(*) FROM p, q;
+----
+6
+
+# Comma syntax with WHERE filters after cartesian product
+statement ok
+CREATE TABLE ca (x INTEGER NOT NULL);
+
+statement ok
+CREATE TABLE cb (y INTEGER NOT NULL);
+
+statement ok
+INSERT INTO ca VALUES (1), (2);
+
+statement ok
+INSERT INTO cb VALUES (1), (2);
+
+query I
+SELECT COUNT(*) FROM ca, cb WHERE ca.x = cb.y;
+----
+2

@@ -1,0 +1,90 @@
+# Tests for expr IN (value_list) and expr NOT IN (value_list).
+
+statement ok
+CREATE TABLE t (id INTEGER NOT NULL, name TEXT NOT NULL);
+
+statement ok
+INSERT INTO t VALUES (1, 'alice');
+
+statement ok
+INSERT INTO t VALUES (2, 'bob');
+
+statement ok
+INSERT INTO t VALUES (3, 'carol');
+
+statement ok
+INSERT INTO t VALUES (4, 'dave');
+
+# Basic IN with integer literals
+query IT rowsort
+SELECT id, name FROM t WHERE id IN (1, 3);
+----
+1
+alice
+3
+carol
+
+# IN with a single element
+query IT
+SELECT id, name FROM t WHERE id IN (2);
+----
+2
+bob
+
+# NOT IN
+query IT rowsort
+SELECT id, name FROM t WHERE id NOT IN (1, 3);
+----
+2
+bob
+4
+dave
+
+# IN with text literals
+query I
+SELECT id FROM t WHERE name IN ('alice', 'dave');
+----
+1
+4
+
+# NOT IN with text
+query IT rowsort
+SELECT id, name FROM t WHERE name NOT IN ('alice', 'carol', 'dave');
+----
+2
+bob
+
+# IN with no match returns no rows
+query I
+SELECT id FROM t WHERE id IN (99, 100);
+----
+
+# NOT IN with all values excluded returns no rows
+query I
+SELECT id FROM t WHERE id NOT IN (1, 2, 3, 4);
+----
+
+# IN with expression in the list (arithmetic)
+query I
+SELECT id FROM t WHERE id IN (1 + 1);
+----
+2
+
+# NULL in list: NULL members are skipped when a match exists elsewhere
+query I
+SELECT id FROM t WHERE id IN (1, NULL);
+----
+1
+
+# Combined with other predicates
+query I rowsort
+SELECT id FROM t WHERE id IN (1, 2, 3) AND name IN ('alice', 'carol');
+----
+1
+3
+
+# NOT IN combined with other predicates
+query I
+SELECT id FROM t WHERE id NOT IN (2, 3, 4) AND name IN ('alice', 'bob', 'carol');
+----
+1

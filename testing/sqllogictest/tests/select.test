@@ -108,3 +108,19 @@ alice
 100
 bob
 200
+
+# Unary plus and chained unary operators
+query I
+SELECT +score FROM users WHERE id = 1;
+----
+90
+
+query I
+SELECT - +score FROM users WHERE id = 1;
+----
+-90
+
+query I
+SELECT + -score FROM users WHERE id = 1;
+----
+-90

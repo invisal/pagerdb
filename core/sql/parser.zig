@@ -183,9 +183,9 @@ pub const Parser = struct {
         // below rather than triggering an error here.
         const has_from = self.peek().kind == .kw_from;
         if (!has_from) {
-            // Only allow clause keywords or EOF after the column list when there is no FROM.
+            // Only allow clause keywords, semicolon, or EOF after the column list when there is no FROM.
             const nk = self.peek().kind;
-            if (nk != .eof and nk != .kw_order and nk != .kw_group and nk != .kw_where) {
+            if (nk != .eof and nk != .semicolon and nk != .kw_order and nk != .kw_group and nk != .kw_where) {
                 const tok = self.advance();
                 self.error_message = try std.fmt.allocPrint(self.alloc(), "[{d}] Unexpected token FROM but found {s}", .{ tok.start, self.tokenText(tok) });
                 return ParseError.UnexpectedToken;
@@ -255,63 +255,28 @@ pub const Parser = struct {
             };
         }
 
-        const qualified_name = try self.parseQualifiedName();
+        opt_table_ref = try self.parseTableRef();
 
-        // Parse optional TVF args and optional AS alias for the FROM table.
-        opt_table_ref = if (self.peek().kind == .lparen) blk: {
-            _ = self.advance();
-            var args: std.ArrayList(ast.Expr) = .empty;
-            if (self.peek().kind != .rparen) {
-                while (true) {
-                    try args.append(self.alloc(), try self.parseExpr());
-                    if (self.peek().kind != .comma) break;
-                    _ = self.advance();
-                }
-            }
-            _ = try self.expect(.rparen);
-            break :blk .{ .func = .{
-                .schema = qualified_name.schema,
-                .name = qualified_name.name,
-                .args = try args.toOwnedSlice(self.alloc()),
-                .alias = try self.parseOptionalAlias(),
-            } };
-        } else .{ .name = .{
-            .schema = qualified_name.schema,
-            .name = qualified_name.name,
-            .alias = try self.parseOptionalAlias(),
-        } };
-
-        // Parse optional INNER JOIN clauses. Each right-hand side can be a plain
-        // table or a TVF, both with an optional AS alias.
-        while (self.peek().kind == .kw_inner) {
-            _ = self.advance(); // consume INNER
-            _ = try self.expect(.kw_join);
-            const join_qname = try self.parseQualifiedName();
-            const join_table_ref: ast.TableRef = if (self.peek().kind == .lparen) blk: {
-                _ = self.advance();
-                var args: std.ArrayList(ast.Expr) = .empty;
-                if (self.peek().kind != .rparen) {
-                    while (true) {
-                        try args.append(self.alloc(), try self.parseExpr());
-                        if (self.peek().kind != .comma) break;
-                        _ = self.advance();
-                    }
-                }
-                _ = try self.expect(.rparen);
-                break :blk .{ .func = .{
-                    .schema = join_qname.schema,
-                    .name = join_qname.name,
-                    .args = try args.toOwnedSlice(self.alloc()),
-                    .alias = try self.parseOptionalAlias(),
-                } };
-            } else .{ .name = .{
-                .schema = join_qname.schema,
-                .name = join_qname.name,
-                .alias = try self.parseOptionalAlias(),
-            } };
-            _ = try self.expect(.kw_on);
-            const condition = try self.parseExpr();
-            try joins.append(self.alloc(), .{ .table_ref = join_table_ref, .condition = condition });
+        // Parse optional JOIN clauses: INNER JOIN … ON …, CROSS JOIN …, or
+        // comma-separated tables (implicit CROSS JOIN: FROM a, b).
+        while (true) {
+            if (self.peek().kind == .comma) {
+                _ = self.advance(); // consume ','
+                const tref = try self.parseTableRef();
+                try joins.append(self.alloc(), .{ .join_type = .cross, .table_ref = tref, .condition = null });
+            } else if (self.peek().kind == .kw_inner) {
+                _ = self.advance(); // consume INNER
+                _ = try self.expect(.kw_join);
+                const tref = try self.parseTableRef();
+                _ = try self.expect(.kw_on);
+                const condition = try self.parseExpr();
+                try joins.append(self.alloc(), .{ .join_type = .inner, .table_ref = tref, .condition = condition });
+            } else if (self.peek().kind == .kw_cross) {
+                _ = self.advance(); // consume CROSS
+                _ = try self.expect(.kw_join);
+                const tref = try self.parseTableRef();
+                try joins.append(self.alloc(), .{ .join_type = .cross, .table_ref = tref, .condition = null });
+            } else break;
         }
 
         var where: ?ast.Expr = null;
@@ -401,6 +366,35 @@ pub const Parser = struct {
             return try self.alloc().dupe(u8, self.tokenText(tok));
         }
         return null;
+    }
+
+    // Parse a table reference: a qualified name optionally followed by TVF args
+    // and an optional AS alias.  Used for both the FROM table and JOIN tables.
+    fn parseTableRef(self: *Parser) ParseError!ast.TableRef {
+        const qname = try self.parseQualifiedName();
+        if (self.peek().kind == .lparen) {
+            _ = self.advance();
+            var args: std.ArrayList(ast.Expr) = .empty;
+            if (self.peek().kind != .rparen) {
+                while (true) {
+                    try args.append(self.alloc(), try self.parseExpr());
+                    if (self.peek().kind != .comma) break;
+                    _ = self.advance();
+                }
+            }
+            _ = try self.expect(.rparen);
+            return .{ .func = .{
+                .schema = qname.schema,
+                .name = qname.name,
+                .args = try args.toOwnedSlice(self.alloc()),
+                .alias = try self.parseOptionalAlias(),
+            } };
+        }
+        return .{ .name = .{
+            .schema = qname.schema,
+            .name = qname.name,
+            .alias = try self.parseOptionalAlias(),
+        } };
     }
 
     // ── INSERT ────────────────────────────────────────────────────────────────
@@ -647,6 +641,33 @@ pub const Parser = struct {
 
     fn parseComparison(self: *Parser) ParseError!ast.Expr {
         const left = try self.parseAddSub();
+
+        // Detect NOT IN / NOT BETWEEN before the standard comparison operators
+        // so that the NOT is consumed here rather than by the outer parseNot().
+        if (self.peek().kind == .kw_not and self.pos + 1 < self.tokens.len) {
+            switch (self.tokens[self.pos + 1].kind) {
+                .kw_in => {
+                    _ = self.advance(); // NOT
+                    _ = self.advance(); // IN
+                    return self.parseInList(left, true);
+                },
+                .kw_between => {
+                    _ = self.advance(); // NOT
+                    _ = self.advance(); // BETWEEN
+                    return self.parseBetween(left, true);
+                },
+                else => {},
+            }
+        }
+        if (self.peek().kind == .kw_in) {
+            _ = self.advance();
+            return self.parseInList(left, false);
+        }
+        if (self.peek().kind == .kw_between) {
+            _ = self.advance();
+            return self.parseBetween(left, false);
+        }
+
         const op: ast.BinaryOp = switch (self.peek().kind) {
             .op_eq => .eq,
             .op_neq => .neq,
@@ -661,6 +682,35 @@ pub const Parser = struct {
         const node = try self.alloc().create(ast.Expr.Binary);
         node.* = .{ .op = op, .left = left, .right = right };
         return .{ .binary = node };
+    }
+
+    fn parseBetween(self: *Parser, operand: ast.Expr, negated: bool) ParseError!ast.Expr {
+        const low = try self.parseAddSub();
+        _ = try self.expect(.kw_and);
+        const high = try self.parseAddSub();
+        const node = try self.alloc().create(ast.Expr.Between);
+        node.* = .{ .operand = operand, .low = low, .high = high, .negated = negated };
+        return .{ .between = node };
+    }
+
+    fn parseInList(self: *Parser, operand: ast.Expr, negated: bool) ParseError!ast.Expr {
+        _ = try self.expect(.lparen);
+        var list: std.ArrayList(ast.Expr) = .empty;
+        if (self.peek().kind != .rparen) {
+            try list.append(self.alloc(), try self.parseExpr());
+            while (self.peek().kind == .comma) {
+                _ = self.advance();
+                try list.append(self.alloc(), try self.parseExpr());
+            }
+        }
+        _ = try self.expect(.rparen);
+        const node = try self.alloc().create(ast.Expr.InList);
+        node.* = .{
+            .operand = operand,
+            .list = try list.toOwnedSlice(self.alloc()),
+            .negated = negated,
+        };
+        return .{ .in_list = node };
     }
 
     fn parseAddSub(self: *Parser) ParseError!ast.Expr {
@@ -705,6 +755,11 @@ pub const Parser = struct {
             node.* = .{ .op = .neg, .operand = operand };
             return .{ .unary = node };
         }
+        // Unary + is a no-op; consume it and parse the operand normally.
+        if (self.peek().kind == .op_plus) {
+            _ = self.advance();
+            return self.parseUnary();
+        }
         return self.parsePrimary();
     }
 
@@ -744,6 +799,14 @@ pub const Parser = struct {
                 if (self.peek().kind == .lparen) {
                     _ = self.advance();
                     var args: std.ArrayList(ast.Expr) = .empty;
+                    // Optional DISTINCT / ALL quantifier before the argument.
+                    var distinct = false;
+                    if (self.peek().kind == .kw_distinct) {
+                        _ = self.advance();
+                        distinct = true;
+                    } else if (self.peek().kind == .kw_all) {
+                        _ = self.advance(); // ALL is the default; distinct stays false
+                    }
                     if (self.peek().kind != .rparen) {
                         // COUNT(*): the lone * inside a function call is a special
                         // aggregate wildcard, not multiplication.
@@ -760,7 +823,7 @@ pub const Parser = struct {
                     }
                     _ = try self.expect(.rparen);
                     const node = try self.alloc().create(ast.Expr.FuncCall);
-                    node.* = .{ .name = name, .args = try args.toOwnedSlice(self.alloc()) };
+                    node.* = .{ .name = name, .args = try args.toOwnedSlice(self.alloc()), .distinct = distinct };
                     return .{ .func_call = node };
                 }
                 // Handle table.col qualified references in expressions
@@ -777,6 +840,25 @@ pub const Parser = struct {
                     }
                 }
                 return .{ .col_ref = name };
+            },
+            .kw_cast => {
+                _ = self.advance();
+                _ = try self.expect(.lparen);
+                const operand = try self.parseExpr();
+                _ = try self.expect(.kw_as);
+                const type_tok = self.peek();
+                const target_type: t.ColType = switch (type_tok.kind) {
+                    .kw_int => .int,
+                    .kw_real => .real,
+                    .kw_text => .text,
+                    .kw_blob => .blob,
+                    else => return ParseError.UnexpectedToken,
+                };
+                _ = self.advance();
+                _ = try self.expect(.rparen);
+                const node = try self.alloc().create(ast.Expr.Cast);
+                node.* = .{ .target_type = target_type, .operand = operand };
+                return .{ .cast = node };
             },
             .lparen => {
                 _ = self.advance();

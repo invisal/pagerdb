@@ -1,0 +1,64 @@
+# Table alias and TVF alias tests.
+
+statement ok
+CREATE TABLE users (id INTEGER NOT NULL, name TEXT NOT NULL);
+
+statement ok
+INSERT INTO users VALUES (1, 'alice'), (2, 'bob');
+
+# Table alias allows qualified column reference
+query IT
+SELECT u.id, u.name FROM users AS u ORDER BY u.id;
+----
+1
+alice
+2
+bob
+
+# TVF alias allows qualified column reference
+query I
+SELECT gs.generate_series FROM generate_series(5) AS gs ORDER BY 1;
+----
+0
+1
+2
+3
+4
+
+# JOIN with table aliases on both sides
+statement ok
+CREATE TABLE orders (id INTEGER NOT NULL, user_id INTEGER NOT NULL);
+
+statement ok
+INSERT INTO orders VALUES (10, 1);
+
+query IT
+SELECT o.id, u.name FROM orders AS o INNER JOIN users AS u ON o.user_id = u.id;
+----
+10
+alice
+
+# JOIN two aliased TVFs — keeps values that appear in both ranges
+query I
+SELECT gs.generate_series
+FROM generate_series(10) AS gs
+INNER JOIN generate_series(5) AS gs2 ON gs.generate_series = gs2.generate_series
+ORDER BY 1;
+----
+0
+1
+2
+3
+4
+
+# JOIN plain table alias with TVF alias — items ids 1,2,3 match generate_series(4) = 0..3
+statement ok
+CREATE TABLE items (id INTEGER NOT NULL, label TEXT NOT NULL);
+
+statement ok
+INSERT INTO items VALUES (1, 'one'), (2, 'two'), (3, 'three');
+
+query I
+SELECT COUNT(*) FROM items AS i INNER JOIN generate_series(4) AS gs ON i.id = gs.generate_series;
+----
+3

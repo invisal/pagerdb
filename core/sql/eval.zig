@@ -22,6 +22,8 @@ pub fn evalExpr(
         .binary => |b| try evalBinary(b, row_values),
         .unary => |u| try evalUnary(u, row_values),
         .func_call => |f| try evalFunc(f, row_values, alloc),
+        .cast => |c| try evalCast(c, row_values, alloc),
+        .in_list => |il| try evalInList(il, row_values, alloc),
     };
 }
 
@@ -55,25 +57,32 @@ fn evalBinary(
     row_values: []const row.Value,
 ) EvalError!EvalValue {
     // SQL uses three-valued logic (TRUE/FALSE/NULL).  For AND/OR we must
-    // short-circuit to avoid evaluating the right side when the left side
-    // already determines the result.  This also prevents type errors when
-    // the right side contains invalid expressions guarded by NULL checks.
-    // Short-circuit AND / OR before evaluating both sides.
+    // short-circuit correctly: a definite FALSE dominates AND, a definite TRUE
+    // dominates OR, even when the other operand is NULL.
+    //
+    //   NULL AND FALSE = FALSE   (not NULL — FALSE dominates)
+    //   NULL AND TRUE  = NULL
+    //   NULL OR  TRUE  = TRUE    (not NULL — TRUE dominates)
+    //   NULL OR  FALSE = NULL
     if (b.op == .and_) {
         const left = try evalExpr(b.left, row_values, undefined);
-        if (left == .bool_ and !left.bool_) return .{ .bool_ = false };
+        // Definite false on the left: short-circuit without evaluating right.
+        if (left != .null_ and !isTruthy(left)) return .{ .bool_ = false };
         const right = try evalExpr(b.right, row_values, undefined);
+        // Definite false on the right (covers NULL AND FALSE = FALSE).
+        if (right != .null_ and !isTruthy(right)) return .{ .bool_ = false };
         if (left == .null_ or right == .null_) return .{ .null_ = {} };
-        return .{ .bool_ = isTruthy(left) and isTruthy(right) };
+        return .{ .bool_ = true };
     }
     if (b.op == .or_) {
         const left = try evalExpr(b.left, row_values, undefined);
-        if (left == .bool_ and left.bool_) return .{ .bool_ = true };
+        // Definite true on the left: short-circuit without evaluating right.
+        if (left != .null_ and isTruthy(left)) return .{ .bool_ = true };
         const right = try evalExpr(b.right, row_values, undefined);
-        if (left == .bool_ and right == .bool_) return .{ .bool_ = left.bool_ or right.bool_ };
-        if (left == .null_ and right == .null_) return .{ .null_ = {} };
-        if (right == .bool_ and right.bool_) return .{ .bool_ = true };
-        return .{ .null_ = {} };
+        // Definite true on the right (covers NULL OR TRUE = TRUE).
+        if (right != .null_ and isTruthy(right)) return .{ .bool_ = true };
+        if (left == .null_ or right == .null_) return .{ .null_ = {} };
+        return .{ .bool_ = false };
     }
 
     const left = try evalExpr(b.left, row_values, undefined);
@@ -96,6 +105,34 @@ fn evalBinary(
     };
 }
 
+// SQL IN semantics (three-valued logic):
+//   - If operand is NULL → NULL
+//   - If any list element equals operand → TRUE (or FALSE if negated)
+//   - If any list element is NULL (and none matched) → NULL
+//   - Otherwise → FALSE (or TRUE if negated)
+fn evalInList(
+    il: *lp.Expr.InList,
+    row_values: []const row.Value,
+    alloc: std.mem.Allocator,
+) EvalError!EvalValue {
+    const operand = try evalExpr(il.operand, row_values, alloc);
+    if (operand == .null_) return .{ .null_ = {} };
+
+    var saw_null = false;
+    for (il.list) |item| {
+        const val = try evalExpr(item, row_values, alloc);
+        if (val == .null_) {
+            saw_null = true;
+            continue;
+        }
+        if (compareValues(operand, val) == .eq) {
+            return .{ .bool_ = !il.negated };
+        }
+    }
+    if (saw_null) return .{ .null_ = {} };
+    return .{ .bool_ = il.negated };
+}
+
 fn evalUnary(
     u: *lp.Expr.Unary,
     row_values: []const row.Value,
@@ -112,6 +149,38 @@ fn evalUnary(
             .real => |f| .{ .real = -f },
             .null_ => .{ .null_ = {} },
             else => EvalError.TypeMismatch,
+        },
+    };
+}
+
+fn evalCast(
+    c: *lp.Expr.Cast,
+    row_values: []const row.Value,
+    alloc: std.mem.Allocator,
+) EvalError!EvalValue {
+    const val = try evalExpr(c.operand, row_values, alloc);
+    if (val == .null_) return .{ .null_ = {} };
+    return switch (c.target_type) {
+        .int => switch (val) {
+            .int => val,
+            .real => |f| .{ .int = @intFromFloat(f) },
+            .bool_ => |b| .{ .int = if (b) 1 else 0 },
+            .text => |s| .{ .int = std.fmt.parseInt(i64, s, 10) catch return EvalError.TypeMismatch },
+            .null_ => unreachable,
+        },
+        .real => switch (val) {
+            .real => val,
+            .int => |n| .{ .real = @floatFromInt(n) },
+            .bool_ => |b| .{ .real = if (b) 1.0 else 0.0 },
+            .text => |s| .{ .real = std.fmt.parseFloat(f64, s) catch return EvalError.TypeMismatch },
+            .null_ => unreachable,
+        },
+        .text, .blob => switch (val) {
+            .text => val,
+            .int => |n| .{ .text = try std.fmt.allocPrint(alloc, "{d}", .{n}) },
+            .real => |f| .{ .text = try std.fmt.allocPrint(alloc, "{d}", .{f}) },
+            .bool_ => |b| .{ .text = if (b) "1" else "0" },
+            .null_ => unreachable,
         },
     };
 }
