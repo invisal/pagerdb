@@ -149,9 +149,26 @@ pub const ProjectCursor = struct {
 // struct flows unchanged from planning through physical execution.
 pub const AggSpec = lp.AggCallSpec;
 
+// Hash context for Value keys, used by the per-spec distinct sets.
+const ValueHashContext = struct {
+    pub fn hash(_: @This(), v: row_mod.Value) u64 {
+        var h = std.hash.Wyhash.init(0);
+        v.hashInto(&h);
+        return h.final();
+    }
+    pub fn eql(_: @This(), a: row_mod.Value, b: row_mod.Value) bool {
+        return row_mod.Value.eql(a, b);
+    }
+};
+
+// Set of Values seen so far within a group for one DISTINCT aggregate.
+const ValueSet = std.HashMapUnmanaged(row_mod.Value, void, ValueHashContext, 80);
+
 const GroupState = struct {
     key_values: []row_mod.Value,
     acc_states: []*anyopaque,
+    // One entry per agg_spec; only used when spec.distinct == true.
+    distinct_sets: []ValueSet,
 };
 
 fn hashGroupRow(values: []const row_mod.Value, group_by: []const usize) u64 {
@@ -232,7 +249,10 @@ pub const AggregateCursor = struct {
                         acc_states[i] = try spec.func.init(a);
                     }
 
-                    try groups.append(a, .{ .key_values = key_values, .acc_states = acc_states });
+                    const distinct_sets = try a.alloc(ValueSet, self.agg_specs.len);
+                    for (distinct_sets) |*ds| ds.* = .empty;
+
+                    try groups.append(a, .{ .key_values = key_values, .acc_states = acc_states, .distinct_sets = distinct_sets });
                     const new_idx = groups.items.len - 1;
 
                     const gop = try buckets.getOrPut(h);
@@ -245,6 +265,14 @@ pub const AggregateCursor = struct {
                 const g = &groups.items[group_idx.?];
                 for (self.agg_specs, 0..) |spec, i| {
                     const v: ?row_mod.Value = if (spec.col_idx) |col_idx| r.values[col_idx] else null;
+                    if (spec.distinct) {
+                        // col_idx is guaranteed non-null for DISTINCT specs (validated by planner).
+                        const val = v.?;
+                        // Skip SQL NULLs — same behaviour as the non-distinct path.
+                        if (val == .null) continue;
+                        const gop = try g.distinct_sets[i].getOrPut(a, val);
+                        if (gop.found_existing) continue;
+                    }
                     try spec.func.step(g.acc_states[i], v, a);
                 }
             }
@@ -257,7 +285,9 @@ pub const AggregateCursor = struct {
             for (self.agg_specs, 0..) |spec, i| {
                 acc_states[i] = try spec.func.init(a);
             }
-            try groups.append(a, .{ .key_values = &.{}, .acc_states = acc_states });
+            const distinct_sets = try a.alloc(ValueSet, self.agg_specs.len);
+            for (distinct_sets) |*ds| ds.* = .empty;
+            try groups.append(a, .{ .key_values = &.{}, .acc_states = acc_states, .distinct_sets = distinct_sets });
         }
 
         const out = try a.alloc(Row, groups.items.len);

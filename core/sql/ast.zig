@@ -47,7 +47,7 @@ pub const Expr = union(enum) {
 
     pub const Binary = struct { op: BinaryOp, left: Expr, right: Expr };
     pub const Unary = struct { op: UnaryOp, operand: Expr };
-    pub const FuncCall = struct { name: []const u8, args: []Expr };
+    pub const FuncCall = struct { name: []const u8, args: []Expr, distinct: bool = false };
     pub const Cast = struct { target_type: t.ColType, operand: Expr };
 
     /// Deep-clone the expression to a different allocator.
@@ -90,6 +90,7 @@ pub const Expr = union(enum) {
                 node.* = .{
                     .name = try allocator.dupe(u8, f.name),
                     .args = cloned_args,
+                    .distinct = f.distinct,
                 };
                 break :blk .{ .func_call = node };
             },

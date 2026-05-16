@@ -743,6 +743,14 @@ pub const Parser = struct {
                 if (self.peek().kind == .lparen) {
                     _ = self.advance();
                     var args: std.ArrayList(ast.Expr) = .empty;
+                    // Optional DISTINCT / ALL quantifier before the argument.
+                    var distinct = false;
+                    if (self.peek().kind == .kw_distinct) {
+                        _ = self.advance();
+                        distinct = true;
+                    } else if (self.peek().kind == .kw_all) {
+                        _ = self.advance(); // ALL is the default; distinct stays false
+                    }
                     if (self.peek().kind != .rparen) {
                         // COUNT(*): the lone * inside a function call is a special
                         // aggregate wildcard, not multiplication.
@@ -759,7 +767,7 @@ pub const Parser = struct {
                     }
                     _ = try self.expect(.rparen);
                     const node = try self.alloc().create(ast.Expr.FuncCall);
-                    node.* = .{ .name = name, .args = try args.toOwnedSlice(self.alloc()) };
+                    node.* = .{ .name = name, .args = try args.toOwnedSlice(self.alloc()), .distinct = distinct };
                     return .{ .func_call = node };
                 }
                 // Handle table.col qualified references in expressions

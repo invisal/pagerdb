@@ -51,9 +51,11 @@ pub const Expr = union(enum) {
 //
 // Pairs a resolved aggregate function with its input column.
 // col_idx == null means COUNT(*) — count every row regardless of value.
+// distinct == true means only unique non-null values are fed to step().
 pub const AggCallSpec = struct {
     func: *const agg_mod.AggFunc,
     col_idx: ?usize,
+    distinct: bool = false,
 };
 
 // ── Plan nodes ─────────────────────────────────────────────────────────────────
@@ -814,7 +816,9 @@ pub const LogicalPlanner = struct {
             .func_call => |f| {
                 if (agg_mod.find(f.name)) |agg_func| {
                     const col_idx = try self.resolveAggArgToColIdx(f.args, scan_schema);
-                    try out.append(self.alloc(), .{ .func = agg_func, .col_idx = col_idx });
+                    // DISTINCT requires a real column argument, not a wildcard/no-arg.
+                    if (f.distinct and col_idx == null) return PlanError.WrongArgCount;
+                    try out.append(self.alloc(), .{ .func = agg_func, .col_idx = col_idx, .distinct = f.distinct });
                 } else {
                     for (f.args) |arg| try self.collectAggSpecs(arg, scan_schema, out);
                 }
@@ -889,7 +893,8 @@ pub const LogicalPlanner = struct {
                     const arg_col_idx = try self.resolveAggArgToColIdx(f.args, scan_schema);
                     for (agg_specs, 0..) |spec, i| {
                         if (std.ascii.eqlIgnoreCase(spec.func.name, f.name) and
-                            spec.col_idx == arg_col_idx)
+                            spec.col_idx == arg_col_idx and
+                            spec.distinct == f.distinct)
                         {
                             break :blk Expr{ .col_idx = group_by_count + i };
                         }
