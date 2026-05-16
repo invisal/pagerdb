@@ -276,6 +276,13 @@ pub const Parser = struct {
                 _ = try self.expect(.kw_join);
                 const tref = try self.parseTableRef();
                 try joins.append(self.alloc(), .{ .join_type = .cross, .table_ref = tref, .condition = null });
+            } else if (self.peek().kind == .kw_join) {
+                // Bare JOIN is INNER JOIN in SQL.
+                _ = self.advance(); // consume JOIN
+                const tref = try self.parseTableRef();
+                _ = try self.expect(.kw_on);
+                const condition = try self.parseExpr();
+                try joins.append(self.alloc(), .{ .join_type = .inner, .table_ref = tref, .condition = condition });
             } else break;
         }
 

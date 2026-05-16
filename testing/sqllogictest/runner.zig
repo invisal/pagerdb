@@ -191,8 +191,9 @@ fn runQuery(alloc: Allocator, db: *Database, path: []const u8, qry: parser.Query
     }
 
     for (rs.rows) |row| {
-        for (row.values) |val| {
-            try actual.append(alloc, try formatValue(alloc, val));
+        for (row.values, 0..) |val, col_idx| {
+            const col_type: u8 = if (col_idx < qry.type_string.len) qry.type_string[col_idx] else 0;
+            try actual.append(alloc, try formatValue(alloc, val, col_type));
         }
     }
 
@@ -379,7 +380,7 @@ fn appendTablesMarkdown(alloc: Allocator, buf: *std.ArrayList(u8), db: *Database
 
         for (rs.rows) |data_row| {
             for (data_row.values) |val| {
-                try values.append(alloc, try formatValue(alloc, val));
+                try values.append(alloc, try formatValue(alloc, val, 0));
             }
         }
 
@@ -410,13 +411,19 @@ fn writeAgentReport(alloc: Allocator, io: std.Io, _: []const u8, error_content: 
 }
 
 // Formats a value to an owned string for display or comparison.
-fn formatValue(alloc: Allocator, val: anytype) ![]const u8 {
+// col_type is the SLT column type character: 'I' = integer, 'R' = real, 'T' = text, 0 = unknown.
+// When col_type is 'I' and the value is real, SQLite truncates toward zero before comparing,
+// so we do the same to match the reference tool's behaviour.
+fn formatValue(alloc: Allocator, val: anytype, col_type: u8) ![]const u8 {
     return switch (val) {
         .null => alloc.dupe(u8, "NULL"),
         .int => |n| std.fmt.allocPrint(alloc, "{d}", .{n}),
         // Normalize -0.0 → 0.0 so output matches the reference tool (SQLite
         // treats negative zero as zero for display purposes).
-        .real => |f| std.fmt.allocPrint(alloc, "{d}", .{if (f == 0.0) @as(f64, 0.0) else f}),
+        .real => |f| if (col_type == 'I')
+            std.fmt.allocPrint(alloc, "{d}", .{@as(i64, @intFromFloat(@trunc(f)))})
+        else
+            std.fmt.allocPrint(alloc, "{d}", .{if (f == 0.0) @as(f64, 0.0) else f}),
         .text => |s| alloc.dupe(u8, s),
         .blob => |b| std.fmt.allocPrint(alloc, "<blob {d}B>", .{b.len}),
     };
