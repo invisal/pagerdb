@@ -699,6 +699,11 @@ pub const Parser = struct {
             node.* = .{ .op = .neg, .operand = operand };
             return .{ .unary = node };
         }
+        // Unary + is a no-op; consume it and parse the operand normally.
+        if (self.peek().kind == .op_plus) {
+            _ = self.advance();
+            return self.parseUnary();
+        }
         return self.parsePrimary();
     }
 
