@@ -77,6 +77,25 @@ pub fn build(b: *std.Build) void {
     if (b.args) |dst_args| run_dst.addArgs(dst_args);
     dst_step.dependOn(&run_dst.step);
 
+    // ── Sqllogictest runner ───────────────────────────────────────────────────
+    const slt_mod = b.createModule(.{
+        .root_source_file = b.path("testing/sqllogictest/main.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    slt_mod.addImport("core", core_mod);
+
+    const slt_exe = b.addExecutable(.{
+        .name = "sqllogictest",
+        .root_module = slt_mod,
+    });
+    b.installArtifact(slt_exe);
+
+    const run_slt = b.addRunArtifact(slt_exe);
+    if (b.args) |slt_args| run_slt.addArgs(slt_args);
+    const slt_step = b.step("slt", "Run sqllogictest suite");
+    slt_step.dependOn(&run_slt.step);
+
     // ── Examples (auto-discovered: any examples/<name>/root.zig) ─────────────
     // Build one example:  zig build example-<name>
     // Run one example:    zig build run-example-<name>

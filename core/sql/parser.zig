@@ -539,7 +539,7 @@ pub const Parser = struct {
                 else => {
                     self.error_message = std.fmt.allocPrint(
                         self.arena.allocator(),
-                        "[{d}] Invalid column type '{s}', expected INT, REAL, TEXT, or BLOB",
+                        "[{d}] Invalid column type '{s}', expected INT, INTEGER, REAL, TEXT, or BLOB",
                         .{ type_tok.start, self.tokenText(type_tok) },
                     ) catch "";
                     return ParseError.InvalidType;

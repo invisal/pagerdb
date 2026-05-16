@@ -8,3 +8,5 @@ mydb.db.wal
 bench/data/*.db
 
 scratch/
+
+testing/sqllogictest/upstream/

@@ -1,0 +1,59 @@
+name: Heavy Tests
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-zig
+      - name: Build
+        run: zig build
+
+  benchmark:
+    name: Benchmark
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-zig
+      - name: Install sqlite3
+        run: sudo apt-get install -y libsqlite3-dev
+      - name: Run benchmark
+        run: zig build bench
+
+  simulation:
+    name: Simulation Test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-zig
+      - name: Run simulation tests
+        run: zig build dst -- --seeds 500 --ops 100
+
+  sqllogictest:
+    name: SQLLogicTest
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-zig
+      - name: Fetch upstream sqllogictest suite
+        run: |
+          git clone --depth=1 https://github.com/invisal/sqllogictest /tmp/slt-upstream
+          cp -r /tmp/slt-upstream/test testing/sqllogictest/upstream
+          rm -rf /tmp/slt-upstream
+      - name: Run sqllogictest suite
+        run: |
+          echo '## SQLLogicTest Results' >> "$GITHUB_STEP_SUMMARY"
+          printf '```\n' >> "$GITHUB_STEP_SUMMARY"
+          zig build slt -- --dir testing/sqllogictest/upstream 2>&1 | tee -a "$GITHUB_STEP_SUMMARY" || true
+          printf '```\n' >> "$GITHUB_STEP_SUMMARY"
