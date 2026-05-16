@@ -1,0 +1,204 @@
+---
+const DATA_URL = "https://invisal.github.io/pagerdb/sqllogictest.json";
+
+let sqllogictestPercent: string | null = null;
+let sqllogictestPassed: string | null = null;
+let sqllogictestFiles: string | null = null;
+
+try {
+  const response = await fetch(DATA_URL);
+  if (!response.ok) {
+    throw new Error(`Request failed with ${response.status}`);
+  }
+
+  const payload = (await response.json()) as {
+    summary: { passed: number; failed: number; files: number };
+  };
+  const total = payload.summary.passed + payload.summary.failed;
+  const percent = total === 0 ? 0 : (payload.summary.passed / total) * 100;
+  const formatter = new Intl.NumberFormat("en-US");
+
+  sqllogictestPercent = percent.toFixed(2);
+  sqllogictestPassed = formatter.format(payload.summary.passed);
+  sqllogictestFiles = formatter.format(payload.summary.files);
+} catch {
+  sqllogictestPercent = null;
+}
+---
+
+<section id="tests" class="py-[var(--row)] border-b border-rule">
+  <div class="max-w-[1280px] mx-auto px-[var(--gutter)]">
+    <div class="lg:grid lg:grid-cols-[280px_1fr] lg:gap-16 lg:items-start">
+      <header class="mb-9 lg:mb-0 lg:sticky lg:top-8">
+        <pre
+          class="font-mono text-[clamp(10px,1.1vw,13px)] leading-[1.1] text-ink mb-[18px]"><span class="hi">## 05 ─</span> tests ───────────────────────────────────────────────────────</pre>
+        <p class="text-ink2 m-0 max-w-[34ch]">
+          PagerDB has a few different testing surfaces. sqllogictest is the
+          current public signal; deterministic simulation and fuzzing are in
+          progress and not published yet.
+        </p>
+      </header>
+
+      <div
+        class="grid gap-4 xl:grid-cols-[minmax(0,1.5fr)_minmax(0,1fr)_minmax(0,1fr)]"
+      >
+        <article class="border border-rule bg-bg2">
+          <div class="p-6 border-b border-dashed border-rule-soft">
+            <div
+              class="font-mono text-[11px] uppercase tracking-[0.10em] text-ink3 mb-3"
+            >
+              active
+            </div>
+            <h3
+              class="m-0 text-[clamp(28px,4vw,44px)] leading-[1.05] tracking-[-0.04em] text-ink"
+            >
+              sqllogictest
+            </h3>
+            <p class="mt-4 mb-0 text-ink2 leading-[1.7] max-w-[62ch]">
+              A standard SQL logic test corpus with thousands of query and
+              result assertions. It is the clearest snapshot of how much SQL
+              PagerDB actually supports today.
+            </p>
+
+            <div class="mt-6">
+              <div class="flex items-end justify-between gap-4 mb-2">
+                <span
+                  class="font-mono text-[11px] uppercase tracking-[0.10em] text-ink3"
+                >
+                  coverage
+                </span>
+                <span
+                  class="text-[26px] leading-none font-semibold tracking-[-0.04em] text-ink"
+                >
+                  {sqllogictestPercent ? `${sqllogictestPercent}%` : "--"}
+                </span>
+              </div>
+              <div class="h-3 border border-rule overflow-hidden bg-bg">
+                <div
+                  class="h-full bg-accent"
+                  style={sqllogictestPercent
+                    ? `width: ${sqllogictestPercent}%`
+                    : "width: 0%"}
+                >
+                </div>
+              </div>
+            </div>
+
+            <div class="mt-4 grid gap-3 sm:grid-cols-2">
+              <div
+                class="border border-dashed border-rule-soft bg-bg px-4 py-4"
+              >
+                <div
+                  class="font-mono text-[10px] uppercase tracking-[0.10em] text-ink3 mb-2"
+                >
+                  passed cases
+                </div>
+                <div
+                  class="text-[22px] leading-none font-semibold tracking-[-0.04em] text-syn-str"
+                >
+                  {sqllogictestPassed ?? "unavailable"}
+                </div>
+              </div>
+              <div
+                class="border border-dashed border-rule-soft bg-bg px-4 py-4"
+              >
+                <div
+                  class="font-mono text-[10px] uppercase tracking-[0.10em] text-ink3 mb-2"
+                >
+                  tracked files
+                </div>
+                <div
+                  class="text-[22px] leading-none font-semibold tracking-[-0.04em] text-ink"
+                >
+                  {sqllogictestFiles ?? "unavailable"}
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="p-6 flex flex-wrap gap-3">
+            <a
+              href="/sqllogictest"
+              class="font-mono text-[12px] tracking-[0.06em] px-4 py-[10px] border border-rule text-bg bg-ink no-underline inline-flex items-center gap-2 uppercase hover:bg-accent hover:border-accent hover:text-white"
+              >$ open coverage page</a
+            >
+          </div>
+        </article>
+
+        <article
+          class="border border-dashed border-rule-soft bg-bg2 opacity-60"
+        >
+          <div class="p-6 border-b border-dashed border-rule-soft">
+            <div
+              class="font-mono text-[11px] uppercase tracking-[0.10em] text-ink3 mb-3"
+            >
+              work in progress
+            </div>
+            <h3
+              class="m-0 text-[clamp(22px,3vw,34px)] leading-[1.05] tracking-[-0.04em] text-ink3"
+            >
+              deterministic simulation
+            </h3>
+            <p class="mt-4 mb-0 text-ink3 leading-[1.7]">
+              Repeatable crash and recovery scenarios to verify pager, WAL, and
+              transaction behavior under controlled schedules.
+            </p>
+          </div>
+          <div class="p-6">
+            <div
+              class="font-mono text-[11px] uppercase tracking-[0.10em] text-ink4 mb-2"
+            >
+              status
+            </div>
+            <div
+              class="h-3 border border-dashed border-rule-soft overflow-hidden bg-bg"
+            >
+            </div>
+            <p
+              class="mt-4 mb-0 text-[12px] uppercase tracking-[0.08em] text-ink4 font-mono"
+            >
+              not published yet
+            </p>
+          </div>
+        </article>
+
+        <article
+          class="border border-dashed border-rule-soft bg-bg2 opacity-60"
+        >
+          <div class="p-6 border-b border-dashed border-rule-soft">
+            <div
+              class="font-mono text-[11px] uppercase tracking-[0.10em] text-ink3 mb-3"
+            >
+              work in progress
+            </div>
+            <h3
+              class="m-0 text-[clamp(22px,3vw,34px)] leading-[1.05] tracking-[-0.04em] text-ink3"
+            >
+              fuzzer
+            </h3>
+            <p class="mt-4 mb-0 text-ink3 leading-[1.7]">
+              Randomized statement generation and state mutation intended to
+              shake out parser, planner, and execution edge cases.
+            </p>
+          </div>
+          <div class="p-6">
+            <div
+              class="font-mono text-[11px] uppercase tracking-[0.10em] text-ink4 mb-2"
+            >
+              status
+            </div>
+            <div
+              class="h-3 border border-dashed border-rule-soft overflow-hidden bg-bg"
+            >
+            </div>
+            <p
+              class="mt-4 mb-0 text-[12px] uppercase tracking-[0.08em] text-ink4 font-mono"
+            >
+              not published yet
+            </p>
+          </div>
+        </article>
+      </div>
+    </div>
+  </div>
+</section>
