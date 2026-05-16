@@ -21,3 +21,11 @@ Do not report a fix as complete until all three succeed without errors.
 ## Testing Guidelines
 
 SQL behaviour tests go in `testing/sqllogictest/tests/` as `.test` files. Use Zig tests only for assertions `.test` files cannot make: `affected` row counts, specific error codes, column name checks, internal API calls, or disk-reopen tests.
+
+When `zig build slt` reports a failure, re-run with the failing file and `--agent`:
+
+```
+zig build slt -- <failing_file> --agent
+```
+
+This stops at the first failure in that file and writes a full diagnostic report to `testing/sqllogictest/last_error.md`, including the failing SLT record, the expected vs. got diff, and the current database state. Read that file to diagnose the issue.

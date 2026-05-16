@@ -62,19 +62,23 @@ export default function SqllogictestCoverage({
   return (
     <section className="max-w-[1280px] mx-auto px-[var(--gutter)] py-[clamp(28px,6vw,72px)]">
       <div className="mb-10">
-        <div className="font-mono text-[11px] uppercase tracking-[0.10em] text-ink3 mb-4">
-          published test report
-        </div>
         <div className="flex flex-col gap-6 lg:flex-row lg:items-end lg:justify-between">
           <div className="max-w-[760px]">
-            <h1 className="m-0 text-[clamp(42px,8vw,104px)] leading-[0.88] tracking-[-0.07em] text-ink">
-              sqllogictest coverage
+            <div className="font-mono text-[11px] uppercase tracking-[0.10em] text-ink3 mb-3">
+              coverage report
+            </div>
+            <h1 className="m-0 text-[clamp(28px,3.5vw,44px)] leading-[1.05] tracking-[-0.03em] font-normal text-ink">
+              sqllogictest
             </h1>
             <p className="mt-5 mb-0 text-ink2 text-[15px] leading-[1.8] max-w-[68ch]">
-              Live coverage against the published sqllogictest JSON feed. The
-              overall progress bar is based on total passed versus failed cases,
-              and the table below shows which test files still account for the
-              most failures.
+              PagerDB runs against the{" "}
+              <a href="https://sqlite.org/sqllogictest/dir?ci=tip&name=test">
+                SQLite project's sqllogictest suite
+              </a>{" "}
+              — thousands of query-and-result assertions covering a wide surface
+              of standard SQL. The results reflect whether the engine computes
+              the right answer. They say nothing about performance, durability,
+              or concurrency.
             </p>
           </div>
         </div>
