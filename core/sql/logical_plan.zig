@@ -15,6 +15,7 @@ pub const Aggregate = root.Aggregate;
 pub const AggCallSpec = root.AggCallSpec;
 pub const SortKey = root.SortKey;
 pub const Sort = root.Sort;
+pub const Distinct = root.Distinct;
 pub const Join = root.Join;
 pub const LogicalInsert = root.LogicalInsert;
 pub const LogicalUpdate = root.LogicalUpdate;

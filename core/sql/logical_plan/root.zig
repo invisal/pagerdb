@@ -141,6 +141,15 @@ pub const Sort = struct {
     schema: Schema, // same shape as input; Sort doesn't add or remove columns
 };
 
+// Blocking deduplication node: consumes all input rows and emits only unique
+// rows (equality across all projected columns).  Sits above Project so column
+// indices refer to SELECT output positions, and below Sort so duplicates are
+// removed before ordering.
+pub const Distinct = struct {
+    input: *LogicalPlan,
+    schema: Schema, // same shape as input
+};
+
 // Nested-loop inner join.  The schema merges both tables' columns with
 // right-side indices offset by the number of left-side columns.
 pub const Join = struct {
@@ -158,6 +167,7 @@ pub const LogicalPlan = union(enum) {
     project: *Project,
     aggregate: *Aggregate,
     sort: *Sort,
+    distinct: *Distinct,
     join: *Join,
     insert: LogicalInsert,
     update: LogicalUpdate,
@@ -175,6 +185,7 @@ pub const LogicalPlan = union(enum) {
             .project => |n| n.schema,
             .aggregate => |n| n.schema,
             .sort => |n| n.schema,
+            .distinct => |n| n.schema,
             .join => |n| n.schema,
             .insert => |n| n.schema,
             .update => |n| n.schema,
@@ -398,6 +409,12 @@ pub const LogicalPlanner = struct {
                 .schema = proj_schema,
             };
             current = .{ .project = project };
+        }
+
+        if (stmt.distinct) {
+            const d = try self.alloc().create(Distinct);
+            d.* = .{ .input = try self.box(current), .schema = current.schema() };
+            current = .{ .distinct = d };
         }
 
         if (stmt.order_by.len > 0) {

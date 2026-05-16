@@ -147,6 +147,10 @@ pub const Parser = struct {
     fn parseSelect(self: *Parser) ParseError!ast.SelectStmt {
         _ = try self.expect(.kw_select);
 
+        // DISTINCT keeps only unique rows; ALL (the default) keeps all rows.
+        const distinct = self.peek().kind == .kw_distinct;
+        if (distinct or self.peek().kind == .kw_all) _ = self.advance();
+
         var columns: std.ArrayList(ast.SelectCol) = .empty;
 
         // Parse column list
@@ -241,6 +245,7 @@ pub const Parser = struct {
             }
 
             return ast.SelectStmt{
+                .distinct = distinct,
                 .table_ref = null,
                 .joins = &.{},
                 .columns = try columns.toOwnedSlice(self.alloc()),
@@ -350,6 +355,7 @@ pub const Parser = struct {
         }
 
         return ast.SelectStmt{
+            .distinct = distinct,
             .table_ref = opt_table_ref,
             .joins = try joins.toOwnedSlice(self.alloc()),
             .columns = try columns.toOwnedSlice(self.alloc()),

@@ -78,6 +78,11 @@ pub const PhysicalSort = struct {
     schema: lp.Schema,
 };
 
+pub const PhysicalDistinct = struct {
+    input: *PhysicalPlan,
+    schema: lp.Schema,
+};
+
 pub const PhysicalPlan = union(enum) {
     seq_scan: PhysicalSeqScan,
     vtab_scan: PhysicalVTabScan,
@@ -87,6 +92,7 @@ pub const PhysicalPlan = union(enum) {
     project: *PhysicalProject,
     aggregate: *PhysicalAggregate,
     sort: *PhysicalSort,
+    distinct: *PhysicalDistinct,
     join: *PhysicalJoin,
     insert: PhysicalInsert,
     update: PhysicalUpdate,
@@ -106,6 +112,7 @@ pub const PhysicalPlan = union(enum) {
             .project => |n| n.schema,
             .aggregate => |n| n.schema,
             .sort => |n| n.schema,
+            .distinct => |n| n.schema,
             .join => |n| n.schema,
             .insert => |n| n.schema,
             .update => |n| n.schema,
@@ -141,6 +148,7 @@ pub const PhysicalPlanner = struct {
             .project => |n| try self.planProject(n),
             .aggregate => |n| try self.planAggregate(n),
             .sort => |n| try self.planSort(n),
+            .distinct => |n| try self.planDistinct(n),
             .join => |n| try self.planJoin(n),
             .insert => |n| .{ .insert = .{ .table = n.table, .values = n.values, .schema = n.schema } },
             .update => |n| try self.planUpdate(n),
@@ -217,6 +225,14 @@ pub const PhysicalPlanner = struct {
         const sort = try self.alloc().create(PhysicalSort);
         sort.* = .{ .input = phys_input, .keys = node.keys, .schema = node.schema };
         return .{ .sort = sort };
+    }
+
+    fn planDistinct(self: *PhysicalPlanner, node: *lp.Distinct) !PhysicalPlan {
+        const phys_input = try self.alloc().create(PhysicalPlan);
+        phys_input.* = try self.plan(node.input.*);
+        const d = try self.alloc().create(PhysicalDistinct);
+        d.* = .{ .input = phys_input, .schema = node.schema };
+        return .{ .distinct = d };
     }
 
     fn planJoin(self: *PhysicalPlanner, node: *lp.Join) !PhysicalPlan {
