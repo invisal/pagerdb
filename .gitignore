@@ -10,3 +10,4 @@ bench/data/*.db
 scratch/
 
 testing/sqllogictest/upstream/
+testing/sqllogictest/last_error.md
