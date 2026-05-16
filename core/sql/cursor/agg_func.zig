@@ -1,5 +1,5 @@
 const std = @import("std");
-const row_mod = @import("../row.zig");
+const row_mod = @import("../../row.zig");
 
 pub const Value = row_mod.Value;
 

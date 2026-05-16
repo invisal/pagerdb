@@ -99,7 +99,7 @@ pub const Parser = struct {
             self.error_message = std.fmt.allocPrint(
                 self.arena.allocator(),
                 "[{d}] Expected {s} but got '{s}'",
-                .{ tok.start, tokenKindLabel(kind), got },
+                .{ tok.start, kind.label(), got },
             ) catch "";
             return ParseError.UnexpectedToken;
         }
@@ -791,63 +791,6 @@ pub const Parser = struct {
         }
     }
 };
-
-fn tokenKindLabel(kind: lexer.TokenKind) []const u8 {
-    return switch (kind) {
-        .kw_select => "SELECT",
-        .kw_from => "FROM",
-        .kw_where => "WHERE",
-        .kw_and => "AND",
-        .kw_or => "OR",
-        .kw_not => "NOT",
-        .kw_insert => "INSERT",
-        .kw_into => "INTO",
-        .kw_values => "VALUES",
-        .kw_update => "UPDATE",
-        .kw_set => "SET",
-        .kw_delete => "DELETE",
-        .kw_create => "CREATE",
-        .kw_table => "TABLE",
-        .kw_null => "NULL",
-        .kw_true => "TRUE",
-        .kw_false => "FALSE",
-        .kw_int => "INT",
-        .kw_real => "REAL",
-        .kw_text => "TEXT",
-        .kw_blob => "BLOB",
-        .kw_begin => "BEGIN",
-        .kw_commit => "COMMIT",
-        .kw_rollback => "ROLLBACK",
-        .kw_inner => "INNER",
-        .kw_join => "JOIN",
-        .kw_on => "ON",
-        .kw_as => "AS",
-        .kw_group => "GROUP",
-        .kw_by => "BY",
-        .kw_default => "DEFAULT",
-        .identifier => "identifier",
-        .lit_int => "integer",
-        .lit_float => "float",
-        .lit_string => "string",
-        .lparen => "'('",
-        .rparen => "')'",
-        .comma => "','",
-        .semicolon => "';'",
-        .dot => "'.'",
-        .op_star => "'*'",
-        .op_plus => "'+'",
-        .op_minus => "'-'",
-        .op_slash => "'/'",
-        .op_eq => "'='",
-        .op_neq => "'<>'",
-        .op_lt => "'<'",
-        .op_lte => "'<='",
-        .op_gt => "'>'",
-        .op_gte => "'>='",
-        .eof => "end of input",
-        else => "token",
-    };
-}
 
 // Unescape '' → ' in a raw string-literal body.
 fn unescapeString(allocator: std.mem.Allocator, raw: []const u8) ![]const u8 {

@@ -7,7 +7,7 @@ const eval = @import("eval.zig");
 const Parser = @import("parser.zig").Parser;
 const lp_mod = @import("logical_plan.zig");
 const pp_mod = @import("physical_plan.zig");
-const cursor_mod = @import("../cursor/root.zig");
+const cursor_mod = @import("cursor/root.zig");
 
 // ── Result types ───────────────────────────────────────────────────────────────
 

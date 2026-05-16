@@ -1,5 +1,5 @@
 const std = @import("std");
-const th = @import("../test_helpers.zig");
+const th = @import("../../test_helpers.zig");
 const cursor_mod = @import("root.zig");
 const agg_mod = @import("agg_func.zig");
 
