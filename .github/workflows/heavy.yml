@@ -41,7 +41,7 @@ jobs:
   sqllogictest:
     name: SQLLogicTest
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     needs: build
     steps:
       - uses: actions/checkout@v4

@@ -76,9 +76,14 @@ pub fn runFile(alloc: Allocator, io: std.Io, path: []const u8, show_errors: usiz
                     skip_next = false;
                     continue;
                 }
+                // Per-statement arena backed by page_allocator so that deinit()
+                // actually returns memory to the OS rather than being a no-op
+                // against the file-level arena.
+                var stmt_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+                defer stmt_arena.deinit();
                 const print_err = agent or (show_errors > 0 and failures_shown < show_errors);
                 const report: ?*std.ArrayList(u8) = if (agent) &report_buf else null;
-                const ok = try runStatement(alloc, db, path, stmt, print_err, report);
+                const ok = try runStatement(stmt_arena.allocator(), alloc, db, path, stmt, print_err, report);
                 if (ok) {
                     result.passed += 1;
                 } else {
@@ -95,9 +100,11 @@ pub fn runFile(alloc: Allocator, io: std.Io, path: []const u8, show_errors: usiz
                     skip_next = false;
                     continue;
                 }
+                var stmt_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+                defer stmt_arena.deinit();
                 const print_err = agent or (show_errors > 0 and failures_shown < show_errors);
                 const report: ?*std.ArrayList(u8) = if (agent) &report_buf else null;
-                const ok = try runQuery(alloc, db, path, qry, print_err, report);
+                const ok = try runQuery(stmt_arena.allocator(), alloc, db, path, qry, print_err, report);
                 if (ok) {
                     result.passed += 1;
                 } else {
@@ -119,8 +126,8 @@ pub fn runFile(alloc: Allocator, io: std.Io, path: []const u8, show_errors: usiz
     return result;
 }
 
-fn runStatement(alloc: Allocator, db: *Database, path: []const u8, stmt: parser.StatementRecord, print_error: bool, report: ?*std.ArrayList(u8)) !bool {
-    var exec_result = try execute(alloc, db, stmt.sql);
+fn runStatement(exec_alloc: Allocator, buf_alloc: Allocator, db: *Database, path: []const u8, stmt: parser.StatementRecord, print_error: bool, report: ?*std.ArrayList(u8)) !bool {
+    var exec_result = try execute(exec_alloc, db, stmt.sql);
     defer exec_result.deinit();
 
     const got_err = exec_result == .err;
@@ -130,11 +137,11 @@ fn runStatement(alloc: Allocator, db: *Database, path: []const u8, stmt: parser.
         if (print_error) {
             if (report) |buf| {
                 const exp_str: []const u8 = if (stmt.expected == .ok) "ok" else "error";
-                try bufPrint(alloc, buf, "## Failed Statement\n\n**Location:** `{s}:{d}`\n\n**SLT:**\n```\nstatement {s}\n{s}\n```\n\n", .{ path, stmt.line, exp_str, stmt.sql });
+                try bufPrint(buf_alloc, buf, "## Failed Statement\n\n**Location:** `{s}:{d}`\n\n**SLT:**\n```\nstatement {s}\n{s}\n```\n\n", .{ path, stmt.line, exp_str, stmt.sql });
                 if (want_err) {
-                    try buf.appendSlice(alloc, "**Error:** expected error but statement succeeded\n");
+                    try buf.appendSlice(buf_alloc, "**Error:** expected error but statement succeeded\n");
                 } else {
-                    try bufPrint(alloc, buf, "**Error:** expected ok but got: `{s}`\n", .{exec_result.err.message});
+                    try bufPrint(buf_alloc, buf, "**Error:** expected ok but got: `{s}`\n", .{exec_result.err.message});
                 }
             } else {
                 if (want_err) {
@@ -149,23 +156,23 @@ fn runStatement(alloc: Allocator, db: *Database, path: []const u8, stmt: parser.
     return true;
 }
 
-fn runQuery(alloc: Allocator, db: *Database, path: []const u8, qry: parser.QueryRecord, print_error: bool, report: ?*std.ArrayList(u8)) !bool {
+fn runQuery(exec_alloc: Allocator, buf_alloc: Allocator, db: *Database, path: []const u8, qry: parser.QueryRecord, print_error: bool, report: ?*std.ArrayList(u8)) !bool {
     const sort_str: []const u8 = switch (qry.sort_mode) {
         .none => "",
         .row_sort => " rowsort",
         .value_sort => " valuesort",
     };
 
-    var exec_result = try execute(alloc, db, qry.sql);
+    var exec_result = try execute(exec_alloc, db, qry.sql);
     defer exec_result.deinit();
 
     if (exec_result == .err) {
         if (print_error) {
             if (report) |buf| {
-                try bufPrint(alloc, buf, "## Failed Query\n\n**Location:** `{s}:{d}`\n\n**SLT:**\n```\nquery {s}{s}\n{s}\n```\n\n**Error:** query returned error: `{s}`\n\n### Expected\n\n", .{ path, qry.line, qry.type_string, sort_str, qry.sql, exec_result.err.message });
+                try bufPrint(buf_alloc, buf, "## Failed Query\n\n**Location:** `{s}:{d}`\n\n**SLT:**\n```\nquery {s}{s}\n{s}\n```\n\n**Error:** query returned error: `{s}`\n\n### Expected\n\n", .{ path, qry.line, qry.type_string, sort_str, qry.sql, exec_result.err.message });
                 switch (qry.expected) {
-                    .values => |expected| try appendValuesCodeBlock(alloc, buf, qry.type_string.len, expected),
-                    .hash => |h| try bufPrint(alloc, buf, "{d} values hashing to `{s}`\n", .{ h.count, h.md5 }),
+                    .values => |expected| try appendValuesCodeBlock(buf_alloc, buf, qry.type_string.len, expected),
+                    .hash => |h| try bufPrint(buf_alloc, buf, "{d} values hashing to `{s}`\n", .{ h.count, h.md5 }),
                 }
             } else {
                 std.debug.print("FAIL {s}:{d}: query returned error: {s}\n  sql: {s}\n", .{ path, qry.line, exec_result.err.message, qry.sql });
@@ -176,7 +183,7 @@ fn runQuery(alloc: Allocator, db: *Database, path: []const u8, qry: parser.Query
     if (exec_result != .result_set) {
         if (print_error) {
             if (report) |buf| {
-                try bufPrint(alloc, buf, "## Failed Query\n\n**Location:** `{s}:{d}`\n\n**SLT:**\n```\nquery {s}{s}\n{s}\n```\n\n**Error:** query did not return a result set\n", .{ path, qry.line, qry.type_string, sort_str, qry.sql });
+                try bufPrint(buf_alloc, buf, "## Failed Query\n\n**Location:** `{s}:{d}`\n\n**SLT:**\n```\nquery {s}{s}\n{s}\n```\n\n**Error:** query did not return a result set\n", .{ path, qry.line, qry.type_string, sort_str, qry.sql });
             } else {
                 std.debug.print("FAIL {s}:{d}: query did not return a result set\n  sql: {s}\n", .{ path, qry.line, qry.sql });
             }
@@ -190,14 +197,14 @@ fn runQuery(alloc: Allocator, db: *Database, path: []const u8, qry: parser.Query
     // Collect all result values as formatted strings (flat list).
     var actual: std.ArrayList([]const u8) = .empty;
     defer {
-        for (actual.items) |s| alloc.free(s);
-        actual.deinit(alloc);
+        for (actual.items) |s| exec_alloc.free(s);
+        actual.deinit(exec_alloc);
     }
 
     for (rs.rows) |row| {
         for (row.values, 0..) |val, col_idx| {
             const col_type: u8 = if (col_idx < qry.type_string.len) qry.type_string[col_idx] else 0;
-            try actual.append(alloc, try formatValue(alloc, val, col_type));
+            try actual.append(exec_alloc, try formatValue(exec_alloc, val, col_type));
         }
     }
 
@@ -212,10 +219,10 @@ fn runQuery(alloc: Allocator, db: *Database, path: []const u8, qry: parser.Query
             if (actual.items.len != expected.len) {
                 if (print_error) {
                     if (report) |buf| {
-                        try bufPrint(alloc, buf, "## Failed Query\n\n**Location:** `{s}:{d}`\n\n**SLT:**\n```\nquery {s}{s}\n{s}\n```\n\n**Error:** expected {d} values, got {d}\n\n### Expected\n\n", .{ path, qry.line, qry.type_string, sort_str, qry.sql, expected.len, actual.items.len });
-                        try appendValuesCodeBlock(alloc, buf, col_count, expected);
-                        try buf.appendSlice(alloc, "\n### Got\n\n");
-                        try appendValuesCodeBlock(alloc, buf, col_count, actual.items);
+                        try bufPrint(buf_alloc, buf, "## Failed Query\n\n**Location:** `{s}:{d}`\n\n**SLT:**\n```\nquery {s}{s}\n{s}\n```\n\n**Error:** expected {d} values, got {d}\n\n### Expected\n\n", .{ path, qry.line, qry.type_string, sort_str, qry.sql, expected.len, actual.items.len });
+                        try appendValuesCodeBlock(buf_alloc, buf, col_count, expected);
+                        try buf.appendSlice(buf_alloc, "\n### Got\n\n");
+                        try appendValuesCodeBlock(buf_alloc, buf, col_count, actual.items);
                     } else {
                         std.debug.print("FAIL {s}:{d}: expected {d} values, got {d}\n  sql: {s}\n", .{
                             path, qry.line, expected.len, actual.items.len, qry.sql,
@@ -228,10 +235,10 @@ fn runQuery(alloc: Allocator, db: *Database, path: []const u8, qry: parser.Query
                 if (!std.mem.eql(u8, act, exp)) {
                     if (print_error) {
                         if (report) |buf| {
-                            try bufPrint(alloc, buf, "## Failed Query\n\n**Location:** `{s}:{d}`\n\n**SLT:**\n```\nquery {s}{s}\n{s}\n```\n\n**Error:** value[{d}] expected `{s}`, got `{s}`\n\n### Expected\n\n", .{ path, qry.line, qry.type_string, sort_str, qry.sql, idx, exp, act });
-                            try appendValuesCodeBlock(alloc, buf, col_count, expected);
-                            try buf.appendSlice(alloc, "\n### Got\n\n");
-                            try appendValuesCodeBlock(alloc, buf, col_count, actual.items);
+                            try bufPrint(buf_alloc, buf, "## Failed Query\n\n**Location:** `{s}:{d}`\n\n**SLT:**\n```\nquery {s}{s}\n{s}\n```\n\n**Error:** value[{d}] expected `{s}`, got `{s}`\n\n### Expected\n\n", .{ path, qry.line, qry.type_string, sort_str, qry.sql, idx, exp, act });
+                            try appendValuesCodeBlock(buf_alloc, buf, col_count, expected);
+                            try buf.appendSlice(buf_alloc, "\n### Got\n\n");
+                            try appendValuesCodeBlock(buf_alloc, buf, col_count, actual.items);
                         } else {
                             std.debug.print("FAIL {s}:{d}: value[{d}] expected '{s}', got '{s}'\n  sql: {s}\n", .{
                                 path, qry.line, idx, exp, act, qry.sql,
@@ -246,8 +253,8 @@ fn runQuery(alloc: Allocator, db: *Database, path: []const u8, qry: parser.Query
             if (actual.items.len != h.count) {
                 if (print_error) {
                     if (report) |buf| {
-                        try bufPrint(alloc, buf, "## Failed Query\n\n**Location:** `{s}:{d}`\n\n**SLT:**\n```\nquery {s}{s}\n{s}\n```\n\n**Error:** expected {d} values, got {d}\n\n### Got\n\n", .{ path, qry.line, qry.type_string, sort_str, qry.sql, h.count, actual.items.len });
-                        try appendValuesCodeBlock(alloc, buf, col_count, actual.items);
+                        try bufPrint(buf_alloc, buf, "## Failed Query\n\n**Location:** `{s}:{d}`\n\n**SLT:**\n```\nquery {s}{s}\n{s}\n```\n\n**Error:** expected {d} values, got {d}\n\n### Got\n\n", .{ path, qry.line, qry.type_string, sort_str, qry.sql, h.count, actual.items.len });
+                        try appendValuesCodeBlock(buf_alloc, buf, col_count, actual.items);
                     } else {
                         std.debug.print("FAIL {s}:{d}: expected {d} values, got {d}\n  sql: {s}\n", .{
                             path, qry.line, h.count, actual.items.len, qry.sql,
@@ -260,8 +267,8 @@ fn runQuery(alloc: Allocator, db: *Database, path: []const u8, qry: parser.Query
             if (!std.mem.eql(u8, &digest, h.md5)) {
                 if (print_error) {
                     if (report) |buf| {
-                        try bufPrint(alloc, buf, "## Failed Query\n\n**Location:** `{s}:{d}`\n\n**SLT:**\n```\nquery {s}{s}\n{s}\n```\n\n**Error:** hash mismatch (expected `{s}`, got `{s}`)\n\n### Got\n\n", .{ path, qry.line, qry.type_string, sort_str, qry.sql, h.md5, digest });
-                        try appendValuesCodeBlock(alloc, buf, col_count, actual.items);
+                        try bufPrint(buf_alloc, buf, "## Failed Query\n\n**Location:** `{s}:{d}`\n\n**SLT:**\n```\nquery {s}{s}\n{s}\n```\n\n**Error:** hash mismatch (expected `{s}`, got `{s}`)\n\n### Got\n\n", .{ path, qry.line, qry.type_string, sort_str, qry.sql, h.md5, digest });
+                        try appendValuesCodeBlock(buf_alloc, buf, col_count, actual.items);
                     } else {
                         std.debug.print("FAIL {s}:{d}: hash mismatch (expected {s}, got {s})\n  sql: {s}\n", .{
                             path, qry.line, h.md5, digest, qry.sql,

@@ -112,6 +112,15 @@ pub const LogicalInsert = struct {
     schema: Schema, // target table schema (for the executor to build the row)
 };
 
+pub const LogicalInsertSelect = struct {
+    table: []const u8,
+    schema: Schema, // target table schema
+    // col_map[i] is the source column index in the SELECT output for target column i.
+    // Empty when no explicit column list was given (positional mapping).
+    col_map: []usize,
+    input: *LogicalPlan, // the SELECT plan
+};
+
 pub const LogicalUpdate = struct {
     table: []const u8,
     input: *LogicalPlan, // scan + optional filter to find matching rows
@@ -202,6 +211,7 @@ pub const LogicalPlan = union(enum) {
     distinct: *Distinct,
     join: *Join,
     insert: LogicalInsert,
+    insert_select: LogicalInsertSelect,
     update: LogicalUpdate,
     delete: LogicalDelete,
     create_table: LogicalCreateTable,
@@ -221,6 +231,7 @@ pub const LogicalPlan = union(enum) {
             .distinct => |n| n.schema,
             .join => |n| n.schema,
             .insert => |n| n.schema,
+            .insert_select => |n| n.schema,
             .update => |n| n.schema,
             .delete => |n| n.schema,
             .const_scan, .create_table, .create_index, .begin, .commit, .rollback => Schema{ .table = "", .columns = &.{} },
@@ -489,79 +500,124 @@ pub const LogicalPlanner = struct {
         const schema = try self.buildSchema(meta, null);
         const col_count = meta.columns.len;
 
-        const all_rows = try self.alloc().alloc([]Expr, stmt.values.len);
+        switch (stmt.source) {
+            .select => |sel_stmt| {
+                // INSERT INTO t [(cols)] SELECT ...
+                // Plan the SELECT, then build a col_map from SELECT output → target columns.
+                const sel_plan = try self.alloc().create(LogicalPlan);
+                sel_plan.* = try self.planSelect(sel_stmt.*);
 
-        for (stmt.values, 0..) |raw_row, row_idx| {
-            const row_values = try self.alloc().alloc(Expr, col_count);
-            const is_set = try self.alloc().alloc(bool, col_count);
-            defer self.alloc().free(is_set);
+                const sel_col_count = sel_plan.schema().columns.len;
 
-            // Initialize each column to its default / NULL.
-            for (meta.columns) |col| {
-                const idx = col.attnum;
-                if (col.default_expr) |default_expr| {
-                    row_values[idx] = try self.resolveExpr(default_expr, schema);
-                    is_set[idx] = true;
-                } else if (col.nullable) {
-                    row_values[idx] = .null_lit;
-                    is_set[idx] = true;
+                var col_map: []usize = &.{};
+
+                if (stmt.columns.len > 0) {
+                    // Explicit column list: map each named target column to its SELECT position.
+                    if (stmt.columns.len != sel_col_count) {
+                        self.setError("Column count ({d}) does not match SELECT output ({d})", .{ stmt.columns.len, sel_col_count });
+                        return PlanError.ColumnCountMismatch;
+                    }
+                    col_map = try self.alloc().alloc(usize, col_count);
+                    // Default: identity (column i → SELECT output i)
+                    for (0..col_count) |i| col_map[i] = i;
+                    for (stmt.columns, 0..) |name, sel_i| {
+                        const col = meta.findColumn(name) orelse {
+                            self.setError("Column '{s}' does not exist in table '{s}'", .{ name, stmt.table });
+                            return PlanError.ColumnNotFound;
+                        };
+                        col_map[col.attnum] = sel_i;
+                    }
                 } else {
-                    is_set[idx] = false;
-                }
-            }
-
-            if (stmt.columns.len > 0) {
-                // Named column insert (user specifies target columns)
-                // INSERT INTO table_name(col1, col2, ...) VALUES (...)
-                if (stmt.columns.len != raw_row.len) {
-                    self.setError("Column count ({d}) does not match value count ({d})", .{ stmt.columns.len, raw_row.len });
-                    return PlanError.ColumnCountMismatch;
+                    // Positional: SELECT column i maps to target column i.
+                    if (sel_col_count > col_count) return PlanError.ColumnCountMismatch;
                 }
 
-                for (stmt.columns, 0..) |name, i| {
-                    const col = meta.findColumn(name) orelse {
-                        self.setError("Column '{s}' does not exist in table '{s}'", .{ name, stmt.table });
-                        return PlanError.ColumnNotFound;
-                    };
-                    const idx = col.attnum;
-                    const current_value = raw_row[i];
-                    if (current_value != .default_value) {
-                        row_values[idx] = try self.resolveExpr(current_value, schema);
-                        is_set[idx] = true;
-                    }
-                }
-            } else {
-                // Positional insert (values mapped by column order)
-                // INSERT INTO table_name VALUES (...)
-                if (raw_row.len > col_count)
-                    return PlanError.ColumnCountMismatch;
-
-                for (raw_row, 0..) |expr, i| {
-                    if (expr != .default_value) {
-                        row_values[i] = try self.resolveExpr(expr, schema);
-                        is_set[i] = true;
-                    }
-                }
-            }
-
-            // Ensure all required columns are filled.
-            for (is_set, 0..) |set, i| {
-                if (!set) {
-                    self.setError("Column '{s}' has no default value and was not provided", .{meta.columns[i].name});
-                    return PlanError.NoDefaultValue;
-                }
-            }
-
-            all_rows[row_idx] = row_values;
-        }
-
-        return .{
-            .insert = .{
-                .table = schema.table,
-                .values = all_rows,
-                .schema = schema,
+                return .{
+                    .insert_select = .{
+                        .table = schema.table,
+                        .schema = schema,
+                        .col_map = col_map,
+                        .input = sel_plan,
+                    },
+                };
             },
-        };
+
+            .values => |all_values| {
+                const all_rows = try self.alloc().alloc([]Expr, all_values.len);
+
+                for (all_values, 0..) |raw_row, row_idx| {
+                    const row_values = try self.alloc().alloc(Expr, col_count);
+                    const is_set = try self.alloc().alloc(bool, col_count);
+                    defer self.alloc().free(is_set);
+
+                    // Initialize each column to its default / NULL.
+                    for (meta.columns) |col| {
+                        const idx = col.attnum;
+                        if (col.default_expr) |default_expr| {
+                            row_values[idx] = try self.resolveExpr(default_expr, schema);
+                            is_set[idx] = true;
+                        } else if (col.nullable) {
+                            row_values[idx] = .null_lit;
+                            is_set[idx] = true;
+                        } else {
+                            is_set[idx] = false;
+                        }
+                    }
+
+                    if (stmt.columns.len > 0) {
+                        // Named column insert (user specifies target columns)
+                        // INSERT INTO table_name(col1, col2, ...) VALUES (...)
+                        if (stmt.columns.len != raw_row.len) {
+                            self.setError("Column count ({d}) does not match value count ({d})", .{ stmt.columns.len, raw_row.len });
+                            return PlanError.ColumnCountMismatch;
+                        }
+
+                        for (stmt.columns, 0..) |name, i| {
+                            const col = meta.findColumn(name) orelse {
+                                self.setError("Column '{s}' does not exist in table '{s}'", .{ name, stmt.table });
+                                return PlanError.ColumnNotFound;
+                            };
+                            const idx = col.attnum;
+                            const current_value = raw_row[i];
+                            if (current_value != .default_value) {
+                                row_values[idx] = try self.resolveExpr(current_value, schema);
+                                is_set[idx] = true;
+                            }
+                        }
+                    } else {
+                        // Positional insert (values mapped by column order)
+                        // INSERT INTO table_name VALUES (...)
+                        if (raw_row.len > col_count)
+                            return PlanError.ColumnCountMismatch;
+
+                        for (raw_row, 0..) |expr, i| {
+                            if (expr != .default_value) {
+                                row_values[i] = try self.resolveExpr(expr, schema);
+                                is_set[i] = true;
+                            }
+                        }
+                    }
+
+                    // Ensure all required columns are filled.
+                    for (is_set, 0..) |set, i| {
+                        if (!set) {
+                            self.setError("Column '{s}' has no default value and was not provided", .{meta.columns[i].name});
+                            return PlanError.NoDefaultValue;
+                        }
+                    }
+
+                    all_rows[row_idx] = row_values;
+                }
+
+                return .{
+                    .insert = .{
+                        .table = schema.table,
+                        .values = all_rows,
+                        .schema = schema,
+                    },
+                };
+            },
+        }
     }
 
     // ── UPDATE ─────────────────────────────────────────────────────────────────

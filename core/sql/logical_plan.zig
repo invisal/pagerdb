@@ -21,6 +21,7 @@ pub const Sort = root.Sort;
 pub const Distinct = root.Distinct;
 pub const Join = root.Join;
 pub const LogicalInsert = root.LogicalInsert;
+pub const LogicalInsertSelect = root.LogicalInsertSelect;
 pub const LogicalUpdate = root.LogicalUpdate;
 pub const LogicalDelete = root.LogicalDelete;
 pub const LogicalCreateTable = root.LogicalCreateTable;
