@@ -149,10 +149,10 @@ pub fn parse(alloc: Allocator, content: []const u8) !ParseResult {
                 .expected = expected,
             } });
         } else if (std.mem.startsWith(u8, line, "skipif ")) {
-            try records.append(aa, .{ .skipif = line["skipif ".len..] });
+            try records.append(aa, .{ .skipif = stripComment(line["skipif ".len..]) });
             i += 1;
         } else if (std.mem.startsWith(u8, line, "onlyif ")) {
-            try records.append(aa, .{ .onlyif = line["onlyif ".len..] });
+            try records.append(aa, .{ .onlyif = stripComment(line["onlyif ".len..]) });
             i += 1;
         } else {
             i += 1;
@@ -163,6 +163,13 @@ pub fn parse(alloc: Allocator, content: []const u8) !ParseResult {
         .records = try records.toOwnedSlice(aa),
         .arena = arena,
     };
+}
+
+// Strips an optional inline comment (# ...) and trailing whitespace from a token.
+// "postgresql # some note" → "postgresql"
+fn stripComment(s: []const u8) []const u8 {
+    const comment_pos = std.mem.indexOf(u8, s, "#") orelse return std.mem.trimEnd(u8, s, " \t");
+    return std.mem.trimEnd(u8, s[0..comment_pos], " \t");
 }
 
 // Parses "N values hashing to <md5>" into a QueryExpected.hash, or returns

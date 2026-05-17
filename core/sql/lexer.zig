@@ -56,6 +56,7 @@ pub const TokenKind = enum {
     kw_unique,
     kw_if,
     kw_exists,
+    kw_having,
     // Literals
     lit_int, // int_val is valid
     lit_float, // float_val is valid
@@ -138,6 +139,7 @@ pub const TokenKind = enum {
             .kw_unique => "UNIQUE",
             .kw_if => "IF",
             .kw_exists => "EXISTS",
+            .kw_having => "HAVING",
             .identifier => "identifier",
             .lit_int => "integer",
             .lit_float => "float",
@@ -238,6 +240,7 @@ const keyword_pairs = [_]struct { text: []const u8, kind: TokenKind }{
     .{ .text = "unique", .kind = .kw_unique },
     .{ .text = "if", .kind = .kw_if },
     .{ .text = "exists", .kind = .kw_exists },
+    .{ .text = "having", .kind = .kw_having },
 };
 
 fn lookupKeyword(word: []const u8) ?TokenKind {

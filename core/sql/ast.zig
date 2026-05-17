@@ -273,6 +273,7 @@ pub const SelectStmt = struct {
     columns: []SelectCol, // len = 0 means SELECT *
     where: ?Expr,
     group_by: []Expr = &.{}, // GROUP BY expressions; empty = no grouping
+    having: ?Expr = null, // HAVING filter applied after grouping; null = no filter
     order_by: []OrderByItem = &.{}, // ORDER BY items; empty = no ordering
 };
 

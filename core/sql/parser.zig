@@ -185,7 +185,7 @@ pub const Parser = struct {
         if (!has_from) {
             // Only allow clause keywords, semicolon, or EOF after the column list when there is no FROM.
             const nk = self.peek().kind;
-            if (nk != .eof and nk != .semicolon and nk != .kw_order and nk != .kw_group and nk != .kw_where) {
+            if (nk != .eof and nk != .semicolon and nk != .kw_order and nk != .kw_group and nk != .kw_where and nk != .kw_having) {
                 const tok = self.advance();
                 self.error_message = try std.fmt.allocPrint(self.alloc(), "[{d}] Unexpected token FROM but found {s}", .{ tok.start, self.tokenText(tok) });
                 return ParseError.UnexpectedToken;
@@ -221,6 +221,12 @@ pub const Parser = struct {
                 }
             }
 
+            var having: ?ast.Expr = null;
+            if (self.peek().kind == .kw_having) {
+                _ = self.advance();
+                having = try self.parseExpr();
+            }
+
             var order_by: std.ArrayList(ast.OrderByItem) = .empty;
             if (self.peek().kind == .kw_order) {
                 _ = self.advance();
@@ -251,6 +257,7 @@ pub const Parser = struct {
                 .columns = try columns.toOwnedSlice(self.alloc()),
                 .where = where,
                 .group_by = try group_by.toOwnedSlice(self.alloc()),
+                .having = having,
                 .order_by = try order_by.toOwnedSlice(self.alloc()),
             };
         }
@@ -319,6 +326,12 @@ pub const Parser = struct {
             }
         }
 
+        var having: ?ast.Expr = null;
+        if (self.peek().kind == .kw_having) {
+            _ = self.advance();
+            having = try self.parseExpr();
+        }
+
         var order_by: std.ArrayList(ast.OrderByItem) = .empty;
         if (self.peek().kind == .kw_order) {
             _ = self.advance();
@@ -349,6 +362,7 @@ pub const Parser = struct {
             .columns = try columns.toOwnedSlice(self.alloc()),
             .where = where,
             .group_by = try group_by.toOwnedSlice(self.alloc()),
+            .having = having,
             .order_by = try order_by.toOwnedSlice(self.alloc()),
         };
     }

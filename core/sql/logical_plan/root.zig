@@ -321,6 +321,11 @@ pub const LogicalPlanner = struct {
         // route to the aggregate planning path which inserts an Aggregate node.
         if (needsAggregate(stmt)) {
             var result = try self.planSelectAgg(stmt, current, scan_schema);
+            if (stmt.distinct) {
+                const d = try self.alloc().create(Distinct);
+                d.* = .{ .input = try self.box(result), .schema = result.schema() };
+                result = .{ .distinct = d };
+            }
             if (stmt.order_by.len > 0) {
                 const proj_schema = result.schema();
                 const keys = try self.resolveOrderByKeys(stmt.order_by, proj_schema.columns, proj_schema.table);
@@ -759,13 +764,16 @@ pub const LogicalPlanner = struct {
             };
         }
 
-        // Step 2: collect aggregate function calls from SELECT column expressions.
+        // Step 2: collect aggregate function calls from SELECT and HAVING expressions.
         var agg_specs: std.ArrayListUnmanaged(AggCallSpec) = .empty;
         for (stmt.columns) |sel_col| {
             switch (sel_col.col) {
                 .expr => |e| try self.collectAggSpecs(e, scan_schema, &agg_specs),
                 else => {},
             }
+        }
+        if (stmt.having) |having_expr| {
+            try self.collectAggSpecs(having_expr, scan_schema, &agg_specs);
         }
         const agg_specs_slice = try agg_specs.toOwnedSlice(self.alloc());
 
@@ -808,6 +816,19 @@ pub const LogicalPlanner = struct {
             .schema = agg_out_schema,
         };
 
+        // Step 4b: wrap in a Filter for HAVING, resolved against the aggregate output schema.
+        var post_agg: LogicalPlan = .{ .aggregate = agg_node };
+        if (stmt.having) |having_expr| {
+            const pred = try self.resolveExprOverAgg(having_expr, scan_schema, agg_specs_slice, group_by.len, agg_out_schema);
+            const having_filter = try self.alloc().create(Filter);
+            having_filter.* = .{
+                .input = try self.box(post_agg),
+                .predicate = pred,
+                .schema = agg_out_schema,
+            };
+            post_agg = .{ .filter = having_filter };
+        }
+
         // Step 5: build a Project on top to map SELECT column order and naming.
         var proj_exprs: std.ArrayListUnmanaged(Expr) = .empty;
         var proj_cols: std.ArrayListUnmanaged(SchemaCol) = .empty;
@@ -815,9 +836,17 @@ pub const LogicalPlanner = struct {
         for (stmt.columns) |sel_col| {
             switch (sel_col.col) {
                 .star => {
-                    for (agg_out_cols) |sc| {
-                        try proj_exprs.append(self.alloc(), .{ .col_idx = sc.index });
-                        try proj_cols.append(self.alloc(), sc);
+                    // Emit group-key columns in natural scan order (not GROUP BY clause
+                    // order) so that SELECT * matches the source table column layout.
+                    for (scan_schema.columns) |sc| {
+                        if (std.mem.startsWith(u8, sc.name, "__")) continue;
+                        for (group_by, 0..) |src_idx, gb_pos| {
+                            if (src_idx == sc.index) {
+                                try proj_exprs.append(self.alloc(), .{ .col_idx = agg_out_cols[gb_pos].index });
+                                try proj_cols.append(self.alloc(), agg_out_cols[gb_pos]);
+                                break;
+                            }
+                        }
                     }
                 },
                 .name => |n| {
@@ -888,7 +917,7 @@ pub const LogicalPlanner = struct {
         };
         const project = try self.alloc().create(Project);
         project.* = .{
-            .input = try self.box(.{ .aggregate = agg_node }),
+            .input = try self.box(post_agg),
             .exprs = try proj_exprs.toOwnedSlice(self.alloc()),
             .schema = proj_schema,
         };
