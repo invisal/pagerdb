@@ -1,14 +1,15 @@
 const std = @import("std");
 const db_mod = @import("../../db.zig");
 const row_mod = @import("../../row.zig");
-const lp = @import("../logical_plan.zig");
 const pp = @import("../physical_plan.zig");
 const eval = @import("../eval.zig");
+const ee = @import("../exec_expr.zig");
 const vtab_mod = @import("../../vtable/root.zig");
 const agg_mod = @import("agg_func.zig");
 
 const Db = db_mod.Db;
 const Allocator = std.mem.Allocator;
+const EvalContext = eval.EvalContext;
 
 pub const BATCH_SIZE: usize = 64;
 
@@ -25,14 +26,14 @@ pub const Row = struct {
 pub const SeqScanCursor = struct {
     it: Db.DbRowIterator,
 
-    pub fn next(self: *SeqScanCursor, a: Allocator) !?[]Row {
-        var buf = try a.alloc(Row, BATCH_SIZE);
+    pub fn next(self: *SeqScanCursor, ctx: EvalContext) !?[]Row {
+        var buf = try ctx.alloc.alloc(Row, BATCH_SIZE);
         var n: usize = 0;
         while (n < BATCH_SIZE) {
-            const hit = try self.it.next(a) orelse break;
+            const hit = try self.it.next(ctx.alloc) orelse break;
             // Append __rowid, __pageid, __slotid as the last three values so
             // they align with the synthetic SchemaCol entries injected by buildSchema.
-            const vals = try a.alloc(row_mod.Value, hit.values.len + 3);
+            const vals = try ctx.alloc.alloc(row_mod.Value, hit.values.len + 3);
             @memcpy(vals[0..hit.values.len], hit.values);
             vals[hit.values.len] = .{ .int = @intCast(hit.rowid) };
             vals[hit.values.len + 1] = .{ .int = @intCast(hit.page_id) };
@@ -52,11 +53,11 @@ pub const VTabScanCursor = struct {
     // 1-indexed rowid, incremented for every row returned across all batches
     rowid: u64,
 
-    pub fn next(self: *VTabScanCursor, a: Allocator) !?[]Row {
+    pub fn next(self: *VTabScanCursor, ctx: EvalContext) !?[]Row {
         var buf: std.ArrayListUnmanaged(Row) = .empty;
         while (buf.items.len < BATCH_SIZE) {
-            const vals = try self.cursor.next(a) orelse break;
-            try buf.append(a, .{ .rowid = self.rowid, .values = vals });
+            const vals = try self.cursor.next(ctx.alloc) orelse break;
+            try buf.append(ctx.alloc, .{ .rowid = self.rowid, .values = vals });
             self.rowid += 1;
         }
         if (buf.items.len == 0) return null;
@@ -69,11 +70,11 @@ pub const VTabScanCursor = struct {
 pub const ConstantScanCursor = struct {
     first: bool = true,
 
-    pub fn next(self: *ConstantScanCursor, a: Allocator) !?[]Row {
+    pub fn next(self: *ConstantScanCursor, ctx: EvalContext) !?[]Row {
         if (!self.first) return null;
         self.first = false;
-        const t = try a.alloc(Row, 1);
-        t[0] = .{ .rowid = 0, .values = try a.alloc(row_mod.Value, 0) };
+        const t = try ctx.alloc.alloc(Row, 1);
+        t[0] = .{ .rowid = 0, .values = try ctx.alloc.alloc(row_mod.Value, 0) };
         return t;
     }
 };
@@ -83,10 +84,10 @@ pub const ConstantScanCursor = struct {
 pub const PointLookupCursor = struct {
     row: ?Row,
 
-    pub fn next(self: *PointLookupCursor, a: Allocator) !?[]Row {
+    pub fn next(self: *PointLookupCursor, ctx: EvalContext) !?[]Row {
         const r = self.row orelse return null;
         self.row = null;
-        const buf = try a.alloc(Row, 1);
+        const buf = try ctx.alloc.alloc(Row, 1);
         buf[0] = r;
         return buf;
     }
@@ -96,18 +97,18 @@ pub const PointLookupCursor = struct {
 
 pub const FilterCursor = struct {
     input: *Cursor,
-    predicate: lp.Expr,
+    predicate: ee.ExecExpr,
 
     // Pull batches from the input and return only the rows that pass the
     // predicate.  We keep pulling until we have at least one match or the
     // input is exhausted, so callers never receive an empty non-null slice.
-    pub fn next(self: *FilterCursor, a: Allocator) !?[]Row {
+    pub fn next(self: *FilterCursor, ctx: EvalContext) !?[]Row {
         var out: std.ArrayList(Row) = .empty;
         while (out.items.len == 0) {
-            const batch = try self.input.next(a) orelse return null;
+            const batch = try self.input.next(ctx) orelse return null;
             for (batch) |r| {
-                const ev = try eval.evalExpr(self.predicate, r.values, a);
-                if (eval.isTruthy(ev)) try out.append(a, r);
+                const ev = try eval.evalExpr(self.predicate, r.values, ctx);
+                if (eval.isTruthy(ev)) try out.append(ctx.alloc, r);
             }
         }
         return out.items;
@@ -121,15 +122,15 @@ pub const FilterCursor = struct {
 
 pub const ProjectCursor = struct {
     input: *Cursor,
-    exprs: []lp.Expr,
+    exprs: []ee.ExecExpr,
 
-    pub fn next(self: *ProjectCursor, a: Allocator) !?[]Row {
-        const batch = try self.input.next(a) orelse return null;
-        const out = try a.alloc(Row, batch.len);
+    pub fn next(self: *ProjectCursor, ctx: EvalContext) !?[]Row {
+        const batch = try self.input.next(ctx) orelse return null;
+        const out = try ctx.alloc.alloc(Row, batch.len);
         for (batch, 0..) |r, i| {
-            const projected = try a.alloc(row_mod.Value, self.exprs.len);
+            const projected = try ctx.alloc.alloc(row_mod.Value, self.exprs.len);
             for (self.exprs, 0..) |expr, j| {
-                const v = try eval.evalExpr(expr, r.values, a);
+                const v = try eval.evalExpr(expr, r.values, ctx);
                 projected[j] = evalValueToRowValue(v);
             }
             out[i] = .{ .rowid = r.rowid, .values = projected };
@@ -143,11 +144,8 @@ pub const ProjectCursor = struct {
     }
 };
 
-// AggSpec pairs a resolved aggregate function (pointer into agg_mod.REGISTRY)
-// with the column it operates on.  col_idx == null means COUNT(*).
-// This is an alias for the type defined in the logical plan so the same
-// struct flows unchanged from planning through physical execution.
-pub const AggSpec = lp.AggCallSpec;
+// ExecAggCallSpec alias so callers don't need to import exec_expr.zig directly.
+pub const AggSpec = ee.ExecAggCallSpec;
 
 // Hash context for Value keys, used by the per-spec distinct sets.
 const ValueHashContext = struct {
@@ -198,8 +196,8 @@ pub const AggregateCursor = struct {
     result: ?[]Row, // materialized output, null until first next() call
     pos: usize, // next unread position within result
 
-    pub fn next(self: *AggregateCursor, a: Allocator) !?[]Row {
-        if (self.result == null) self.result = try self.compute(a);
+    pub fn next(self: *AggregateCursor, ctx: EvalContext) !?[]Row {
+        if (self.result == null) self.result = try self.compute(ctx);
         const rows = self.result.?;
         if (self.pos >= rows.len) return null;
         const end = @min(self.pos + BATCH_SIZE, rows.len);
@@ -215,7 +213,8 @@ pub const AggregateCursor = struct {
     // Pulls all rows from input, groups them, and returns the result slice.
     // Hashing finds candidate groups quickly; value equality confirms matches
     // to handle collisions and content-based text/blob comparison.
-    fn compute(self: *AggregateCursor, a: Allocator) ![]Row {
+    fn compute(self: *AggregateCursor, ctx: EvalContext) ![]Row {
+        const a = ctx.alloc;
         var groups: std.ArrayList(GroupState) = .empty;
         var buckets = std.AutoHashMap(u64, std.ArrayListUnmanaged(usize)).init(a);
         defer {
@@ -224,7 +223,7 @@ pub const AggregateCursor = struct {
             buckets.deinit();
         }
 
-        while (try self.input.next(a)) |batch| {
+        while (try self.input.next(ctx)) |batch| {
             for (batch) |r| {
                 const h = hashGroupRow(r.values, self.group_by);
                 var group_idx: ?usize = null;
@@ -267,7 +266,7 @@ pub const AggregateCursor = struct {
                     // null input_expr = COUNT(*): pass null to signal "count this row".
                     // Otherwise evaluate the expression to get the per-row value.
                     const v: ?row_mod.Value = if (spec.input_expr) |expr|
-                        evalValueToRowValue(try eval.evalExpr(expr, r.values, a))
+                        evalValueToRowValue(try eval.evalExpr(expr, r.values, ctx))
                     else
                         null;
                     if (spec.distinct) {
@@ -365,12 +364,12 @@ fn compareValues(a: row_mod.Value, b: row_mod.Value) std.math.Order {
 // values array (0-based position in SELECT output), not the raw scan columns.
 pub const SortCursor = struct {
     input: *Cursor,
-    keys: []lp.SortKey,
+    keys: []ee.ExecSortKey,
     result: ?[]Row, // null until first next() triggers compute()
     pos: usize,
 
-    pub fn next(self: *SortCursor, a: Allocator) !?[]Row {
-        if (self.result == null) self.result = try self.compute(a);
+    pub fn next(self: *SortCursor, ctx: EvalContext) !?[]Row {
+        if (self.result == null) self.result = try self.compute(ctx);
         const rows = self.result.?;
         if (self.pos >= rows.len) return null;
         const end = @min(self.pos + BATCH_SIZE, rows.len);
@@ -390,15 +389,16 @@ pub const SortCursor = struct {
         key_values: []row_mod.Value,
     };
 
-    fn compute(self: *SortCursor, a: Allocator) ![]Row {
+    fn compute(self: *SortCursor, ctx: EvalContext) ![]Row {
+        const a = ctx.alloc;
         var sort_rows: std.ArrayList(SortRow) = .empty;
 
         // Materialise all rows and eagerly evaluate the sort key expressions.
-        while (try self.input.next(a)) |batch| {
+        while (try self.input.next(ctx)) |batch| {
             for (batch) |r| {
                 const key_vals = try a.alloc(row_mod.Value, self.keys.len);
                 for (self.keys, 0..) |key, i| {
-                    const ev = try eval.evalExpr(key.expr, r.values, a);
+                    const ev = try eval.evalExpr(key.expr, r.values, ctx);
                     key_vals[i] = evalValueToRowValue(ev);
                 }
                 try sort_rows.append(a, .{ .row = r, .key_values = key_vals });
@@ -406,7 +406,7 @@ pub const SortCursor = struct {
         }
 
         std.sort.block(SortRow, sort_rows.items, self.keys, struct {
-            fn lessThan(keys: []lp.SortKey, l: SortRow, r: SortRow) bool {
+            fn lessThan(keys: []ee.ExecSortKey, l: SortRow, r: SortRow) bool {
                 for (keys, 0..) |key, i| {
                     const ord = compareValues(l.key_values[i], r.key_values[i]);
                     if (ord != .eq) return if (key.descending) ord == .gt else ord == .lt;
@@ -433,8 +433,8 @@ pub const DistinctCursor = struct {
     result: ?[]Row,
     pos: usize,
 
-    pub fn next(self: *DistinctCursor, a: Allocator) !?[]Row {
-        if (self.result == null) self.result = try self.compute(a);
+    pub fn next(self: *DistinctCursor, ctx: EvalContext) !?[]Row {
+        if (self.result == null) self.result = try self.compute(ctx);
         const rows = self.result.?;
         if (self.pos >= rows.len) return null;
         const end = @min(self.pos + BATCH_SIZE, rows.len);
@@ -447,7 +447,8 @@ pub const DistinctCursor = struct {
         a.destroy(self.input);
     }
 
-    fn compute(self: *DistinctCursor, a: Allocator) ![]Row {
+    fn compute(self: *DistinctCursor, ctx: EvalContext) ![]Row {
+        const a = ctx.alloc;
         // Build a full-column index array so we can reuse hashGroupRow/groupKeyMatches.
         const all_cols = try a.alloc(usize, self.col_count);
         defer a.free(all_cols);
@@ -465,7 +466,7 @@ pub const DistinctCursor = struct {
 
         var output: std.ArrayList(Row) = .empty;
 
-        while (try self.input.next(a)) |batch| {
+        while (try self.input.next(ctx)) |batch| {
             for (batch) |r| {
                 const h = hashGroupRow(r.values, all_cols);
                 var found = false;
@@ -508,20 +509,21 @@ pub const JoinCursor = struct {
     right_pos: usize, // current position within right_rows for this left row
     left_batch: []Row, // current batch pulled from left cursor
     left_pos: usize, // position within left_batch
-    condition: ?lp.Expr, // null for CROSS JOIN (every left/right pair emitted)
+    condition: ?ee.ExecExpr, // null for CROSS JOIN (every left/right pair emitted)
     is_left_join: bool, // true = LEFT JOIN: unmatched left rows emitted with NULLs
     right_col_count: usize, // number of right-side columns (needed for NULL padding)
     had_right_match: bool, // tracks whether the current left row matched any right row
 
     // Pull combined (left ++ right) rows that satisfy the join condition.
     // Returns up to BATCH_SIZE rows per call, or null when exhausted.
-    pub fn next(self: *JoinCursor, a: Allocator) !?[]Row {
+    pub fn next(self: *JoinCursor, ctx: EvalContext) !?[]Row {
+        const a = ctx.alloc;
         var out: std.ArrayList(Row) = .empty;
 
         while (true) {
             // Advance to the next left row when the current one is exhausted.
             while (self.left_pos >= self.left_batch.len) {
-                self.left_batch = try self.left.next(a) orelse {
+                self.left_batch = try self.left.next(ctx) orelse {
                     if (out.items.len > 0) return out.items;
                     return null;
                 };
@@ -544,7 +546,7 @@ pub const JoinCursor = struct {
                 @memcpy(combined[left_row.values.len..], right_row.values);
 
                 const should_emit = if (self.condition) |cond| blk: {
-                    const ev = try eval.evalExpr(cond, combined, a);
+                    const ev = try eval.evalExpr(cond, combined, ctx);
                     break :blk eval.isTruthy(ev);
                 } else true;
                 if (should_emit) {
@@ -581,6 +583,31 @@ pub const JoinCursor = struct {
     }
 };
 
+// ── Scalar subquery executor ───────────────────────────────────────────────────
+
+// Executes a scalar subquery and returns the first column of the first result
+// row.  Registered as the SubqueryExecFn in executor.zig so PhysicalPlan can
+// hold a function pointer without importing cursor/root.zig (which would create
+// a circular dependency).
+//
+// inner: *PhysicalPlan (opaque), db: *Db (opaque).
+// outer: the current outer row's values, threaded through for correlated refs.
+pub fn execScalarSubquery(
+    inner: *anyopaque,
+    db_ptr: *anyopaque,
+    outer: []const row_mod.Value,
+    alloc: Allocator,
+) anyerror!?eval.EvalValue {
+    const plan: *pp.PhysicalPlan = @ptrCast(@alignCast(inner));
+    const db: *Db = @ptrCast(@alignCast(db_ptr));
+    const ctx = EvalContext{ .outer = outer, .alloc = alloc };
+    var cur = try Cursor.open(plan.*, db, alloc);
+    defer cur.deinit(alloc);
+    const batch = try cur.next(ctx) orelse return null;
+    if (batch.len == 0 or batch[0].values.len == 0) return null;
+    return eval.rowValToEval(batch[0].values[0]);
+}
+
 // ── Cursor union ───────────────────────────────────────────────────────────────
 
 pub const Cursor = union(enum) {
@@ -596,6 +623,9 @@ pub const Cursor = union(enum) {
     join: *JoinCursor,
 
     pub fn open(plan: pp.PhysicalPlan, db: *Db, a: Allocator) !Cursor {
+        // Default context for open(): no outer row (top-level plan), alloc = a.
+        // Used only for the join's right-side materialisation at open time.
+        const init_ctx = EvalContext{ .outer = &.{}, .alloc = a };
         return switch (plan) {
             .const_scan => .{ .const_scan = .{} },
             .seq_scan => |n| .{ .seq_scan = .{ .it = try db.scanOpen(n.table) } },
@@ -662,7 +692,7 @@ pub const Cursor = union(enum) {
                 var right_rows: std.ArrayList(Row) = .empty;
                 var right_cur = try open(n.right, db, a);
                 defer right_cur.deinit(a);
-                while (try right_cur.next(a)) |batch| {
+                while (try right_cur.next(init_ctx)) |batch| {
                     try right_rows.appendSlice(a, batch);
                 }
                 const jc = try a.create(JoinCursor);
@@ -682,18 +712,18 @@ pub const Cursor = union(enum) {
         };
     }
 
-    pub fn next(self: *Cursor, a: Allocator) !?[]Row {
+    pub fn next(self: *Cursor, ctx: EvalContext) !?[]Row {
         return switch (self.*) {
-            .seq_scan => |*s| s.next(a),
-            .const_scan => |*s| s.next(a),
-            .vtab_scan => |*s| s.next(a),
-            .point_lookup => |*s| s.next(a),
-            .filter => |f| f.next(a),
-            .project => |p| p.next(a),
-            .aggregate => |ag| ag.next(a),
-            .sort => |s| s.next(a),
-            .distinct => |d| d.next(a),
-            .join => |j| j.next(a),
+            .seq_scan => |*s| s.next(ctx),
+            .const_scan => |*s| s.next(ctx),
+            .vtab_scan => |*s| s.next(ctx),
+            .point_lookup => |*s| s.next(ctx),
+            .filter => |f| f.next(ctx),
+            .project => |p| p.next(ctx),
+            .aggregate => |ag| ag.next(ctx),
+            .sort => |s| s.next(ctx),
+            .distinct => |d| d.next(ctx),
+            .join => |j| j.next(ctx),
         };
     }
 

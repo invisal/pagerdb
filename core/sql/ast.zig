@@ -48,6 +48,11 @@ pub const Expr = union(enum) {
     between: *Between,
     case_: *Case,
     is_null: *IsNull,
+    // Scalar subquery used as an expression: (SELECT ...).
+    // The SelectStmt is arena-owned by the parser; this is a pointer into that
+    // arena.  clone() copies the pointer without deep-cloning; deinit() is a
+    // no-op — the parser arena owns the lifetime.
+    subquery: *SelectStmt,
 
     pub const Binary = struct { op: BinaryOp, left: Expr, right: Expr };
     pub const Unary = struct { op: UnaryOp, operand: Expr };
@@ -158,6 +163,8 @@ pub const Expr = union(enum) {
                 };
                 break :blk .{ .case_ = node };
             },
+            // The SelectStmt lives in the parser arena; shallow-copy the pointer.
+            .subquery => |s| .{ .subquery = s },
         };
     }
 

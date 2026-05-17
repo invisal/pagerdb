@@ -34,6 +34,9 @@ pub const Expr = union(enum) {
     bool_lit: bool,
     null_lit: void,
     col_idx: usize, // source column index into the row's values slice
+    // Correlated subquery reference: index into the outer query's row values.
+    // Only appears inside subquery plan trees, never in top-level plans.
+    outer_col_idx: usize,
     binary: *Binary,
     unary: *Unary,
     func_call: *FuncCall,
@@ -41,6 +44,10 @@ pub const Expr = union(enum) {
     in_list: *InList,
     case_: *Case,
     is_null: *IsNull,
+    // Scalar subquery: a nested SELECT that returns one row, one column.
+    // The physical planner converts this into an ExecExpr.subquery with a
+    // concrete execution callback.
+    subquery: *LogicalSubquery,
 
     pub const Binary = struct { op: ast.BinaryOp, left: Expr, right: Expr };
     pub const Unary = struct { op: ast.UnaryOp, operand: Expr };
@@ -55,6 +62,7 @@ pub const Expr = union(enum) {
         else_: ?Expr,
     };
     pub const IsNull = struct { operand: Expr, negated: bool };
+    pub const LogicalSubquery = struct { plan: *LogicalPlan };
 };
 
 // ── Aggregate spec ────────────────────────────────────────────────────────────
@@ -242,6 +250,10 @@ pub const LogicalPlanner = struct {
     cat: *catalog.Catalog,
     arena: std.heap.ArenaAllocator,
     error_message: []const u8 = "",
+    // Set to the outer query's scan schema while planning a correlated subquery.
+    // resolveExpr falls back to this schema when a column ref is not found in
+    // the inner schema, producing outer_col_idx instead of col_idx.
+    outer_schema: ?Schema = null,
 
     pub fn init(cat: *catalog.Catalog, allocator: std.mem.Allocator) LogicalPlanner {
         return .{ .cat = cat, .arena = std.heap.ArenaAllocator.init(allocator) };
@@ -734,6 +746,9 @@ pub const LogicalPlanner = struct {
             },
             .is_null => |n| containsAggCall(n.operand),
             .cast => |c| containsAggCall(c.operand),
+            // Subqueries have their own aggregate context; they do not make the
+            // outer query require an Aggregate node.
+            .subquery => false,
             // Literals, column references, and other leaves can never be aggregates.
             else => false,
         };
@@ -1115,6 +1130,17 @@ pub const LogicalPlanner = struct {
             },
             .star => return PlanError.WildcardInExpression,
             .default_value => std.debug.panic("DEFAULT must be resolved during planning", .{}),
+            .subquery => |stmt| blk: {
+                // Plan the subquery with scan_schema as the outer context so
+                // column refs inside the subquery body can fall back to it.
+                const saved_outer = self.outer_schema;
+                self.outer_schema = scan_schema;
+                defer self.outer_schema = saved_outer;
+                const inner_plan = try self.planSelect(stmt.*);
+                const sub = try self.alloc().create(Expr.LogicalSubquery);
+                sub.* = .{ .plan = try self.box(inner_plan) };
+                break :blk .{ .subquery = sub };
+            },
         };
     }
 
@@ -1129,8 +1155,57 @@ pub const LogicalPlanner = struct {
             .null_lit => .{ .null_lit = {} },
             // star is only valid inside COUNT(*); it must not reach regular expr resolution.
             .star => return PlanError.WildcardInExpression,
-            .col_ref => |n| .{ .col_idx = try self.resolveColName(n, schema) },
-            .qual_col_ref => |q| if (q.col) |col| .{ .col_idx = try self.resolveQualColName(q.table, col, schema) } else return PlanError.WildcardInExpression,
+            .col_ref => |n| blk: {
+                // Try the inner (current) schema first.
+                for (schema.columns) |col| {
+                    if (std.ascii.eqlIgnoreCase(n, col.name)) break :blk .{ .col_idx = col.index };
+                }
+                // If we're inside a subquery, try the outer schema — this is a
+                // correlated reference (e.g. WHERE inner.a = outer.b).
+                if (self.outer_schema) |outer| {
+                    for (outer.columns) |col| {
+                        if (std.ascii.eqlIgnoreCase(n, col.name)) break :blk .{ .outer_col_idx = col.index };
+                    }
+                }
+                self.setError("Column '{s}' does not exist", .{n});
+                return PlanError.ColumnNotFound;
+            },
+            .qual_col_ref => |q| blk: {
+                if (q.col == null) return PlanError.WildcardInExpression;
+                const col_name = q.col.?;
+                // Try inner schema.
+                for (schema.columns) |col| {
+                    if (std.ascii.eqlIgnoreCase(q.table, col.table) and
+                        std.ascii.eqlIgnoreCase(col_name, col.name))
+                    {
+                        break :blk .{ .col_idx = col.index };
+                    }
+                }
+                // Try outer schema for correlated qualified refs (e.g. outer_table.col).
+                if (self.outer_schema) |outer| {
+                    for (outer.columns) |col| {
+                        if (std.ascii.eqlIgnoreCase(q.table, col.table) and
+                            std.ascii.eqlIgnoreCase(col_name, col.name))
+                        {
+                            break :blk .{ .outer_col_idx = col.index };
+                        }
+                    }
+                }
+                self.setError("Column '{s}.{s}' does not exist", .{ q.table, col_name });
+                return PlanError.ColumnNotFound;
+            },
+            .subquery => |stmt| blk: {
+                // Plan the inner SELECT.  The current schema becomes the outer schema
+                // so column refs inside the subquery can fall back to it for correlated
+                // references, producing outer_col_idx nodes.
+                const saved_outer = self.outer_schema;
+                self.outer_schema = schema;
+                defer self.outer_schema = saved_outer;
+                const inner_plan = try self.planSelect(stmt.*);
+                const sub = try self.alloc().create(Expr.LogicalSubquery);
+                sub.* = .{ .plan = try self.box(inner_plan) };
+                break :blk .{ .subquery = sub };
+            },
             .binary => |b| blk: {
                 const node = try self.alloc().create(Expr.Binary);
                 node.* = .{
@@ -1479,6 +1554,8 @@ fn exprEqlInner(a: Expr, b: Expr) bool {
         .bool_lit => |av| b == .bool_lit and b.bool_lit == av,
         .null_lit => b == .null_lit,
         .col_idx => |av| b == .col_idx and b.col_idx == av,
+        .outer_col_idx => |av| b == .outer_col_idx and b.outer_col_idx == av,
+        .subquery => |av| b == .subquery and av == b.subquery,
         .binary => |av| b == .binary and
             av.op == b.binary.op and
             exprEqlInner(av.left, b.binary.left) and

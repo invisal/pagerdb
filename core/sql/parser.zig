@@ -1043,6 +1043,14 @@ pub const Parser = struct {
             },
             .lparen => {
                 _ = self.advance();
+                // Scalar subquery: (SELECT ...) used as an expression.
+                if (self.peek().kind == .kw_select) {
+                    const inner_stmt = try self.parseSelect();
+                    _ = try self.expect(.rparen);
+                    const stmt_ptr = try self.alloc().create(ast.SelectStmt);
+                    stmt_ptr.* = inner_stmt;
+                    return .{ .subquery = stmt_ptr };
+                }
                 const inner = try self.parseExpr();
                 _ = try self.expect(.rparen);
                 return inner;
