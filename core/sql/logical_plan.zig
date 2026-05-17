@@ -3,7 +3,10 @@
 
 const root = @import("logical_plan/root.zig");
 
+const ast = @import("ast.zig");
+
 // Re-export all public items from root.zig
+pub const JoinType = ast.JoinType;
 pub const SchemaCol = root.SchemaCol;
 pub const Schema = root.Schema;
 pub const Expr = root.Expr;

@@ -249,7 +249,7 @@ pub const TableRef = union(enum) {
     func: TableFunc, // TVF:          FROM __page_slots(1)
 };
 
-pub const JoinType = enum { inner, cross };
+pub const JoinType = enum { inner, cross, left };
 
 // One JOIN clause: join type, right-hand table, and optional ON condition.
 // CROSS JOIN (explicit or via comma syntax) has no condition; INNER JOIN always does.

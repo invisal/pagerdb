@@ -276,8 +276,6 @@ fn isSqlUserError(e: anyerror) bool {
         error.NoDefaultValue,
         error.UnknownFunction,
         error.WrongArgCount,
-        // Execution errors
-        error.DivisionByZero,
         // Schema / catalog errors
         error.TableAlreadyExists,
         // Transaction errors
