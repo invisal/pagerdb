@@ -35,6 +35,8 @@ pub const InMemoryPager = struct {
             .free_list_head = 0,
             .sys_tables_root = 0,
             .sys_columns_root = 0,
+            .sys_indexes_root = 0,
+            .sys_index_cols_root = 0,
         };
     }
 

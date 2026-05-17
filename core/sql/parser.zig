@@ -116,7 +116,7 @@ pub const Parser = struct {
             .kw_insert => .{ .insert = try self.parseInsert() },
             .kw_update => .{ .update = try self.parseUpdate() },
             .kw_delete => .{ .delete = try self.parseDelete() },
-            .kw_create => .{ .create_table = try self.parseCreateTable() },
+            .kw_create => try self.parseCreate(),
             .kw_begin => blk: {
                 _ = self.advance();
                 break :blk .{ .begin = {} };
@@ -523,8 +523,70 @@ pub const Parser = struct {
 
     // ── CREATE TABLE ──────────────────────────────────────────────────────────
 
-    fn parseCreateTable(self: *Parser) ParseError!ast.CreateTableStmt {
+    fn parseCreate(self: *Parser) ParseError!ast.Stmt {
         _ = try self.expect(.kw_create);
+        return switch (self.peek().kind) {
+            .kw_table => .{ .create_table = try self.parseCreateTable() },
+            .kw_index => blk: {
+                _ = self.advance(); // consume INDEX
+                break :blk .{ .create_index = try self.parseCreateIndex(false) };
+            },
+            .kw_unique => blk: {
+                _ = self.advance(); // consume UNIQUE
+                _ = try self.expect(.kw_index);
+                break :blk .{ .create_index = try self.parseCreateIndex(true) };
+            },
+            else => {
+                const tok = self.peek();
+                self.error_message = std.fmt.allocPrint(
+                    self.arena.allocator(),
+                    "[{d}] Expected TABLE or INDEX after CREATE, got '{s}'",
+                    .{ tok.start, self.tokenText(tok) },
+                ) catch "";
+                return ParseError.UnexpectedToken;
+            },
+        };
+    }
+
+    fn parseCreateIndex(self: *Parser, is_unique: bool) ParseError!ast.CreateIndexStmt {
+        // Caller has already consumed CREATE [UNIQUE] INDEX.
+        // Syntax: [IF NOT EXISTS] name ON table (col, ...)
+        var if_not_exists = false;
+        if (self.peek().kind == .kw_if) {
+            _ = self.advance(); // consume IF
+            _ = try self.expect(.kw_not);
+            _ = try self.expect(.kw_exists);
+            if_not_exists = true;
+        }
+
+        const name_tok = try self.expect(.identifier);
+        const name = try self.alloc().dupe(u8, self.tokenText(name_tok));
+
+        _ = try self.expect(.kw_on);
+
+        const table_tok = try self.expect(.identifier);
+        const table = try self.alloc().dupe(u8, self.tokenText(table_tok));
+
+        _ = try self.expect(.lparen);
+        var cols: std.ArrayList([]const u8) = .empty;
+        while (true) {
+            const col_tok = try self.expect(.identifier);
+            try cols.append(self.alloc(), try self.alloc().dupe(u8, self.tokenText(col_tok)));
+            if (self.peek().kind != .comma) break;
+            _ = self.advance();
+        }
+        _ = try self.expect(.rparen);
+
+        return ast.CreateIndexStmt{
+            .name = name,
+            .table = table,
+            .columns = try cols.toOwnedSlice(self.alloc()),
+            .is_unique = is_unique,
+            .if_not_exists = if_not_exists,
+        };
+    }
+
+    fn parseCreateTable(self: *Parser) ParseError!ast.CreateTableStmt {
         _ = try self.expect(.kw_table);
 
         const table_tok = try self.expect(.identifier);
@@ -533,62 +595,99 @@ pub const Parser = struct {
         _ = try self.expect(.lparen);
 
         var columns: std.ArrayList(ast.ColumnDef) = .empty;
+        // Table-level PRIMARY KEY (col, ...) constraint — stores the first column name.
+        // Composite PKs are not supported yet; only the first name is used.
+        var table_pk_name: ?[]const u8 = null;
+
         while (true) {
-            const col_name_tok = try self.expect(.identifier);
-            const col_name = try self.alloc().dupe(u8, self.tokenText(col_name_tok));
-
-            const type_tok = self.advance();
-            const col_type: t.ColType = switch (type_tok.kind) {
-                .kw_int => .int,
-                .kw_real => .real,
-                .kw_text => .text,
-                .kw_blob => .blob,
-                else => {
-                    self.error_message = std.fmt.allocPrint(
-                        self.arena.allocator(),
-                        "[{d}] Invalid column type '{s}', expected INT, INTEGER, REAL, TEXT, or BLOB",
-                        .{ type_tok.start, self.tokenText(type_tok) },
-                    ) catch "";
-                    return ParseError.InvalidType;
-                },
-            };
-
-            var nullable = true;
-            var default_src: ?[]const u8 = null;
-            var default_expr: ?ast.Expr = null;
-
-            // Parsing constraint
-            while (true) {
-                switch (self.peek().kind) {
-                    .kw_not => {
-                        _ = self.advance();
-                        _ = try self.expect(.kw_null);
-                        nullable = false;
-                    },
-                    .kw_default => {
-                        _ = self.advance();
-                        const src_start = self.peek().start;
-                        default_expr = try self.parseExpr();
-                        const src_end = self.peek().start;
-                        default_src = std.mem.trim(u8, self.src[src_start..src_end], " \t\r\n");
-                    },
-                    else => break,
+            // Table-level PRIMARY KEY (...) constraint — not a column definition.
+            if (self.peek().kind == .kw_primary) {
+                _ = self.advance(); // consume PRIMARY
+                _ = try self.expect(.kw_key);
+                _ = try self.expect(.lparen);
+                while (true) {
+                    const pk_tok = try self.expect(.identifier);
+                    if (table_pk_name == null) {
+                        table_pk_name = try self.alloc().dupe(u8, self.tokenText(pk_tok));
+                    }
+                    if (self.peek().kind != .comma) break;
+                    _ = self.advance();
                 }
-            }
+                _ = try self.expect(.rparen);
+            } else {
+                const col_name_tok = try self.expect(.identifier);
+                const col_name = try self.alloc().dupe(u8, self.tokenText(col_name_tok));
 
-            try columns.append(self.alloc(), .{
-                .name = col_name,
-                .col_type = col_type,
-                .nullable = nullable,
-                .default_src = default_src,
-                .default_expr = default_expr,
-            });
+                const type_tok = self.advance();
+                const col_type: t.ColType = switch (type_tok.kind) {
+                    .kw_int => .int,
+                    .kw_real => .real,
+                    .kw_text => .text,
+                    .kw_blob => .blob,
+                    else => {
+                        self.error_message = std.fmt.allocPrint(
+                            self.arena.allocator(),
+                            "[{d}] Invalid column type '{s}', expected INT, INTEGER, REAL, FLOAT, TEXT, or BLOB",
+                            .{ type_tok.start, self.tokenText(type_tok) },
+                        ) catch "";
+                        return ParseError.InvalidType;
+                    },
+                };
+
+                var nullable = true;
+                var is_primary_key = false;
+                var default_src: ?[]const u8 = null;
+                var default_expr: ?ast.Expr = null;
+
+                // Parse column-level constraints: NOT NULL, DEFAULT, PRIMARY KEY.
+                while (true) {
+                    switch (self.peek().kind) {
+                        .kw_not => {
+                            _ = self.advance();
+                            _ = try self.expect(.kw_null);
+                            nullable = false;
+                        },
+                        .kw_default => {
+                            _ = self.advance();
+                            const src_start = self.peek().start;
+                            default_expr = try self.parseExpr();
+                            const src_end = self.peek().start;
+                            default_src = std.mem.trim(u8, self.src[src_start..src_end], " \t\r\n");
+                        },
+                        .kw_primary => {
+                            _ = self.advance();
+                            _ = try self.expect(.kw_key);
+                            is_primary_key = true;
+                        },
+                        else => break,
+                    }
+                }
+
+                try columns.append(self.alloc(), .{
+                    .name = col_name,
+                    .col_type = col_type,
+                    .nullable = nullable,
+                    .is_primary_key = is_primary_key,
+                    .default_src = default_src,
+                    .default_expr = default_expr,
+                });
+            }
 
             if (self.peek().kind != .comma) break;
             _ = self.advance();
         }
 
         _ = try self.expect(.rparen);
+
+        // Apply table-level PRIMARY KEY to the named column.
+        if (table_pk_name) |pk_name| {
+            for (columns.items) |*col| {
+                if (std.ascii.eqlIgnoreCase(col.name, pk_name)) {
+                    col.is_primary_key = true;
+                    break;
+                }
+            }
+        }
 
         return ast.CreateTableStmt{
             .table = table,

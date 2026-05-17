@@ -1,0 +1,142 @@
+# Secondary index tests
+
+# Basic CREATE INDEX
+statement ok
+CREATE TABLE products (id INTEGER PRIMARY KEY, name TEXT, price INTEGER)
+
+statement ok
+INSERT INTO products VALUES (1, 'apple', 100)
+
+statement ok
+INSERT INTO products VALUES (2, 'banana', 200)
+
+statement ok
+INSERT INTO products VALUES (3, 'cherry', 150)
+
+statement ok
+CREATE INDEX idx_price ON products (price)
+
+query ITI
+SELECT id, name, price FROM products ORDER BY price
+----
+1
+apple
+100
+3
+cherry
+150
+2
+banana
+200
+
+# IF NOT EXISTS does not error on duplicate index name
+statement ok
+CREATE INDEX IF NOT EXISTS idx_price ON products (price)
+
+# Duplicate index name without IF NOT EXISTS is an error
+statement error
+CREATE INDEX idx_price ON products (price)
+
+# CREATE UNIQUE INDEX: basic enforcement
+statement ok
+CREATE TABLE accounts (id INTEGER PRIMARY KEY, email TEXT)
+
+statement ok
+INSERT INTO accounts VALUES (1, 'alice@example.com')
+
+statement ok
+INSERT INTO accounts VALUES (2, 'bob@example.com')
+
+statement ok
+CREATE UNIQUE INDEX idx_email ON accounts (email)
+
+# Duplicate email is rejected
+statement error
+INSERT INTO accounts VALUES (3, 'alice@example.com')
+
+# Different email is accepted
+statement ok
+INSERT INTO accounts VALUES (3, 'carol@example.com')
+
+query IT
+SELECT id, email FROM accounts ORDER BY id
+----
+1
+alice@example.com
+2
+bob@example.com
+3
+carol@example.com
+
+# DELETE removes its index entry; re-inserting the same value is then allowed
+statement ok
+DELETE FROM accounts WHERE id = 1
+
+statement ok
+INSERT INTO accounts VALUES (4, 'alice@example.com')
+
+query IT
+SELECT id, email FROM accounts ORDER BY id
+----
+2
+bob@example.com
+3
+carol@example.com
+4
+alice@example.com
+
+# UPDATE on a unique index column
+statement ok
+UPDATE accounts SET email = 'carol2@example.com' WHERE id = 3
+
+# Old value is freed; new value can be re-used
+statement ok
+INSERT INTO accounts VALUES (5, 'carol@example.com')
+
+query IT
+SELECT id, email FROM accounts ORDER BY id
+----
+2
+bob@example.com
+3
+carol2@example.com
+4
+alice@example.com
+5
+carol@example.com
+
+# Updating to an already-taken value is rejected
+statement error
+UPDATE accounts SET email = 'bob@example.com' WHERE id = 4
+
+# Non-unique index: multiple rows with the same value are allowed
+statement ok
+CREATE TABLE orders (id INTEGER PRIMARY KEY, customer TEXT, amount INTEGER)
+
+statement ok
+INSERT INTO orders VALUES (1, 'alice', 50)
+
+statement ok
+INSERT INTO orders VALUES (2, 'alice', 75)
+
+statement ok
+INSERT INTO orders VALUES (3, 'bob', 30)
+
+statement ok
+CREATE INDEX idx_customer ON orders (customer)
+
+# Both alice rows are still present
+query ITI
+SELECT id, customer, amount FROM orders ORDER BY id
+----
+1
+alice
+50
+2
+alice
+75
+3
+bob
+30
+
+# Disk-persist and reload: index metadata survives a restart (tested via Zig test, not SLT)

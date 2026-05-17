@@ -6,7 +6,7 @@
 const std = @import("std");
 const t = @import("../types.zig");
 const Catalog = @import("../catalog.zig").Catalog;
-const btree = @import("../btree.zig");
+const btree = @import("../btree_shared.zig");
 const root = @import("root.zig");
 
 pub const columns = [_]root.VTabColumn{

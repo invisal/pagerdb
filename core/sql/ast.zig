@@ -303,6 +303,7 @@ pub const ColumnDef = struct {
     name: []const u8, // arena-owned
     col_type: t.ColType,
     nullable: bool, // true unless NOT NULL present
+    is_primary_key: bool = false,
 
     default_expr: ?Expr,
     default_src: ?[]const u8,
@@ -313,12 +314,21 @@ pub const CreateTableStmt = struct {
     columns: []ColumnDef,
 };
 
+pub const CreateIndexStmt = struct {
+    name: []const u8, // arena-owned
+    table: []const u8, // arena-owned
+    columns: [][]const u8, // arena-owned; column names in index order
+    is_unique: bool,
+    if_not_exists: bool,
+};
+
 pub const Stmt = union(enum) {
     select: SelectStmt,
     insert: InsertStmt,
     update: UpdateStmt,
     delete: DeleteStmt,
     create_table: CreateTableStmt,
+    create_index: CreateIndexStmt,
     begin: void,
     commit: void,
     rollback: void,

@@ -75,6 +75,10 @@ pub const Executor = struct {
                 try self.db.createTable(n.table, n.columns);
                 break :blk .{ .created = {} };
             },
+            .create_index => |n| blk: {
+                try self.db.createIndex(n.name, n.table, n.col_indices, n.is_unique, n.if_not_exists);
+                break :blk .{ .created = {} };
+            },
             .begin => blk: {
                 try self.db.begin();
                 break :blk .{ .affected = 0 };
@@ -282,6 +286,13 @@ fn isSqlUserError(e: anyerror) bool {
         // Virtual table argument errors
         error.ArgumentMismatch,
         error.InvalidArgumentType,
+        // Primary key errors
+        error.PrimaryKeyConflict,
+        error.MultiplePrimaryKeys,
+        error.PrimaryKeyMustBeInteger,
+        // Index errors
+        error.UniqueViolation,
+        error.IndexAlreadyExists,
         => true,
         else => false,
     };

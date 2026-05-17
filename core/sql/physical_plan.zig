@@ -58,6 +58,14 @@ pub const PhysicalCreateTable = struct {
     columns: []catalog.ColumnMeta,
 };
 
+pub const PhysicalCreateIndex = struct {
+    name: []const u8,
+    table: []const u8,
+    col_indices: []u32,
+    is_unique: bool,
+    if_not_exists: bool,
+};
+
 pub const PhysicalJoin = struct {
     left: PhysicalPlan,
     right: PhysicalPlan,
@@ -98,6 +106,7 @@ pub const PhysicalPlan = union(enum) {
     update: PhysicalUpdate,
     delete: PhysicalDelete,
     create_table: PhysicalCreateTable,
+    create_index: PhysicalCreateIndex,
     begin: void,
     commit: void,
     rollback: void,
@@ -117,7 +126,7 @@ pub const PhysicalPlan = union(enum) {
             .insert => |n| n.schema,
             .update => |n| n.schema,
             .delete => |n| n.schema,
-            .create_table, .begin, .commit, .rollback => lp.Schema{ .table = "", .columns = &.{} },
+            .create_table, .create_index, .begin, .commit, .rollback => lp.Schema{ .table = "", .columns = &.{} },
         };
     }
 };
@@ -154,6 +163,13 @@ pub const PhysicalPlanner = struct {
             .update => |n| try self.planUpdate(n),
             .delete => |n| try self.planDelete(n),
             .create_table => |n| .{ .create_table = .{ .table = n.table, .columns = n.columns } },
+            .create_index => |n| .{ .create_index = .{
+                .name = n.name,
+                .table = n.table,
+                .col_indices = n.col_indices,
+                .is_unique = n.is_unique,
+                .if_not_exists = n.if_not_exists,
+            } },
             .begin => .{ .begin = {} },
             .commit => .{ .commit = {} },
             .rollback => .{ .rollback = {} },

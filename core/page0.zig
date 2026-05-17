@@ -21,7 +21,9 @@ pub fn writeHeader(pager: *Pager) !void {
         .free_list_head = pager.free_list_head,
         .sys_tables_root = pager.sys_tables_root,
         .sys_columns_root = pager.sys_columns_root,
-        ._reserved = std.mem.zeroes([36]u8),
+        .sys_indexes_root = pager.sys_indexes_root,
+        .sys_index_cols_root = pager.sys_index_cols_root,
+        ._reserved = std.mem.zeroes([28]u8),
     };
 
     var pw = try PageWriter.open(pager, 0);
@@ -103,7 +105,7 @@ test "bad magic returns error" {
         .free_list_head = 0,
         .sys_tables_root = 0,
         .sys_columns_root = 0,
-        ._reserved = std.mem.zeroes([36]u8),
+        ._reserved = std.mem.zeroes([28]u8),
     };
     try std.testing.expectError(error.BadMagic, validateHeader(bad));
 }

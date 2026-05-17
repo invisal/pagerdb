@@ -10,7 +10,7 @@ pub const ResultSet = @import("sql/executor.zig").ResultSet;
 pub const Row = @import("sql/executor.zig").Row;
 pub const row = @import("row.zig");
 pub const catalog = @import("catalog.zig");
-pub const btree = @import("btree.zig");
+pub const btree = @import("btree_shared.zig");
 pub const WAL = @import("pager/wal.zig").WAL;
 pub const Io = @import("io/io.zig").Io;
 pub const File = @import("io/io.zig").File;
@@ -26,7 +26,7 @@ test {
     _ = @import("pager/memory.zig");
     _ = @import("page0.zig");
     _ = @import("row.zig");
-    _ = @import("btree.zig");
+    _ = @import("btree_shared.zig");
     _ = @import("overflow.zig");
     _ = @import("sql/lexer.zig");
     _ = @import("sql/eval.zig");
