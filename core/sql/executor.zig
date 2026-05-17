@@ -1,9 +1,9 @@
 const std = @import("std");
 const Db = @import("../db.zig").Db;
 const row_mod = @import("../row.zig");
-const lp = @import("logical_plan.zig");
 const pp = @import("physical_plan.zig");
 const eval = @import("eval.zig");
+const ee = @import("exec_expr.zig");
 const Parser = @import("parser.zig").Parser;
 const lp_mod = @import("logical_plan.zig");
 const pp_mod = @import("physical_plan.zig");
@@ -104,7 +104,8 @@ pub const Executor = struct {
         const a = arena.allocator();
 
         var result_rows: std.ArrayList(Row) = .empty;
-        try collectRows(plan, self.db, &result_rows, a);
+        const ctx = eval.EvalContext{ .outer = &.{}, .alloc = a };
+        try collectRows(plan, self.db, &result_rows, ctx);
 
         const schema = plan.schema();
         const col_names = try a.alloc([]const u8, schema.columns.len);
@@ -122,11 +123,12 @@ pub const Executor = struct {
     // ── DML ────────────────────────────────────────────────────────────────────
 
     fn execInsert(self: *Executor, n: pp.PhysicalInsert) !u64 {
+        const ctx = eval.EvalContext{ .outer = &.{}, .alloc = self.alloc };
         for (n.values) |row| {
             const vals = try self.alloc.alloc(row_mod.Value, row.len);
             defer self.alloc.free(vals);
             for (row, 0..) |expr, i| {
-                vals[i] = try evalToValue(expr, &.{}, self.alloc);
+                vals[i] = try evalToValue(expr, &.{}, ctx);
             }
             _ = try self.db.insert(n.table, vals);
         }
@@ -138,8 +140,9 @@ pub const Executor = struct {
         defer arena.deinit();
         const a = arena.allocator();
 
+        const ctx = eval.EvalContext{ .outer = &.{}, .alloc = a };
         var matches: std.ArrayList(Row) = .empty;
-        try collectRows(n.input.*, self.db, &matches, a);
+        try collectRows(n.input.*, self.db, &matches, ctx);
 
         var count: u64 = 0;
         const meta = self.db.cat.getTable(n.table) orelse return error.TableNotFound;
@@ -147,8 +150,9 @@ pub const Executor = struct {
             const real_vals = r.values[0..meta.columns.len];
             const new_vals = try self.alloc.dupe(row_mod.Value, real_vals);
             defer self.alloc.free(new_vals);
+            const eval_ctx = eval.EvalContext{ .outer = &.{}, .alloc = self.alloc };
             for (n.assignments) |asgn| {
-                new_vals[asgn.col_idx] = try evalToValue(asgn.value, real_vals, self.alloc);
+                new_vals[asgn.col_idx] = try evalToValue(asgn.value, real_vals, eval_ctx);
             }
             if (try self.db.update(n.table, r.rowid, new_vals)) count += 1;
         }
@@ -160,8 +164,9 @@ pub const Executor = struct {
         defer arena.deinit();
         const a = arena.allocator();
 
+        const ctx = eval.EvalContext{ .outer = &.{}, .alloc = a };
         var matches: std.ArrayList(Row) = .empty;
-        try collectRows(n.input.*, self.db, &matches, a);
+        try collectRows(n.input.*, self.db, &matches, ctx);
 
         var count: u64 = 0;
         for (matches.items) |r| {
@@ -177,21 +182,21 @@ fn collectRows(
     plan: pp.PhysicalPlan,
     db: *Db,
     out: *std.ArrayList(Row),
-    a: std.mem.Allocator,
+    ctx: eval.EvalContext,
 ) anyerror!void {
-    var cur = try cursor_mod.Cursor.open(plan, db, a);
-    defer cur.deinit(a);
-    while (try cur.next(a)) |batch| {
-        try out.appendSlice(a, batch);
+    var cur = try cursor_mod.Cursor.open(plan, db, ctx.alloc);
+    defer cur.deinit(ctx.alloc);
+    while (try cur.next(ctx)) |batch| {
+        try out.appendSlice(ctx.alloc, batch);
     }
 }
 
 fn evalToValue(
-    expr: lp.Expr,
+    expr: ee.ExecExpr,
     row_values: []const row_mod.Value,
-    alloc: std.mem.Allocator,
+    ctx: eval.EvalContext,
 ) !row_mod.Value {
-    const ev = try eval.evalExpr(expr, row_values, alloc);
+    const ev = try eval.evalExpr(expr, row_values, ctx);
     return switch (ev) {
         .null_ => .null,
         .int => |n| .{ .int = n },
@@ -226,6 +231,10 @@ pub fn execute(allocator: std.mem.Allocator, db: *Db, sql: []const u8) !ExecResu
 
     var phys_planner = pp_mod.PhysicalPlanner.init(allocator);
     defer phys_planner.deinit();
+    // Wire the db pointer and subquery execution callback so that scalar
+    // subqueries compiled by planExpr can execute against the live database.
+    phys_planner.db_opaque = @ptrCast(db);
+    phys_planner.subquery_exec = cursor_mod.execScalarSubquery;
     const physical = try phys_planner.plan(logical);
 
     var ex = Executor.init(db, allocator);

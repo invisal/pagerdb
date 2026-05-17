@@ -1,17 +1,28 @@
 const std = @import("std");
 const row = @import("../row.zig");
-const lp = @import("logical_plan.zig");
+const ee = @import("exec_expr.zig");
 const sf = @import("scalar_func.zig");
 const types = @import("types.zig");
 
 pub const EvalValue = types.EvalValue;
 pub const EvalError = types.EvalError;
+pub const ExecExpr = ee.ExecExpr;
+
+// Execution context passed through evalExpr and cursor next() calls.
+// outer: the current outer query row, used to evaluate outer_col_idx nodes
+//        in correlated subqueries.  Empty slice for top-level queries.
+// alloc: arena allocator for any allocations evalExpr needs to make
+//        (CAST to text, etc.).
+pub const EvalContext = struct {
+    outer: []const row.Value,
+    alloc: std.mem.Allocator,
+};
 
 pub fn evalExpr(
-    expr: lp.Expr,
+    expr: ExecExpr,
     row_values: []const row.Value,
-    alloc: std.mem.Allocator,
-) EvalError!EvalValue {
+    ctx: EvalContext,
+) anyerror!EvalValue {
     return switch (expr) {
         .int_lit => |v| .{ .int = v },
         .float_lit => |v| .{ .real = v },
@@ -19,16 +30,23 @@ pub fn evalExpr(
         .bool_lit => |v| .{ .bool_ = v },
         .null_lit => .{ .null_ = {} },
         .col_idx => |i| rowValToEval(row_values[i]),
-        .binary => |b| try evalBinary(b, row_values),
-        .unary => |u| try evalUnary(u, row_values),
-        .func_call => |f| try evalFunc(f, row_values, alloc),
-        .cast => |c| try evalCast(c, row_values, alloc),
-        .in_list => |il| try evalInList(il, row_values, alloc),
-        .case_ => |c| try evalCase(c, row_values, alloc),
+        .outer_col_idx => |i| rowValToEval(ctx.outer[i]),
+        .binary => |b| try evalBinary(b, row_values, ctx),
+        .unary => |u| try evalUnary(u, row_values, ctx),
+        .func_call => |f| try evalFunc(f, row_values, ctx),
+        .cast => |c| try evalCast(c, row_values, ctx),
+        .in_list => |il| try evalInList(il, row_values, ctx),
+        .case_ => |c| try evalCase(c, row_values, ctx),
         .is_null => |n| blk: {
-            const v = try evalExpr(n.operand, row_values, alloc);
+            const v = try evalExpr(n.operand, row_values, ctx);
             const is_null_val = v == .null_;
             break :blk .{ .bool_ = if (n.negated) !is_null_val else is_null_val };
+        },
+        .subquery => |s| blk: {
+            // Execute the inner plan.  outer_col_idx nodes inside it will resolve
+            // against row_values (the current outer row at this call site).
+            const result = try s.exec_fn(s.inner, s.db, row_values, ctx.alloc);
+            break :blk result orelse .{ .null_ = {} };
         },
     };
 }
@@ -48,7 +66,7 @@ pub fn isTruthy(v: EvalValue) bool {
     };
 }
 
-fn rowValToEval(v: row.Value) EvalValue {
+pub fn rowValToEval(v: row.Value) EvalValue {
     return switch (v) {
         .null => .{ .null_ = {} },
         .int => |n| .{ .int = n },
@@ -59,9 +77,10 @@ fn rowValToEval(v: row.Value) EvalValue {
 }
 
 fn evalBinary(
-    b: *lp.Expr.Binary,
+    b: *ExecExpr.Binary,
     row_values: []const row.Value,
-) EvalError!EvalValue {
+    ctx: EvalContext,
+) anyerror!EvalValue {
     // SQL uses three-valued logic (TRUE/FALSE/NULL).  For AND/OR we must
     // short-circuit correctly: a definite FALSE dominates AND, a definite TRUE
     // dominates OR, even when the other operand is NULL.
@@ -71,28 +90,28 @@ fn evalBinary(
     //   NULL OR  TRUE  = TRUE    (not NULL — TRUE dominates)
     //   NULL OR  FALSE = NULL
     if (b.op == .and_) {
-        const left = try evalExpr(b.left, row_values, undefined);
+        const left = try evalExpr(b.left, row_values, ctx);
         // Definite false on the left: short-circuit without evaluating right.
         if (left != .null_ and !isTruthy(left)) return .{ .bool_ = false };
-        const right = try evalExpr(b.right, row_values, undefined);
+        const right = try evalExpr(b.right, row_values, ctx);
         // Definite false on the right (covers NULL AND FALSE = FALSE).
         if (right != .null_ and !isTruthy(right)) return .{ .bool_ = false };
         if (left == .null_ or right == .null_) return .{ .null_ = {} };
         return .{ .bool_ = true };
     }
     if (b.op == .or_) {
-        const left = try evalExpr(b.left, row_values, undefined);
+        const left = try evalExpr(b.left, row_values, ctx);
         // Definite true on the left: short-circuit without evaluating right.
         if (left != .null_ and isTruthy(left)) return .{ .bool_ = true };
-        const right = try evalExpr(b.right, row_values, undefined);
+        const right = try evalExpr(b.right, row_values, ctx);
         // Definite true on the right (covers NULL OR TRUE = TRUE).
         if (right != .null_ and isTruthy(right)) return .{ .bool_ = true };
         if (left == .null_ or right == .null_) return .{ .null_ = {} };
         return .{ .bool_ = false };
     }
 
-    const left = try evalExpr(b.left, row_values, undefined);
-    const right = try evalExpr(b.right, row_values, undefined);
+    const left = try evalExpr(b.left, row_values, ctx);
+    const right = try evalExpr(b.right, row_values, ctx);
 
     if (left == .null_ or right == .null_) return .{ .null_ = {} };
 
@@ -117,16 +136,16 @@ fn evalBinary(
 //   - If any list element is NULL (and none matched) → NULL
 //   - Otherwise → FALSE (or TRUE if negated)
 fn evalInList(
-    il: *lp.Expr.InList,
+    il: *ExecExpr.InList,
     row_values: []const row.Value,
-    alloc: std.mem.Allocator,
-) EvalError!EvalValue {
-    const operand = try evalExpr(il.operand, row_values, alloc);
+    ctx: EvalContext,
+) anyerror!EvalValue {
+    const operand = try evalExpr(il.operand, row_values, ctx);
     if (operand == .null_) return .{ .null_ = {} };
 
     var saw_null = false;
     for (il.list) |item| {
-        const val = try evalExpr(item, row_values, alloc);
+        const val = try evalExpr(item, row_values, ctx);
         if (val == .null_) {
             saw_null = true;
             continue;
@@ -140,10 +159,11 @@ fn evalInList(
 }
 
 fn evalUnary(
-    u: *lp.Expr.Unary,
+    u: *ExecExpr.Unary,
     row_values: []const row.Value,
-) EvalError!EvalValue {
-    const operand = try evalExpr(u.operand, row_values, undefined);
+    ctx: EvalContext,
+) anyerror!EvalValue {
+    const operand = try evalExpr(u.operand, row_values, ctx);
     return switch (u.op) {
         .not => switch (operand) {
             .bool_ => |b| .{ .bool_ = !b },
@@ -160,11 +180,11 @@ fn evalUnary(
 }
 
 fn evalCast(
-    c: *lp.Expr.Cast,
+    c: *ExecExpr.Cast,
     row_values: []const row.Value,
-    alloc: std.mem.Allocator,
-) EvalError!EvalValue {
-    const val = try evalExpr(c.operand, row_values, alloc);
+    ctx: EvalContext,
+) anyerror!EvalValue {
+    const val = try evalExpr(c.operand, row_values, ctx);
     if (val == .null_) return .{ .null_ = {} };
     return switch (c.target_type) {
         .int => switch (val) {
@@ -183,8 +203,8 @@ fn evalCast(
         },
         .text, .blob => switch (val) {
             .text => val,
-            .int => |n| .{ .text = try std.fmt.allocPrint(alloc, "{d}", .{n}) },
-            .real => |f| .{ .text = try std.fmt.allocPrint(alloc, "{d}", .{f}) },
+            .int => |n| .{ .text = try std.fmt.allocPrint(ctx.alloc, "{d}", .{n}) },
+            .real => |f| .{ .text = try std.fmt.allocPrint(ctx.alloc, "{d}", .{f}) },
             .bool_ => |b| .{ .text = if (b) "1" else "0" },
             .null_ => unreachable,
         },
@@ -194,22 +214,22 @@ fn evalCast(
 // Searched CASE: evaluate each WHEN condition in order; return the THEN value
 // for the first true condition.  If none match, return the ELSE value (or NULL).
 fn evalCase(
-    c: *lp.Expr.Case,
+    c: *ExecExpr.Case,
     row_values: []const row.Value,
-    alloc: std.mem.Allocator,
-) EvalError!EvalValue {
+    ctx: EvalContext,
+) anyerror!EvalValue {
     for (c.when_clauses) |w| {
-        const cond = try evalExpr(w.cond, row_values, alloc);
-        if (isTruthy(cond)) return evalExpr(w.then, row_values, alloc);
+        const cond = try evalExpr(w.cond, row_values, ctx);
+        if (isTruthy(cond)) return evalExpr(w.then, row_values, ctx);
     }
-    return if (c.else_) |e| evalExpr(e, row_values, alloc) else .{ .null_ = {} };
+    return if (c.else_) |e| evalExpr(e, row_values, ctx) else .{ .null_ = {} };
 }
 
 fn evalFunc(
-    f: *lp.Expr.FuncCall,
+    f: *ExecExpr.FuncCall,
     row_values: []const row.Value,
-    alloc: std.mem.Allocator,
-) EvalError!EvalValue {
+    ctx: EvalContext,
+) anyerror!EvalValue {
     // short_circuit functions (e.g. COALESCE) must not have all arguments
     // pre-evaluated: evaluate one at a time and stop as soon as the function
     // returns a non-null result.  The mechanism lives here because evalExpr is
@@ -217,7 +237,7 @@ fn evalFunc(
     // ScalarFunc.short_circuit in scalar_func.zig.
     if (f.func.short_circuit) {
         for (f.args) |arg| {
-            const v = try evalExpr(arg, row_values, alloc);
+            const v = try evalExpr(arg, row_values, ctx);
             const result = try f.func.eval(&.{v});
             if (result != .null_) return result;
         }
@@ -229,7 +249,7 @@ fn evalFunc(
     // functions without heap allocation.
     var buf: [8]EvalValue = undefined;
     const evaled = buf[0..f.args.len];
-    for (f.args, 0..) |arg, i| evaled[i] = try evalExpr(arg, row_values, alloc);
+    for (f.args, 0..) |arg, i| evaled[i] = try evalExpr(arg, row_values, ctx);
     return f.func.eval(evaled);
 }
 
@@ -257,7 +277,7 @@ fn compareValues(a: EvalValue, b: EvalValue) std.math.Order {
     };
 }
 
-fn evalArith(op: @import("ast.zig").BinaryOp, a: EvalValue, b: EvalValue) EvalError!EvalValue {
+fn evalArith(op: @import("ast.zig").BinaryOp, a: EvalValue, b: EvalValue) anyerror!EvalValue {
     switch (a) {
         .int => |av| switch (b) {
             .int => |bv| return switch (op) {
@@ -291,12 +311,13 @@ fn evalArith(op: @import("ast.zig").BinaryOp, a: EvalValue, b: EvalValue) EvalEr
 test "evalExpr literals" {
     const alloc = std.testing.allocator;
     const vals: []const row.Value = &.{};
+    const ctx = EvalContext{ .outer = &.{}, .alloc = alloc };
 
-    const v_int = try evalExpr(.{ .int_lit = 42 }, vals, alloc);
-    const v_float = try evalExpr(.{ .float_lit = 3.14 }, vals, alloc);
-    const v_str = try evalExpr(.{ .str_lit = "hi" }, vals, alloc);
-    const v_bool = try evalExpr(.{ .bool_lit = true }, vals, alloc);
-    const v_null = try evalExpr(.{ .null_lit = {} }, vals, alloc);
+    const v_int = try evalExpr(.{ .int_lit = 42 }, vals, ctx);
+    const v_float = try evalExpr(.{ .float_lit = 3.14 }, vals, ctx);
+    const v_str = try evalExpr(.{ .str_lit = "hi" }, vals, ctx);
+    const v_bool = try evalExpr(.{ .bool_lit = true }, vals, ctx);
+    const v_null = try evalExpr(.{ .null_lit = {} }, vals, ctx);
 
     try std.testing.expectEqual(@as(i64, 42), v_int.int);
     try std.testing.expectApproxEqAbs(3.14, v_float.real, 1e-9);
@@ -307,75 +328,89 @@ test "evalExpr literals" {
 
 test "evalExpr col_idx reads from row" {
     const alloc = std.testing.allocator;
+    const ctx = EvalContext{ .outer = &.{}, .alloc = alloc };
     const vals = [_]row.Value{
         .{ .int = 99 },
         .null,
     };
-    const v0 = try evalExpr(.{ .col_idx = 0 }, &vals, alloc);
-    const v1 = try evalExpr(.{ .col_idx = 1 }, &vals, alloc);
+    const v0 = try evalExpr(.{ .col_idx = 0 }, &vals, ctx);
+    const v1 = try evalExpr(.{ .col_idx = 1 }, &vals, ctx);
     try std.testing.expectEqual(@as(i64, 99), v0.int);
     try std.testing.expect(v1 == .null_);
+}
+
+test "evalExpr outer_col_idx reads from outer row" {
+    const alloc = std.testing.allocator;
+    const outer = [_]row.Value{.{ .int = 77 }};
+    const ctx = EvalContext{ .outer = &outer, .alloc = alloc };
+    const vals: []const row.Value = &.{};
+    const v = try evalExpr(.{ .outer_col_idx = 0 }, vals, ctx);
+    try std.testing.expectEqual(@as(i64, 77), v.int);
 }
 
 test "evalExpr comparison operators" {
     const alloc = std.testing.allocator;
     const vals: []const row.Value = &.{};
+    const ctx = EvalContext{ .outer = &.{}, .alloc = alloc };
 
-    const ast = @import("ast.zig");
-    var b_eq = lp.Expr.Binary{ .op = .eq, .left = .{ .int_lit = 5 }, .right = .{ .int_lit = 5 } };
-    var b_neq = lp.Expr.Binary{ .op = .neq, .left = .{ .int_lit = 5 }, .right = .{ .int_lit = 6 } };
-    var b_lt = lp.Expr.Binary{ .op = .lt, .left = .{ .int_lit = 3 }, .right = .{ .int_lit = 5 } };
-    _ = ast;
+    var b_eq = ExecExpr.Binary{ .op = .eq, .left = .{ .int_lit = 5 }, .right = .{ .int_lit = 5 } };
+    var b_neq = ExecExpr.Binary{ .op = .neq, .left = .{ .int_lit = 5 }, .right = .{ .int_lit = 6 } };
+    var b_lt = ExecExpr.Binary{ .op = .lt, .left = .{ .int_lit = 3 }, .right = .{ .int_lit = 5 } };
 
-    try std.testing.expect((try evalExpr(.{ .binary = &b_eq }, vals, alloc)).bool_);
-    try std.testing.expect((try evalExpr(.{ .binary = &b_neq }, vals, alloc)).bool_);
-    try std.testing.expect((try evalExpr(.{ .binary = &b_lt }, vals, alloc)).bool_);
+    try std.testing.expect((try evalExpr(.{ .binary = &b_eq }, vals, ctx)).bool_);
+    try std.testing.expect((try evalExpr(.{ .binary = &b_neq }, vals, ctx)).bool_);
+    try std.testing.expect((try evalExpr(.{ .binary = &b_lt }, vals, ctx)).bool_);
 }
 
 test "evalExpr arithmetic" {
     const alloc = std.testing.allocator;
     const vals: []const row.Value = &.{};
+    const ctx = EvalContext{ .outer = &.{}, .alloc = alloc };
 
-    var b_add = lp.Expr.Binary{ .op = .add, .left = .{ .int_lit = 3 }, .right = .{ .int_lit = 4 } };
-    var b_div = lp.Expr.Binary{ .op = .div, .left = .{ .int_lit = 10 }, .right = .{ .int_lit = 0 } };
+    var b_add = ExecExpr.Binary{ .op = .add, .left = .{ .int_lit = 3 }, .right = .{ .int_lit = 4 } };
+    var b_div = ExecExpr.Binary{ .op = .div, .left = .{ .int_lit = 10 }, .right = .{ .int_lit = 0 } };
 
-    try std.testing.expectEqual(@as(i64, 7), (try evalExpr(.{ .binary = &b_add }, vals, alloc)).int);
-    try std.testing.expect((try evalExpr(.{ .binary = &b_div }, vals, alloc)) == .null_);
+    try std.testing.expectEqual(@as(i64, 7), (try evalExpr(.{ .binary = &b_add }, vals, ctx)).int);
+    try std.testing.expect((try evalExpr(.{ .binary = &b_div }, vals, ctx)) == .null_);
 }
 
 test "evalExpr NULL propagation" {
     const alloc = std.testing.allocator;
     const vals = [_]row.Value{.null};
-    var b = lp.Expr.Binary{ .op = .eq, .left = .{ .col_idx = 0 }, .right = .{ .int_lit = 5 } };
-    const result = try evalExpr(.{ .binary = &b }, &vals, alloc);
+    const ctx = EvalContext{ .outer = &.{}, .alloc = alloc };
+    var b = ExecExpr.Binary{ .op = .eq, .left = .{ .col_idx = 0 }, .right = .{ .int_lit = 5 } };
+    const result = try evalExpr(.{ .binary = &b }, &vals, ctx);
     try std.testing.expect(result == .null_);
 }
 
 test "abs() on integers" {
     const alloc = std.testing.allocator;
     const vals: []const row.Value = &.{};
-    var args_neg = [_]lp.Expr{.{ .int_lit = -42 }};
-    var args_pos = [_]lp.Expr{.{ .int_lit = 7 }};
-    var f_neg = lp.Expr.FuncCall{ .func = sf.find("abs").?, .args = &args_neg };
-    var f_pos = lp.Expr.FuncCall{ .func = sf.find("abs").?, .args = &args_pos };
-    try std.testing.expectEqual(@as(i64, 42), (try evalExpr(.{ .func_call = &f_neg }, vals, alloc)).int);
-    try std.testing.expectEqual(@as(i64, 7), (try evalExpr(.{ .func_call = &f_pos }, vals, alloc)).int);
+    const ctx = EvalContext{ .outer = &.{}, .alloc = alloc };
+    var args_neg = [_]ExecExpr{.{ .int_lit = -42 }};
+    var args_pos = [_]ExecExpr{.{ .int_lit = 7 }};
+    var f_neg = ExecExpr.FuncCall{ .func = sf.find("abs").?, .args = &args_neg };
+    var f_pos = ExecExpr.FuncCall{ .func = sf.find("abs").?, .args = &args_pos };
+    try std.testing.expectEqual(@as(i64, 42), (try evalExpr(.{ .func_call = &f_neg }, vals, ctx)).int);
+    try std.testing.expectEqual(@as(i64, 7), (try evalExpr(.{ .func_call = &f_pos }, vals, ctx)).int);
 }
 
 test "abs() on reals" {
     const alloc = std.testing.allocator;
     const vals: []const row.Value = &.{};
-    var args = [_]lp.Expr{.{ .float_lit = -3.14 }};
-    var f = lp.Expr.FuncCall{ .func = sf.find("abs").?, .args = &args };
-    const result = try evalExpr(.{ .func_call = &f }, vals, alloc);
+    const ctx = EvalContext{ .outer = &.{}, .alloc = alloc };
+    var args = [_]ExecExpr{.{ .float_lit = -3.14 }};
+    var f = ExecExpr.FuncCall{ .func = sf.find("abs").?, .args = &args };
+    const result = try evalExpr(.{ .func_call = &f }, vals, ctx);
     try std.testing.expectApproxEqAbs(@as(f64, 3.14), result.real, 1e-9);
 }
 
 test "abs() on NULL" {
     const alloc = std.testing.allocator;
     const vals: []const row.Value = &.{};
-    var args = [_]lp.Expr{.{ .null_lit = {} }};
-    var f = lp.Expr.FuncCall{ .func = sf.find("abs").?, .args = &args };
-    const result = try evalExpr(.{ .func_call = &f }, vals, alloc);
+    const ctx = EvalContext{ .outer = &.{}, .alloc = alloc };
+    var args = [_]ExecExpr{.{ .null_lit = {} }};
+    var f = ExecExpr.FuncCall{ .func = sf.find("abs").?, .args = &args };
+    const result = try evalExpr(.{ .func_call = &f }, vals, ctx);
     try std.testing.expect(result == .null_);
 }

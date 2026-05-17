@@ -34,6 +34,9 @@ pub const Expr = union(enum) {
     bool_lit: bool,
     null_lit: void,
     col_idx: usize, // source column index into the row's values slice
+    // Correlated subquery reference: index into the outer query's row values.
+    // Only appears inside subquery plan trees, never in top-level plans.
+    outer_col_idx: usize,
     binary: *Binary,
     unary: *Unary,
     func_call: *FuncCall,
@@ -41,6 +44,10 @@ pub const Expr = union(enum) {
     in_list: *InList,
     case_: *Case,
     is_null: *IsNull,
+    // Scalar subquery: a nested SELECT that returns one row, one column.
+    // The physical planner converts this into an ExecExpr.subquery with a
+    // concrete execution callback.
+    subquery: *LogicalSubquery,
 
     pub const Binary = struct { op: ast.BinaryOp, left: Expr, right: Expr };
     pub const Unary = struct { op: ast.UnaryOp, operand: Expr };
@@ -55,6 +62,7 @@ pub const Expr = union(enum) {
         else_: ?Expr,
     };
     pub const IsNull = struct { operand: Expr, negated: bool };
+    pub const LogicalSubquery = struct { plan: *LogicalPlan };
 };
 
 // ── Aggregate spec ────────────────────────────────────────────────────────────
@@ -242,6 +250,10 @@ pub const LogicalPlanner = struct {
     cat: *catalog.Catalog,
     arena: std.heap.ArenaAllocator,
     error_message: []const u8 = "",
+    // Set to the outer query's scan schema while planning a correlated subquery.
+    // resolveExpr falls back to this schema when a column ref is not found in
+    // the inner schema, producing outer_col_idx instead of col_idx.
+    outer_schema: ?Schema = null,
 
     pub fn init(cat: *catalog.Catalog, allocator: std.mem.Allocator) LogicalPlanner {
         return .{ .cat = cat, .arena = std.heap.ArenaAllocator.init(allocator) };
@@ -734,6 +746,9 @@ pub const LogicalPlanner = struct {
             },
             .is_null => |n| containsAggCall(n.operand),
             .cast => |c| containsAggCall(c.operand),
+            // Subqueries have their own aggregate context; they do not make the
+            // outer query require an Aggregate node.
+            .subquery => false,
             // Literals, column references, and other leaves can never be aggregates.
             else => false,
         };
@@ -984,9 +999,34 @@ pub const LogicalPlanner = struct {
         };
     }
 
-    // Resolve a SELECT expression that sits above an Aggregate node.
-    // Aggregate function calls are translated to col_idx references into the
-    // aggregate output; all other sub-expressions are resolved recursively.
+    // ── Expression resolution ──────────────────────────────────────────────────
+    //
+    // Both resolveExpr and resolveExprOverAgg are thin wrappers around one
+    // unified implementation, resolveExprCtx.  The structural traversal of
+    // every ast.Expr variant lives exactly once; only column-ref and func_call
+    // resolution differ between the two contexts.
+    //
+    // plain      — used for WHERE / JOIN ON / scalar expressions in SELECT.
+    //              Unqualified column refs search the current schema then fall
+    //              back to outer_schema for correlated subquery references.
+    // over_agg   — used for SELECT / HAVING expressions above a GROUP BY.
+    //              Column refs resolve against the aggregate output schema.
+    //              Aggregate function calls match a pre-collected AggCallSpec
+    //              and return a col_idx into the aggregate output row.
+    const ResolveCtx = union(enum) {
+        plain: Schema,
+        over_agg: struct {
+            scan_schema: Schema, // raw table schema; used for agg-arg resolution and subquery outer
+            agg_specs: []const AggCallSpec,
+            group_by_count: usize,
+            agg_out_schema: Schema, // schema produced by AggregateCursor; col refs resolve here
+        },
+    };
+
+    fn resolveExpr(self: *LogicalPlanner, expr: ast.Expr, schema: Schema) PlanError!Expr {
+        return self.resolveExprCtx(expr, .{ .plain = schema });
+    }
+
     fn resolveExprOverAgg(
         self: *LogicalPlanner,
         expr: ast.Expr,
@@ -995,164 +1035,89 @@ pub const LogicalPlanner = struct {
         group_by_count: usize,
         agg_out_schema: Schema,
     ) PlanError!Expr {
-        return switch (expr) {
-            .int_lit => |v| .{ .int_lit = v },
-            .float_lit => |v| .{ .float_lit = v },
-            .str_lit => |v| .{ .str_lit = try self.alloc().dupe(u8, v) },
-            .bool_lit => |v| .{ .bool_lit = v },
-            .null_lit => .{ .null_lit = {} },
-            .col_ref => |n| .{ .col_idx = try self.resolveColName(n, agg_out_schema) },
-            .qual_col_ref => |q| if (q.col) |c|
-                .{ .col_idx = try self.resolveQualColName(q.table, c, agg_out_schema) }
-            else
-                return PlanError.WildcardInExpression,
-            .binary => |b| blk: {
-                const node = try self.alloc().create(Expr.Binary);
-                node.* = .{
-                    .op = b.op,
-                    .left = try self.resolveExprOverAgg(b.left, scan_schema, agg_specs, group_by_count, agg_out_schema),
-                    .right = try self.resolveExprOverAgg(b.right, scan_schema, agg_specs, group_by_count, agg_out_schema),
-                };
-                break :blk .{ .binary = node };
-            },
-            .unary => |u| blk: {
-                const node = try self.alloc().create(Expr.Unary);
-                node.* = .{
-                    .op = u.op,
-                    .operand = try self.resolveExprOverAgg(u.operand, scan_schema, agg_specs, group_by_count, agg_out_schema),
-                };
-                break :blk .{ .unary = node };
-            },
-            .func_call => |f| blk: {
-                if (agg_mod.find(f.name)) |_| {
-                    // Aggregate call: find the matching AggCallSpec and return a
-                    // col_idx into the aggregate output values slice.
-                    const arg_expr = try self.resolveAggArg(f.args, scan_schema);
-                    for (agg_specs, 0..) |spec, i| {
-                        if (std.ascii.eqlIgnoreCase(spec.func.name, f.name) and
-                            exprEql(spec.input_expr, arg_expr) and
-                            spec.distinct == f.distinct)
-                        {
-                            break :blk Expr{ .col_idx = group_by_count + i };
-                        }
-                    }
-                    return PlanError.ColumnNotFound;
-                } else {
-                    // Scalar function applied to aggregate outputs.
-                    const func = sf.find(f.name) orelse return PlanError.UnknownFunction;
-                    if (f.args.len < func.min_args or f.args.len > func.max_args) return PlanError.WrongArgCount;
-                    const resolved_args = try self.alloc().alloc(Expr, f.args.len);
-                    for (f.args, 0..) |arg, i| {
-                        resolved_args[i] = try self.resolveExprOverAgg(arg, scan_schema, agg_specs, group_by_count, agg_out_schema);
-                    }
-                    const node = try self.alloc().create(Expr.FuncCall);
-                    node.* = .{ .func = func, .args = resolved_args };
-                    break :blk Expr{ .func_call = node };
-                }
-            },
-            .cast => |c| blk: {
-                const node = try self.alloc().create(Expr.Cast);
-                node.* = .{
-                    .target_type = c.target_type,
-                    .operand = try self.resolveExprOverAgg(c.operand, scan_schema, agg_specs, group_by_count, agg_out_schema),
-                };
-                break :blk .{ .cast = node };
-            },
-            .in_list => |il| blk: {
-                const node = try self.alloc().create(Expr.InList);
-                const resolved_list = try self.alloc().alloc(Expr, il.list.len);
-                for (il.list, 0..) |item, i| {
-                    resolved_list[i] = try self.resolveExprOverAgg(item, scan_schema, agg_specs, group_by_count, agg_out_schema);
-                }
-                node.* = .{
-                    .operand = try self.resolveExprOverAgg(il.operand, scan_schema, agg_specs, group_by_count, agg_out_schema),
-                    .list = resolved_list,
-                    .negated = il.negated,
-                };
-                break :blk .{ .in_list = node };
-            },
-            .between => |b| blk: {
-                const operand_lo = try self.resolveExprOverAgg(b.operand, scan_schema, agg_specs, group_by_count, agg_out_schema);
-                const operand_hi = try self.resolveExprOverAgg(b.operand, scan_schema, agg_specs, group_by_count, agg_out_schema);
-                const lo = try self.resolveExprOverAgg(b.low, scan_schema, agg_specs, group_by_count, agg_out_schema);
-                const hi = try self.resolveExprOverAgg(b.high, scan_schema, agg_specs, group_by_count, agg_out_schema);
-                const cmp_lo = try self.alloc().create(Expr.Binary);
-                const cmp_hi = try self.alloc().create(Expr.Binary);
-                const combined = try self.alloc().create(Expr.Binary);
-                if (!b.negated) {
-                    cmp_lo.* = .{ .op = .gte, .left = operand_lo, .right = lo };
-                    cmp_hi.* = .{ .op = .lte, .left = operand_hi, .right = hi };
-                    combined.* = .{ .op = .and_, .left = .{ .binary = cmp_lo }, .right = .{ .binary = cmp_hi } };
-                } else {
-                    cmp_lo.* = .{ .op = .lt, .left = operand_lo, .right = lo };
-                    cmp_hi.* = .{ .op = .gt, .left = operand_hi, .right = hi };
-                    combined.* = .{ .op = .or_, .left = .{ .binary = cmp_lo }, .right = .{ .binary = cmp_hi } };
-                }
-                break :blk Expr{ .binary = combined };
-            },
-            .case_ => |c| blk: {
-                const node = try self.alloc().create(Expr.Case);
-                const resolved_whens = try self.alloc().alloc(Expr.Case.WhenClause, c.when_clauses.len);
-                for (c.when_clauses, 0..) |w, i| {
-                    resolved_whens[i] = .{
-                        .cond = try self.resolveExprOverAgg(w.cond, scan_schema, agg_specs, group_by_count, agg_out_schema),
-                        .then = try self.resolveExprOverAgg(w.then, scan_schema, agg_specs, group_by_count, agg_out_schema),
-                    };
-                }
-                node.* = .{
-                    .when_clauses = resolved_whens,
-                    .else_ = if (c.else_) |e| try self.resolveExprOverAgg(e, scan_schema, agg_specs, group_by_count, agg_out_schema) else null,
-                };
-                break :blk .{ .case_ = node };
-            },
-            .is_null => |n| blk: {
-                const node = try self.alloc().create(Expr.IsNull);
-                node.* = .{
-                    .operand = try self.resolveExprOverAgg(n.operand, scan_schema, agg_specs, group_by_count, agg_out_schema),
-                    .negated = n.negated,
-                };
-                break :blk .{ .is_null = node };
-            },
-            .star => return PlanError.WildcardInExpression,
-            .default_value => std.debug.panic("DEFAULT must be resolved during planning", .{}),
-        };
+        return self.resolveExprCtx(expr, .{ .over_agg = .{
+            .scan_schema = scan_schema,
+            .agg_specs = agg_specs,
+            .group_by_count = group_by_count,
+            .agg_out_schema = agg_out_schema,
+        } });
     }
 
-    // ── Expression resolution ──────────────────────────────────────────────────
-
-    fn resolveExpr(self: *LogicalPlanner, expr: ast.Expr, schema: Schema) PlanError!Expr {
+    fn resolveExprCtx(self: *LogicalPlanner, expr: ast.Expr, ctx: ResolveCtx) PlanError!Expr {
         return switch (expr) {
             .int_lit => |v| .{ .int_lit = v },
             .float_lit => |v| .{ .float_lit = v },
             .str_lit => |v| .{ .str_lit = try self.alloc().dupe(u8, v) },
             .bool_lit => |v| .{ .bool_lit = v },
             .null_lit => .{ .null_lit = {} },
-            // star is only valid inside COUNT(*); it must not reach regular expr resolution.
             .star => return PlanError.WildcardInExpression,
-            .col_ref => |n| .{ .col_idx = try self.resolveColName(n, schema) },
-            .qual_col_ref => |q| if (q.col) |col| .{ .col_idx = try self.resolveQualColName(q.table, col, schema) } else return PlanError.WildcardInExpression,
-            .binary => |b| blk: {
-                const node = try self.alloc().create(Expr.Binary);
-                node.* = .{
-                    .op = b.op,
-                    .left = try self.resolveExpr(b.left, schema),
-                    .right = try self.resolveExpr(b.right, schema),
-                };
-                break :blk .{ .binary = node };
+            .default_value => std.debug.panic("DEFAULT must be resolved during planning", .{}),
+
+            // Column resolution is the only part that differs between contexts.
+            .col_ref => |n| switch (ctx) {
+                .plain => |schema| plain_blk: {
+                    for (schema.columns) |col| {
+                        if (std.ascii.eqlIgnoreCase(n, col.name)) break :plain_blk Expr{ .col_idx = col.index };
+                    }
+                    // Correlated subquery: fall back to the outer query's schema.
+                    if (self.outer_schema) |outer| {
+                        for (outer.columns) |col| {
+                            if (std.ascii.eqlIgnoreCase(n, col.name)) break :plain_blk Expr{ .outer_col_idx = col.index };
+                        }
+                    }
+                    self.setError("Column '{s}' does not exist", .{n});
+                    return PlanError.ColumnNotFound;
+                },
+                .over_agg => |oa| Expr{ .col_idx = try self.resolveColName(n, oa.agg_out_schema) },
             },
-            .unary => |u| blk: {
-                const node = try self.alloc().create(Expr.Unary);
-                node.* = .{
-                    .op = u.op,
-                    .operand = try self.resolveExpr(u.operand, schema),
+            .qual_col_ref => |q| blk: {
+                if (q.col == null) return PlanError.WildcardInExpression;
+                const col_name = q.col.?;
+                break :blk switch (ctx) {
+                    .plain => |schema| plain_blk: {
+                        for (schema.columns) |col| {
+                            if (std.ascii.eqlIgnoreCase(q.table, col.table) and
+                                std.ascii.eqlIgnoreCase(col_name, col.name))
+                            {
+                                break :plain_blk Expr{ .col_idx = col.index };
+                            }
+                        }
+                        if (self.outer_schema) |outer| {
+                            for (outer.columns) |col| {
+                                if (std.ascii.eqlIgnoreCase(q.table, col.table) and
+                                    std.ascii.eqlIgnoreCase(col_name, col.name))
+                                {
+                                    break :plain_blk Expr{ .outer_col_idx = col.index };
+                                }
+                            }
+                        }
+                        self.setError("Column '{s}.{s}' does not exist", .{ q.table, col_name });
+                        return PlanError.ColumnNotFound;
+                    },
+                    .over_agg => |oa| Expr{ .col_idx = try self.resolveQualColName(q.table, col_name, oa.agg_out_schema) },
                 };
-                break :blk .{ .unary = node };
             },
+
+            // Function calls: in over_agg context, aggregate names resolve to
+            // pre-computed output columns; scalar functions recurse normally.
             .func_call => |f| blk: {
-                // Look up the function in the registry at plan time — same pattern
-                // as vtable resolution.  The pointer into REGISTRY is stored in the
-                // plan and used directly by the evaluator, with no string comparison
-                // at execution time.
+                switch (ctx) {
+                    .over_agg => |oa| if (agg_mod.find(f.name)) |_| {
+                        const arg_expr = try self.resolveAggArg(f.args, oa.scan_schema);
+                        for (oa.agg_specs, 0..) |spec, i| {
+                            if (std.ascii.eqlIgnoreCase(spec.func.name, f.name) and
+                                exprEql(spec.input_expr, arg_expr) and
+                                spec.distinct == f.distinct)
+                            {
+                                break :blk Expr{ .col_idx = oa.group_by_count + i };
+                            }
+                        }
+                        return PlanError.ColumnNotFound;
+                    },
+                    .plain => {},
+                }
+                // Scalar function — look up in the scalar registry.
+                // Pointer into REGISTRY is stored in the plan; no string comparison at runtime.
                 const func = sf.find(f.name) orelse {
                     self.setError("Unknown function '{s}'", .{f.name});
                     return PlanError.UnknownFunction;
@@ -1162,25 +1127,38 @@ pub const LogicalPlanner = struct {
                     return PlanError.WrongArgCount;
                 }
                 const resolved_args = try self.alloc().alloc(Expr, f.args.len);
-                for (f.args, 0..) |arg, i| resolved_args[i] = try self.resolveExpr(arg, schema);
+                for (f.args, 0..) |arg, i| resolved_args[i] = try self.resolveExprCtx(arg, ctx);
                 const node = try self.alloc().create(Expr.FuncCall);
                 node.* = .{ .func = func, .args = resolved_args };
-                break :blk .{ .func_call = node };
+                break :blk Expr{ .func_call = node };
+            },
+
+            // All structural cases are identical across contexts — just recurse with ctx.
+            .binary => |b| blk: {
+                const node = try self.alloc().create(Expr.Binary);
+                node.* = .{
+                    .op = b.op,
+                    .left = try self.resolveExprCtx(b.left, ctx),
+                    .right = try self.resolveExprCtx(b.right, ctx),
+                };
+                break :blk .{ .binary = node };
+            },
+            .unary => |u| blk: {
+                const node = try self.alloc().create(Expr.Unary);
+                node.* = .{ .op = u.op, .operand = try self.resolveExprCtx(u.operand, ctx) };
+                break :blk .{ .unary = node };
             },
             .cast => |c| blk: {
                 const node = try self.alloc().create(Expr.Cast);
-                node.* = .{
-                    .target_type = c.target_type,
-                    .operand = try self.resolveExpr(c.operand, schema),
-                };
+                node.* = .{ .target_type = c.target_type, .operand = try self.resolveExprCtx(c.operand, ctx) };
                 break :blk .{ .cast = node };
             },
             .in_list => |il| blk: {
                 const node = try self.alloc().create(Expr.InList);
                 const resolved_list = try self.alloc().alloc(Expr, il.list.len);
-                for (il.list, 0..) |item, i| resolved_list[i] = try self.resolveExpr(item, schema);
+                for (il.list, 0..) |item, i| resolved_list[i] = try self.resolveExprCtx(item, ctx);
                 node.* = .{
-                    .operand = try self.resolveExpr(il.operand, schema),
+                    .operand = try self.resolveExprCtx(il.operand, ctx),
                     .list = resolved_list,
                     .negated = il.negated,
                 };
@@ -1190,30 +1168,44 @@ pub const LogicalPlanner = struct {
             // NOT BETWEEN desugars to (operand < low OR operand > high).
             // The operand is resolved twice (two col_idx nodes pointing at the same
             // column), which is safe because evaluation is pure — no side effects.
-            .between => |b| try self.resolveBetween(b.operand, b.low, b.high, b.negated, schema),
+            .between => |b| try self.resolveBetween(b.operand, b.low, b.high, b.negated, ctx),
             .case_ => |c| blk: {
                 const node = try self.alloc().create(Expr.Case);
                 const resolved_whens = try self.alloc().alloc(Expr.Case.WhenClause, c.when_clauses.len);
                 for (c.when_clauses, 0..) |w, i| {
                     resolved_whens[i] = .{
-                        .cond = try self.resolveExpr(w.cond, schema),
-                        .then = try self.resolveExpr(w.then, schema),
+                        .cond = try self.resolveExprCtx(w.cond, ctx),
+                        .then = try self.resolveExprCtx(w.then, ctx),
                     };
                 }
                 node.* = .{
                     .when_clauses = resolved_whens,
-                    .else_ = if (c.else_) |e| try self.resolveExpr(e, schema) else null,
+                    .else_ = if (c.else_) |e| try self.resolveExprCtx(e, ctx) else null,
                 };
                 break :blk .{ .case_ = node };
             },
             .is_null => |n| blk: {
                 const node = try self.alloc().create(Expr.IsNull);
-                node.* = .{ .operand = try self.resolveExpr(n.operand, schema), .negated = n.negated };
+                node.* = .{ .operand = try self.resolveExprCtx(n.operand, ctx), .negated = n.negated };
                 break :blk .{ .is_null = node };
             },
-            // DEFAULT should have been rewritten to the column's default expression
-            // during INSERT/UPDATE planning. It must not reach this stage.
-            .default_value => std.debug.panic("DEFAULT must be resolved during planning", .{}),
+            .subquery => |stmt| blk: {
+                // The schema exposed to column refs inside the inner SELECT body
+                // differs by context: plain uses the current row schema; over_agg
+                // uses the raw scan schema so correlated refs see table columns,
+                // not aggregate output column names.
+                const outer_for_subquery: Schema = switch (ctx) {
+                    .plain => |schema| schema,
+                    .over_agg => |oa| oa.scan_schema,
+                };
+                const saved_outer = self.outer_schema;
+                self.outer_schema = outer_for_subquery;
+                defer self.outer_schema = saved_outer;
+                const inner_plan = try self.planSelect(stmt.*);
+                const sub = try self.alloc().create(Expr.LogicalSubquery);
+                sub.* = .{ .plan = try self.box(inner_plan) };
+                break :blk .{ .subquery = sub };
+            },
         };
     }
 
@@ -1223,12 +1215,12 @@ pub const LogicalPlanner = struct {
         low: ast.Expr,
         high: ast.Expr,
         negated: bool,
-        schema: Schema,
+        ctx: ResolveCtx,
     ) PlanError!Expr {
-        const op_lo = try self.resolveExpr(operand, schema);
-        const op_hi = try self.resolveExpr(operand, schema);
-        const lo = try self.resolveExpr(low, schema);
-        const hi = try self.resolveExpr(high, schema);
+        const op_lo = try self.resolveExprCtx(operand, ctx);
+        const op_hi = try self.resolveExprCtx(operand, ctx);
+        const lo = try self.resolveExprCtx(low, ctx);
+        const hi = try self.resolveExprCtx(high, ctx);
 
         const cmp_lo = try self.alloc().create(Expr.Binary);
         const cmp_hi = try self.alloc().create(Expr.Binary);
@@ -1479,6 +1471,8 @@ fn exprEqlInner(a: Expr, b: Expr) bool {
         .bool_lit => |av| b == .bool_lit and b.bool_lit == av,
         .null_lit => b == .null_lit,
         .col_idx => |av| b == .col_idx and b.col_idx == av,
+        .outer_col_idx => |av| b == .outer_col_idx and b.outer_col_idx == av,
+        .subquery => |av| b == .subquery and av == b.subquery,
         .binary => |av| b == .binary and
             av.op == b.binary.op and
             exprEqlInner(av.left, b.binary.left) and

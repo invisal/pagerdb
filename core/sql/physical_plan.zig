@@ -1,5 +1,6 @@
 const std = @import("std");
 const lp = @import("logical_plan.zig");
+const ee = @import("exec_expr.zig");
 const catalog = @import("../catalog.zig");
 const vtab_mod = @import("../vtable/root.zig");
 
@@ -18,26 +19,26 @@ pub const PhysicalPointLookup = struct {
 
 pub const PhysicalFilter = struct {
     input: PhysicalPlan,
-    predicate: lp.Expr,
+    predicate: ee.ExecExpr,
     schema: lp.Schema,
 };
 
 pub const PhysicalProject = struct {
     input: PhysicalPlan,
-    exprs: []lp.Expr,
+    exprs: []ee.ExecExpr,
     schema: lp.Schema,
 };
 
 pub const PhysicalInsert = struct {
     table: []const u8,
-    values: [][]lp.Expr, // multiple rows; each inner slice is one row (one Expr per column)
+    values: [][]ee.ExecExpr, // multiple rows; each inner slice is one row (one ExecExpr per column)
     schema: lp.Schema,
 };
 
 pub const PhysicalUpdate = struct {
     table: []const u8,
     input: *PhysicalPlan,
-    assignments: []lp.LogicalUpdate.Assignment,
+    assignments: []ee.ExecAssignment,
     schema: lp.Schema,
 };
 
@@ -69,7 +70,7 @@ pub const PhysicalCreateIndex = struct {
 pub const PhysicalJoin = struct {
     left: PhysicalPlan,
     right: PhysicalPlan,
-    condition: ?lp.Expr, // null for CROSS JOIN
+    condition: ?ee.ExecExpr, // null for CROSS JOIN
     join_type: lp.JoinType,
     schema: lp.Schema,
 };
@@ -77,13 +78,13 @@ pub const PhysicalJoin = struct {
 pub const PhysicalAggregate = struct {
     input: *PhysicalPlan,
     group_by: []const usize,
-    agg_specs: []const lp.AggCallSpec,
+    agg_specs: []const ee.ExecAggCallSpec,
     schema: lp.Schema,
 };
 
 pub const PhysicalSort = struct {
     input: *PhysicalPlan,
-    keys: []lp.SortKey,
+    keys: []ee.ExecSortKey,
     schema: lp.Schema,
 };
 
@@ -136,6 +137,11 @@ pub const PhysicalPlan = union(enum) {
 
 pub const PhysicalPlanner = struct {
     arena: std.heap.ArenaAllocator,
+    // Set by executor.zig before planning any statement that may contain subqueries.
+    // The function pointer and opaque db pointer break the circular dependency
+    // between physical_plan.zig and cursor/root.zig / db.zig.
+    db_opaque: ?*anyopaque = null,
+    subquery_exec: ?ee.SubqueryExecFn = null,
 
     pub fn init(allocator: std.mem.Allocator) PhysicalPlanner {
         return .{ .arena = std.heap.ArenaAllocator.init(allocator) };
@@ -160,7 +166,7 @@ pub const PhysicalPlanner = struct {
             .sort => |n| try self.planSort(n),
             .distinct => |n| try self.planDistinct(n),
             .join => |n| try self.planJoin(n),
-            .insert => |n| .{ .insert = .{ .table = n.table, .values = n.values, .schema = n.schema } },
+            .insert => |n| try self.planInsert(n),
             .update => |n| try self.planUpdate(n),
             .delete => |n| try self.planDelete(n),
             .create_table => |n| .{ .create_table = .{ .table = n.table, .columns = n.columns } },
@@ -174,6 +180,93 @@ pub const PhysicalPlanner = struct {
             .begin => .{ .begin = {} },
             .commit => .{ .commit = {} },
             .rollback => .{ .rollback = {} },
+        };
+    }
+
+    // Convert a logical expression (column-resolved lp.Expr) into an executable
+    // ExecExpr.  Scalar functions are already resolved in lp.Expr; subqueries are
+    // compiled into inner PhysicalPlans wired to execScalarSubquery in cursor/root.zig
+    // via the db_opaque / subquery_exec fields set by executor.zig.
+    pub fn planExpr(self: *PhysicalPlanner, expr: lp.Expr) error{OutOfMemory}!ee.ExecExpr {
+        return switch (expr) {
+            .int_lit => |v| .{ .int_lit = v },
+            .float_lit => |v| .{ .float_lit = v },
+            .str_lit => |v| .{ .str_lit = v },
+            .bool_lit => |v| .{ .bool_lit = v },
+            .null_lit => .{ .null_lit = {} },
+            .col_idx => |i| .{ .col_idx = i },
+            .outer_col_idx => |i| .{ .outer_col_idx = i },
+            .binary => |b| blk: {
+                const node = try self.alloc().create(ee.ExecExpr.Binary);
+                node.* = .{
+                    .op = b.op,
+                    .left = try self.planExpr(b.left),
+                    .right = try self.planExpr(b.right),
+                };
+                break :blk .{ .binary = node };
+            },
+            .unary => |u| blk: {
+                const node = try self.alloc().create(ee.ExecExpr.Unary);
+                node.* = .{ .op = u.op, .operand = try self.planExpr(u.operand) };
+                break :blk .{ .unary = node };
+            },
+            .func_call => |f| blk: {
+                const node = try self.alloc().create(ee.ExecExpr.FuncCall);
+                const args = try self.alloc().alloc(ee.ExecExpr, f.args.len);
+                for (f.args, 0..) |arg, i| args[i] = try self.planExpr(arg);
+                node.* = .{ .func = f.func, .args = args };
+                break :blk .{ .func_call = node };
+            },
+            .cast => |c| blk: {
+                const node = try self.alloc().create(ee.ExecExpr.Cast);
+                node.* = .{ .target_type = c.target_type, .operand = try self.planExpr(c.operand) };
+                break :blk .{ .cast = node };
+            },
+            .in_list => |il| blk: {
+                const node = try self.alloc().create(ee.ExecExpr.InList);
+                const list = try self.alloc().alloc(ee.ExecExpr, il.list.len);
+                for (il.list, 0..) |item, i| list[i] = try self.planExpr(item);
+                node.* = .{
+                    .operand = try self.planExpr(il.operand),
+                    .list = list,
+                    .negated = il.negated,
+                };
+                break :blk .{ .in_list = node };
+            },
+            .case_ => |c| blk: {
+                const node = try self.alloc().create(ee.ExecExpr.Case);
+                const whens = try self.alloc().alloc(ee.ExecExpr.Case.WhenClause, c.when_clauses.len);
+                for (c.when_clauses, 0..) |w, i| {
+                    whens[i] = .{
+                        .cond = try self.planExpr(w.cond),
+                        .then = try self.planExpr(w.then),
+                    };
+                }
+                node.* = .{
+                    .when_clauses = whens,
+                    .else_ = if (c.else_) |e| try self.planExpr(e) else null,
+                };
+                break :blk .{ .case_ = node };
+            },
+            .is_null => |n| blk: {
+                const node = try self.alloc().create(ee.ExecExpr.IsNull);
+                node.* = .{ .operand = try self.planExpr(n.operand), .negated = n.negated };
+                break :blk .{ .is_null = node };
+            },
+            // Compile the nested SELECT into an inner PhysicalPlan, then wrap it in
+            // an ExecExpr.Subquery.  db_opaque and subquery_exec must be set by
+            // executor.zig before planning any query that may contain subqueries.
+            .subquery => |sub| blk: {
+                const inner = try self.alloc().create(PhysicalPlan);
+                inner.* = try self.plan(sub.plan.*);
+                const node = try self.alloc().create(ee.ExecExpr.Subquery);
+                node.* = .{
+                    .inner = @ptrCast(inner),
+                    .db = self.db_opaque.?,
+                    .exec_fn = self.subquery_exec.?,
+                };
+                break :blk .{ .subquery = node };
+            },
         };
     }
 
@@ -205,7 +298,7 @@ pub const PhysicalPlanner = struct {
         const filter_node = try self.alloc().create(PhysicalFilter);
         filter_node.* = .{
             .input = phys_input.*,
-            .predicate = node.predicate,
+            .predicate = try self.planExpr(node.predicate),
             .schema = node.schema,
         };
         return .{ .filter = filter_node };
@@ -214,23 +307,39 @@ pub const PhysicalPlanner = struct {
     fn planProject(self: *PhysicalPlanner, node: *lp.Project) !PhysicalPlan {
         const phys_input = try self.alloc().create(PhysicalPlan);
         phys_input.* = try self.plan(node.input.*);
+        const exprs = try self.alloc().alloc(ee.ExecExpr, node.exprs.len);
+        for (node.exprs, 0..) |expr, i| exprs[i] = try self.planExpr(expr);
         const proj = try self.alloc().create(PhysicalProject);
-        proj.* = .{
-            .input = phys_input.*,
-            .exprs = node.exprs,
-            .schema = node.schema,
-        };
+        proj.* = .{ .input = phys_input.*, .exprs = exprs, .schema = node.schema };
         return .{ .project = proj };
+    }
+
+    fn planInsert(self: *PhysicalPlanner, node: lp.LogicalInsert) !PhysicalPlan {
+        const rows = try self.alloc().alloc([]ee.ExecExpr, node.values.len);
+        for (node.values, 0..) |row, i| {
+            const cols = try self.alloc().alloc(ee.ExecExpr, row.len);
+            for (row, 0..) |expr, j| cols[j] = try self.planExpr(expr);
+            rows[i] = cols;
+        }
+        return .{ .insert = .{ .table = node.table, .values = rows, .schema = node.schema } };
     }
 
     fn planAggregate(self: *PhysicalPlanner, node: *lp.Aggregate) !PhysicalPlan {
         const phys_input = try self.alloc().create(PhysicalPlan);
         phys_input.* = try self.plan(node.input.*);
+        const specs = try self.alloc().alloc(ee.ExecAggCallSpec, node.agg_specs.len);
+        for (node.agg_specs, 0..) |s, i| {
+            specs[i] = .{
+                .func = s.func,
+                .input_expr = if (s.input_expr) |e| try self.planExpr(e) else null,
+                .distinct = s.distinct,
+            };
+        }
         const agg = try self.alloc().create(PhysicalAggregate);
         agg.* = .{
             .input = phys_input,
             .group_by = node.group_by,
-            .agg_specs = node.agg_specs,
+            .agg_specs = specs,
             .schema = node.schema,
         };
         return .{ .aggregate = agg };
@@ -239,8 +348,12 @@ pub const PhysicalPlanner = struct {
     fn planSort(self: *PhysicalPlanner, node: *lp.Sort) !PhysicalPlan {
         const phys_input = try self.alloc().create(PhysicalPlan);
         phys_input.* = try self.plan(node.input.*);
+        const keys = try self.alloc().alloc(ee.ExecSortKey, node.keys.len);
+        for (node.keys, 0..) |k, i| {
+            keys[i] = .{ .expr = try self.planExpr(k.expr), .descending = k.descending };
+        }
         const sort = try self.alloc().create(PhysicalSort);
-        sort.* = .{ .input = phys_input, .keys = node.keys, .schema = node.schema };
+        sort.* = .{ .input = phys_input, .keys = keys, .schema = node.schema };
         return .{ .sort = sort };
     }
 
@@ -257,7 +370,7 @@ pub const PhysicalPlanner = struct {
         join_node.* = .{
             .left = try self.plan(node.left.*),
             .right = try self.plan(node.right.*),
-            .condition = node.condition,
+            .condition = if (node.condition) |cond| try self.planExpr(cond) else null,
             .join_type = node.join_type,
             .schema = node.schema,
         };
@@ -267,10 +380,14 @@ pub const PhysicalPlanner = struct {
     fn planUpdate(self: *PhysicalPlanner, node: lp.LogicalUpdate) !PhysicalPlan {
         const phys_input = try self.alloc().create(PhysicalPlan);
         phys_input.* = try self.plan(node.input.*);
+        const assignments = try self.alloc().alloc(ee.ExecAssignment, node.assignments.len);
+        for (node.assignments, 0..) |a, i| {
+            assignments[i] = .{ .col_idx = a.col_idx, .value = try self.planExpr(a.value) };
+        }
         return .{ .update = .{
             .table = node.table,
             .input = phys_input,
-            .assignments = node.assignments,
+            .assignments = assignments,
             .schema = node.schema,
         } };
     }
@@ -286,9 +403,9 @@ pub const PhysicalPlanner = struct {
     }
 };
 
-// Optimization: detect "__rowid = N" or "N = __rowid" patterns in the WHERE
-// clause.  When found, the physical planner replaces SeqScan+Filter with
-// PointLookup, which uses btree.lookup() directly — O(log n) vs O(n).
+// Optimization: detect "__rowid = N" or "N = __rowid" in the logical predicate
+// before expression compilation.  Operates on lp.Expr (not ExecExpr) so it
+// runs before planExpr and can still read the col_idx / int_lit variants directly.
 fn extractRowidEq(expr: lp.Expr, rowid_col_idx: usize) ?u64 {
     if (expr != .binary) return null;
     const b = expr.binary;
