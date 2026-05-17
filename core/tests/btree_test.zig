@@ -1,6 +1,6 @@
 const std = @import("std");
 const t = @import("../types.zig");
-const btree = @import("../btree.zig");
+const btree = @import("../btree_shared.zig");
 const DiskPager = @import("../pager/disk.zig").DiskPager;
 const DiskIo = @import("../io/disk_io.zig").DiskIo;
 const PageWriter = @import("../page_writer.zig").PageWriter;
@@ -25,10 +25,10 @@ test "scan returns rows in rowid order" {
 
     const row = [_]u8{0x01};
     for ([_]u64{ 10, 5, 20, 1 }) |rowid| {
-        try btree.insert(&pager, root_id, rowid, &row, true);
+        try btree.insertRow(&pager, root_id, rowid, &row);
     }
 
-    var it = try btree.ScanIterator.init(&pager, root_id);
+    var it = try btree.RowidBTree.ScanIterator.init(&pager, root_id);
     const expected = [_]u64{ 1, 5, 10, 20 };
     for (expected) |exp| {
         const cell = try it.next();
@@ -56,16 +56,16 @@ test "delete existing row" {
 
     const row = [_]u8{0x01};
     for (1..11) |i| {
-        try btree.insert(&pager, root_id, @intCast(i), &row, true);
+        try btree.insertRow(&pager, root_id, @intCast(i), &row);
     }
 
-    try std.testing.expect(try btree.delete(&pager, root_id, 5));
+    try std.testing.expect(try btree.RowidBTree.delete(&pager, root_id, 5));
 
     var buf: [t.PAGE_SIZE]u8 = undefined;
-    try std.testing.expect(try btree.lookup(&pager, root_id, 5, &buf) == null);
+    try std.testing.expect(try btree.lookupCell(&pager, root_id, 5, &buf) == null);
 
     var count: usize = 0;
-    var it = try btree.ScanIterator.init(&pager, root_id);
+    var it = try btree.RowidBTree.ScanIterator.init(&pager, root_id);
     while (try it.next()) |_| count += 1;
     try std.testing.expectEqual(count, 9);
 }
@@ -87,9 +87,9 @@ test "delete non-existent row returns false" {
     try root_pw.commit();
 
     const row = [_]u8{0x01};
-    try btree.insert(&pager, root_id, 1, &row, true);
+    try btree.insertRow(&pager, root_id, 1, &row);
 
-    try std.testing.expect(!try btree.delete(&pager, root_id, 99));
+    try std.testing.expect(!try btree.RowidBTree.delete(&pager, root_id, 99));
 }
 
 test "delete all rows in a page frees the page" {
@@ -111,19 +111,19 @@ test "delete all rows in a page frees the page" {
     var row: [200]u8 = undefined;
     @memset(&row, 0);
     for (1..51) |i| {
-        try btree.insert(&pager, root_id, @intCast(i), &row, true);
+        try btree.insertRow(&pager, root_id, @intCast(i), &row);
     }
 
     const free_before = pager.free_list_head;
 
     for (1..51) |i| {
-        _ = try btree.delete(&pager, root_id, @intCast(i));
+        _ = try btree.RowidBTree.delete(&pager, root_id, @intCast(i));
     }
 
     try std.testing.expect(pager.free_list_head != free_before);
 
     var count: usize = 0;
-    var it = try btree.ScanIterator.init(&pager, root_id);
+    var it = try btree.RowidBTree.ScanIterator.init(&pager, root_id);
     while (try it.next()) |_| count += 1;
     try std.testing.expectEqual(count, 0);
 }
@@ -148,7 +148,7 @@ test "insert and lookup large row via btree" {
     defer alloc.free(big_row);
     for (big_row, 0..) |*b, i| b.* = @intCast(i % 256);
 
-    try btree.insert(&pager, root_id, 42, big_row, true);
+    try btree.insertRow(&pager, root_id, 42, big_row);
 
     const result = try btree.lookupRow(&pager, root_id, 42, alloc);
     defer if (result) |r| alloc.free(r);
@@ -176,12 +176,12 @@ test "delete overflowed row frees overflow chain" {
     defer alloc.free(big_row);
     @memset(big_row, 0xCC);
 
-    try btree.insert(&pager, root_id, 7, big_row, true);
+    try btree.insertRow(&pager, root_id, 7, big_row);
     const free_before = pager.free_list_head;
 
-    try std.testing.expect(try btree.delete(&pager, root_id, 7));
+    try std.testing.expect(try btree.RowidBTree.delete(&pager, root_id, 7));
     try std.testing.expect(pager.free_list_head != free_before);
 
     var buf: [t.PAGE_SIZE]u8 = undefined;
-    try std.testing.expect(try btree.lookup(&pager, root_id, 7, &buf) == null);
+    try std.testing.expect(try btree.lookupCell(&pager, root_id, 7, &buf) == null);
 }

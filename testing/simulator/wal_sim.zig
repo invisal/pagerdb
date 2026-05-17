@@ -146,7 +146,7 @@ fn runSeed(alloc: std.mem.Allocator, seed: u64) !void {
         // since recovery has already been applied and flushed above).
         var pager3 = try DiskPager.open(alloc, sim_io.io(), path, .{});
         defer pager3.close();
-        core.btree.verifyTree(&pager3, rdb.cat.tables.get(TABLE).?.btree_root) catch |err| {
+        core.btree.RowidBTree.verifyTree(&pager3, rdb.cat.tables.get(TABLE).?.btree_root) catch |err| {
             std.debug.print(
                 "[WAL-SIM] seed={d} crash_at={d}: B-tree structure violation: {s}\n",
                 .{ seed, crash_point, @errorName(err) },

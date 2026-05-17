@@ -33,7 +33,7 @@ pub fn checkBTreeStructure(alloc: std.mem.Allocator, io: std.Io, db: *Database, 
     var disk_io = DiskIo.init(alloc, io);
     var disk_pager = try DiskPager.open(alloc, disk_io.io(), path, .{});
     defer disk_pager.close();
-    btree.verifyTree(&disk_pager, meta.btree_root) catch |err| {
+    btree.RowidBTree.verifyTree(&disk_pager, meta.btree_root) catch |err| {
         std.debug.print(
             "  [checker] B-tree structure violation in '{s}': {s}\n",
             .{ table_name, @errorName(err) },

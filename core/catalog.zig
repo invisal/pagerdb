@@ -3,7 +3,7 @@ const t = @import("types.zig");
 const ast = @import("sql/ast.zig");
 const Pager = @import("pager/pager.zig").Pager;
 const PageWriter = @import("page_writer.zig").PageWriter;
-const btree = @import("btree.zig");
+const btree = @import("btree_shared.zig");
 const row = @import("row.zig");
 const page0 = @import("page0.zig");
 const Parser = @import("sql/parser.zig").Parser;
@@ -165,7 +165,7 @@ pub const Catalog = struct {
         // first build the table map, then attach columns by table_id without
         // needing to re-lookup tables during the column scan.
         var max_table_id: u64 = 0;
-        var table_scan = try btree.ScanIterator.init(self.pager, self.pager.sys_tables_root);
+        var table_scan = try btree.RowidBTree.ScanIterator.init(self.pager, self.pager.sys_tables_root);
         while (try table_scan.next()) |cell| {
             const vals = try row.decodeRow(&TABLES_SCHEMA, cell.row_data, tmp);
             const btree_root: u32 = @intCast(vals[1].int);
@@ -185,7 +185,7 @@ pub const Catalog = struct {
 
         // Pass 2: attach column metadata to each table.
         var max_col_rowid: u64 = 0;
-        var col_scan = try btree.ScanIterator.init(self.pager, self.pager.sys_columns_root);
+        var col_scan = try btree.RowidBTree.ScanIterator.init(self.pager, self.pager.sys_columns_root);
 
         while (try col_scan.next()) |cell| {
             if (cell.rowid > max_col_rowid) max_col_rowid = cell.rowid;
@@ -235,7 +235,7 @@ pub const Catalog = struct {
             var idx_map = std.AutoHashMap(u64, RawIndex).init(tmp);
 
             var max_idx_id: u64 = 0;
-            var idx_scan = try btree.ScanIterator.init(self.pager, self.pager.sys_indexes_root);
+            var idx_scan = try btree.RowidBTree.ScanIterator.init(self.pager, self.pager.sys_indexes_root);
             while (try idx_scan.next()) |cell| {
                 if (cell.rowid > max_idx_id) max_idx_id = cell.rowid;
                 const vals = try row.decodeRow(&INDEXES_SCHEMA, cell.row_data, tmp);
@@ -254,7 +254,7 @@ pub const Catalog = struct {
             var col_lists = std.AutoHashMap(u64, std.ArrayListUnmanaged(ColEntry)).init(tmp);
 
             var max_idx_col_rowid: u64 = 0;
-            var icol_scan = try btree.ScanIterator.init(self.pager, self.pager.sys_index_cols_root);
+            var icol_scan = try btree.RowidBTree.ScanIterator.init(self.pager, self.pager.sys_index_cols_root);
             while (try icol_scan.next()) |cell| {
                 if (cell.rowid > max_idx_col_rowid) max_idx_col_rowid = cell.rowid;
                 const vals = try row.decodeRow(&INDEX_COLS_SCHEMA, cell.row_data, tmp);
@@ -478,7 +478,7 @@ pub const Catalog = struct {
         };
         var buf: [256]u8 = undefined;
         const len = row.encodeRow(&values, &buf);
-        try btree.insert(self.pager, self.pager.sys_tables_root, rowid, buf[0..len], true);
+        try btree.insertRow(self.pager, self.pager.sys_tables_root, rowid, buf[0..len]);
     }
 
     fn insertColumnsRow(
@@ -511,7 +511,7 @@ pub const Catalog = struct {
 
         var buf: [256]u8 = undefined;
         const len = row.encodeRow(&values, &buf);
-        try btree.insert(self.pager, self.pager.sys_columns_root, rowid, buf[0..len], true);
+        try btree.insertRow(self.pager, self.pager.sys_columns_root, rowid, buf[0..len]);
     }
 
     fn insertIndexesRow(
@@ -530,7 +530,7 @@ pub const Catalog = struct {
         };
         var buf: [256]u8 = undefined;
         const len = row.encodeRow(&values, &buf);
-        try btree.insert(self.pager, self.pager.sys_indexes_root, rowid, buf[0..len], true);
+        try btree.insertRow(self.pager, self.pager.sys_indexes_root, rowid, buf[0..len]);
     }
 
     fn insertIndexColsRow(
@@ -547,7 +547,7 @@ pub const Catalog = struct {
         };
         var buf: [64]u8 = undefined;
         const len = row.encodeRow(&values, &buf);
-        try btree.insert(self.pager, self.pager.sys_index_cols_root, rowid, buf[0..len], true);
+        try btree.insertRow(self.pager, self.pager.sys_index_cols_root, rowid, buf[0..len]);
     }
 };
 
