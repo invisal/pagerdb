@@ -224,6 +224,8 @@ pub const PlanError = error{
     NoDefaultValue,
     UnknownFunction,
     WrongArgCount,
+    MultiplePrimaryKeys,
+    PrimaryKeyMustBeInteger,
 };
 
 pub const LogicalPlanner = struct {
@@ -605,7 +607,21 @@ pub const LogicalPlanner = struct {
     fn planCreateTable(self: *LogicalPlanner, stmt: ast.CreateTableStmt) PlanError!LogicalPlan {
         const table = try self.alloc().dupe(u8, stmt.table);
         const cols = try self.alloc().alloc(catalog.ColumnMeta, stmt.columns.len);
+
+        var pk_count: usize = 0;
         for (stmt.columns, 0..) |col_def, i| {
+            if (col_def.is_primary_key) {
+                pk_count += 1;
+                if (pk_count > 1) {
+                    self.setError("Table '{s}' cannot have more than one PRIMARY KEY", .{stmt.table});
+                    return PlanError.MultiplePrimaryKeys;
+                }
+                if (col_def.col_type != .int) {
+                    self.setError("PRIMARY KEY column '{s}' must be INTEGER type", .{col_def.name});
+                    return PlanError.PrimaryKeyMustBeInteger;
+                }
+            }
+
             // Clone the AST expression to the planner's allocator.
             // The expression will be resolved at runtime when needed.
             const default_expr: ?ast.Expr = if (col_def.default_expr) |ast_expr|
@@ -613,10 +629,17 @@ pub const LogicalPlanner = struct {
             else
                 null;
 
+            // INTEGER PRIMARY KEY columns are always nullable in the catalog so
+            // that INSERT without specifying the PK auto-assigns a rowid.
+            // The NOT NULL invariant is enforced by the storage layer (every row
+            // always has a non-null rowid).
+            const nullable = if (col_def.is_primary_key) true else col_def.nullable;
+
             cols[i] = .{
                 .name = try self.alloc().dupe(u8, col_def.name),
                 .col_type = col_def.col_type,
-                .nullable = col_def.nullable,
+                .nullable = nullable,
+                .is_primary_key = col_def.is_primary_key,
                 .default_expr = default_expr,
                 .default_src = if (col_def.default_src) |src| try self.alloc().dupe(u8, src) else null,
             };

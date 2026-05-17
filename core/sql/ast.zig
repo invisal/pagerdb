@@ -303,6 +303,7 @@ pub const ColumnDef = struct {
     name: []const u8, // arena-owned
     col_type: t.ColType,
     nullable: bool, // true unless NOT NULL present
+    is_primary_key: bool = false,
 
     default_expr: ?Expr,
     default_src: ?[]const u8,

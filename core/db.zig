@@ -120,13 +120,46 @@ pub const Db = struct {
     ) !u64 {
         const meta = self.cat.getTable(table) orelse return error.TableNotFound;
 
-        const rowid = meta.rowid_counter;
-        meta.rowid_counter += 1;
+        // If the table has an INTEGER PRIMARY KEY column, use its value as the
+        // rowid.  A null value means the user omitted it → auto-assign.
+        // We also need to ensure the PK column value in the stored row bytes
+        // matches the actual rowid (important for the auto-assign case where
+        // the caller passes null for the PK slot).
+        var mutable_values: ?[]row.Value = null;
+        defer if (mutable_values) |mv| self.allocator.free(mv);
 
-        const row_size = row.encodedSize(values);
+        const rowid: u64 = if (meta.findPkColumn()) |pk_idx| blk: {
+            if (pk_idx < values.len and values[pk_idx] == .int) {
+                const pk_val = values[pk_idx].int;
+                const rid: u64 = @intCast(pk_val);
+                // Reject duplicates: the B-tree does not check this on its own.
+                var leaf_buf: [t.PAGE_SIZE]u8 = undefined;
+                const existing = try btree.lookup(&self.pager, meta.btree_root, rid, &leaf_buf);
+                if (existing != null) return error.PrimaryKeyConflict;
+                // Keep rowid_counter ahead of any explicit PK values.
+                if (rid >= meta.rowid_counter) meta.rowid_counter = rid + 1;
+                break :blk rid;
+            }
+            // PK was null (omitted) → auto-assign rowid and write it back into
+            // the values so the stored row bytes reflect the actual PK value.
+            const rid = meta.rowid_counter;
+            meta.rowid_counter += 1;
+            const mv = try self.allocator.dupe(row.Value, values);
+            mv[pk_idx] = .{ .int = @intCast(rid) };
+            mutable_values = mv;
+            break :blk rid;
+        } else blk: {
+            const rid = meta.rowid_counter;
+            meta.rowid_counter += 1;
+            break :blk rid;
+        };
+
+        const actual_values: []const row.Value = if (mutable_values) |mv| mv else values;
+
+        const row_size = row.encodedSize(actual_values);
         const row_buf = try self.allocator.alloc(u8, row_size);
         defer self.allocator.free(row_buf);
-        _ = row.encodeRow(values, row_buf);
+        _ = row.encodeRow(actual_values, row_buf);
 
         try btree.insert(&self.pager, meta.btree_root, rowid, row_buf, true);
 

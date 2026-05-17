@@ -1,0 +1,66 @@
+# PRIMARY KEY tests
+
+# Column-level PRIMARY KEY: explicit value used as rowid
+statement ok
+CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)
+
+statement ok
+INSERT INTO users VALUES (1, 'alice')
+
+statement ok
+INSERT INTO users VALUES (3, 'carol')
+
+query IT
+SELECT id, name FROM users ORDER BY id
+----
+1
+alice
+3
+carol
+
+# Auto-assign rowid when PK is omitted; auto value comes after highest seen (3), so 4
+statement ok
+INSERT INTO users(name) VALUES ('bob')
+
+query IT
+SELECT id, name FROM users ORDER BY id
+----
+1
+alice
+3
+carol
+4
+bob
+
+# Duplicate PK must error
+statement error PrimaryKeyConflict
+INSERT INTO users VALUES (1, 'dup')
+
+# Table-level PRIMARY KEY syntax
+statement ok
+CREATE TABLE orders (order_id INTEGER, amount TEXT, PRIMARY KEY (order_id))
+
+statement ok
+INSERT INTO orders VALUES (100, '9.99')
+
+statement ok
+INSERT INTO orders VALUES (200, '4.99')
+
+query IT
+SELECT order_id, amount FROM orders ORDER BY order_id
+----
+100
+9.99
+200
+4.99
+
+statement error PrimaryKeyConflict
+INSERT INTO orders VALUES (100, 'dup')
+
+# Multiple PKs must error
+statement error MultiplePrimaryKeys
+CREATE TABLE bad (a INTEGER PRIMARY KEY, b INTEGER PRIMARY KEY)
+
+# Non-integer PK must error
+statement error PrimaryKeyMustBeInteger
+CREATE TABLE bad2 (name TEXT PRIMARY KEY)

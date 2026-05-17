@@ -282,6 +282,10 @@ fn isSqlUserError(e: anyerror) bool {
         // Virtual table argument errors
         error.ArgumentMismatch,
         error.InvalidArgumentType,
+        // Primary key errors
+        error.PrimaryKeyConflict,
+        error.MultiplePrimaryKeys,
+        error.PrimaryKeyMustBeInteger,
         => true,
         else => false,
     };

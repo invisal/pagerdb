@@ -20,7 +20,9 @@ const COLUMNS_SCHEMA = [_]row.ColumnSchema{
     .{ .col_type = .int, .nullable = false }, // col_index
     .{ .col_type = .text, .nullable = false }, // name
     .{ .col_type = .int, .nullable = false }, // col_type (as i64)
-    .{ .col_type = .int, .nullable = false }, // nullable (0 or 1)
+    // flags bitmask: bit 0 = nullable, bit 1 = is_primary_key
+    // Old rows stored 0 or 1 here; bit 1 was always 0, so backward-compatible.
+    .{ .col_type = .int, .nullable = false }, // flags
     .{ .col_type = .text, .nullable = true }, // default value expression
 };
 
@@ -29,7 +31,7 @@ const COL = struct {
     const attnum: usize = 1;
     const name: usize = 2;
     const col_type: usize = 3;
-    const nullable: usize = 4;
+    const flags: usize = 4; // bit 0=nullable, bit 1=is_primary_key
     const default_expr: usize = 5;
 };
 
@@ -41,6 +43,7 @@ pub const ColumnMeta = struct {
     name: []const u8,
     col_type: t.ColType,
     nullable: bool,
+    is_primary_key: bool = false,
     /// Default expression in its original string form (e.g., "CURRENT_TIMESTAMP").
     /// Preserved for displaying in DESCRIBE and INFORMATION_SCHEMA.
     default_src: ?[]const u8 = null,
@@ -59,6 +62,14 @@ pub const TableMeta = struct {
     pub fn findColumn(self: *TableMeta, name: []const u8) ?*const ColumnMeta {
         for (self.columns) |*column| {
             if (std.ascii.eqlIgnoreCase(column.name, name)) return column;
+        }
+        return null;
+    }
+
+    /// Returns the attnum of the INTEGER PRIMARY KEY column, or null if none.
+    pub fn findPkColumn(self: *const TableMeta) ?usize {
+        for (self.columns) |col| {
+            if (col.is_primary_key) return col.attnum;
         }
         return null;
     }
@@ -149,11 +160,13 @@ pub const Catalog = struct {
             else
                 null;
 
+            const flags = vals[COL.flags].int;
             const col = ColumnMeta{
                 .attnum = @intCast(vals[COL.attnum].int),
                 .name = try alloc.dupe(u8, vals[COL.name].text),
                 .col_type = @enumFromInt(vals[COL.col_type].int),
-                .nullable = vals[COL.nullable].int != 0,
+                .nullable = (flags & 1) != 0,
+                .is_primary_key = (flags & 2) != 0,
                 .default_expr = if (default_expr) |expr| try expr.clone(alloc) else null,
                 .default_src = if (default_src) |src| try alloc.dupe(u8, src) else null,
             };
@@ -212,6 +225,7 @@ pub const Catalog = struct {
                 col.name,
                 col.col_type,
                 col.nullable,
+                col.is_primary_key,
                 col.default_src,
             );
         }
@@ -242,6 +256,7 @@ pub const Catalog = struct {
                 .name = try alloc.dupe(u8, col.name),
                 .col_type = col.col_type,
                 .nullable = col.nullable,
+                .is_primary_key = col.is_primary_key,
                 .default_src = duped_default_src,
                 .default_expr = duped_default_expr,
             };
@@ -293,6 +308,7 @@ pub const Catalog = struct {
         name: []const u8,
         col_type: t.ColType,
         nullable: bool,
+        is_primary_key: bool,
         default_src: ?[]const u8,
     ) !void {
         const default_value = if (default_src) |src|
@@ -300,12 +316,15 @@ pub const Catalog = struct {
         else
             row.Value{ .null = {} };
 
+        // flags bitmask: bit 0 = nullable, bit 1 = is_primary_key
+        const flags: i64 = @as(i64, if (nullable) 1 else 0) | (@as(i64, if (is_primary_key) 1 else 0) << 1);
+
         const values = [_]row.Value{
             .{ .int = table_id },
             .{ .int = col_index },
             .{ .text = name },
             .{ .int = @intFromEnum(col_type) },
-            .{ .int = if (nullable) 1 else 0 },
+            .{ .int = flags },
             default_value,
         };
 
