@@ -127,6 +127,14 @@ pub const LogicalCreateTable = struct {
     columns: []catalog.ColumnMeta, // arena-owned
 };
 
+pub const LogicalCreateIndex = struct {
+    name: []const u8, // arena-owned
+    table: []const u8, // arena-owned
+    col_indices: []u32, // attnums of indexed columns, arena-owned
+    is_unique: bool,
+    if_not_exists: bool,
+};
+
 // Aggregate node: consumes all input rows, groups by group_by column indices,
 // and computes one aggregate result per group.  Output schema is:
 //   [group_key_cols..., agg_result_cols...]
@@ -188,6 +196,7 @@ pub const LogicalPlan = union(enum) {
     update: LogicalUpdate,
     delete: LogicalDelete,
     create_table: LogicalCreateTable,
+    create_index: LogicalCreateIndex,
     begin: void,
     commit: void,
     rollback: void,
@@ -205,7 +214,7 @@ pub const LogicalPlan = union(enum) {
             .insert => |n| n.schema,
             .update => |n| n.schema,
             .delete => |n| n.schema,
-            .const_scan, .create_table, .begin, .commit, .rollback => Schema{ .table = "", .columns = &.{} },
+            .const_scan, .create_table, .create_index, .begin, .commit, .rollback => Schema{ .table = "", .columns = &.{} },
         };
     }
 };
@@ -256,6 +265,7 @@ pub const LogicalPlanner = struct {
             .update => |s| try self.planUpdate(s),
             .delete => |s| try self.planDelete(s),
             .create_table => |s| try self.planCreateTable(s),
+            .create_index => |s| try self.planCreateIndex(s),
             .begin => .{ .begin = {} },
             .commit => .{ .commit = {} },
             .rollback => .{ .rollback = {} },
@@ -645,6 +655,30 @@ pub const LogicalPlanner = struct {
             };
         }
         return .{ .create_table = .{ .table = table, .columns = cols } };
+    }
+
+    fn planCreateIndex(self: *LogicalPlanner, stmt: ast.CreateIndexStmt) PlanError!LogicalPlan {
+        const meta = self.cat.getTable(stmt.table) orelse {
+            self.setError("Table '{s}' does not exist", .{stmt.table});
+            return PlanError.TableNotFound;
+        };
+
+        const col_indices = try self.alloc().alloc(u32, stmt.columns.len);
+        for (stmt.columns, 0..) |col_name, i| {
+            const col = meta.findColumn(col_name) orelse {
+                self.setError("Column '{s}' does not exist in table '{s}'", .{ col_name, stmt.table });
+                return PlanError.ColumnNotFound;
+            };
+            col_indices[i] = col.attnum;
+        }
+
+        return .{ .create_index = .{
+            .name = try self.alloc().dupe(u8, stmt.name),
+            .table = try self.alloc().dupe(u8, stmt.table),
+            .col_indices = col_indices,
+            .is_unique = stmt.is_unique,
+            .if_not_exists = stmt.if_not_exists,
+        } };
     }
 
     // ── Aggregate planning ─────────────────────────────────────────────────────

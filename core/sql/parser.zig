@@ -116,7 +116,7 @@ pub const Parser = struct {
             .kw_insert => .{ .insert = try self.parseInsert() },
             .kw_update => .{ .update = try self.parseUpdate() },
             .kw_delete => .{ .delete = try self.parseDelete() },
-            .kw_create => .{ .create_table = try self.parseCreateTable() },
+            .kw_create => try self.parseCreate(),
             .kw_begin => blk: {
                 _ = self.advance();
                 break :blk .{ .begin = {} };
@@ -523,8 +523,70 @@ pub const Parser = struct {
 
     // ── CREATE TABLE ──────────────────────────────────────────────────────────
 
-    fn parseCreateTable(self: *Parser) ParseError!ast.CreateTableStmt {
+    fn parseCreate(self: *Parser) ParseError!ast.Stmt {
         _ = try self.expect(.kw_create);
+        return switch (self.peek().kind) {
+            .kw_table => .{ .create_table = try self.parseCreateTable() },
+            .kw_index => blk: {
+                _ = self.advance(); // consume INDEX
+                break :blk .{ .create_index = try self.parseCreateIndex(false) };
+            },
+            .kw_unique => blk: {
+                _ = self.advance(); // consume UNIQUE
+                _ = try self.expect(.kw_index);
+                break :blk .{ .create_index = try self.parseCreateIndex(true) };
+            },
+            else => {
+                const tok = self.peek();
+                self.error_message = std.fmt.allocPrint(
+                    self.arena.allocator(),
+                    "[{d}] Expected TABLE or INDEX after CREATE, got '{s}'",
+                    .{ tok.start, self.tokenText(tok) },
+                ) catch "";
+                return ParseError.UnexpectedToken;
+            },
+        };
+    }
+
+    fn parseCreateIndex(self: *Parser, is_unique: bool) ParseError!ast.CreateIndexStmt {
+        // Caller has already consumed CREATE [UNIQUE] INDEX.
+        // Syntax: [IF NOT EXISTS] name ON table (col, ...)
+        var if_not_exists = false;
+        if (self.peek().kind == .kw_if) {
+            _ = self.advance(); // consume IF
+            _ = try self.expect(.kw_not);
+            _ = try self.expect(.kw_exists);
+            if_not_exists = true;
+        }
+
+        const name_tok = try self.expect(.identifier);
+        const name = try self.alloc().dupe(u8, self.tokenText(name_tok));
+
+        _ = try self.expect(.kw_on);
+
+        const table_tok = try self.expect(.identifier);
+        const table = try self.alloc().dupe(u8, self.tokenText(table_tok));
+
+        _ = try self.expect(.lparen);
+        var cols: std.ArrayList([]const u8) = .empty;
+        while (true) {
+            const col_tok = try self.expect(.identifier);
+            try cols.append(self.alloc(), try self.alloc().dupe(u8, self.tokenText(col_tok)));
+            if (self.peek().kind != .comma) break;
+            _ = self.advance();
+        }
+        _ = try self.expect(.rparen);
+
+        return ast.CreateIndexStmt{
+            .name = name,
+            .table = table,
+            .columns = try cols.toOwnedSlice(self.alloc()),
+            .is_unique = is_unique,
+            .if_not_exists = if_not_exists,
+        };
+    }
+
+    fn parseCreateTable(self: *Parser) ParseError!ast.CreateTableStmt {
         _ = try self.expect(.kw_table);
 
         const table_tok = try self.expect(.identifier);

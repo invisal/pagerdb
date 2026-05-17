@@ -26,6 +26,19 @@ const COLUMNS_SCHEMA = [_]row.ColumnSchema{
     .{ .col_type = .text, .nullable = true }, // default value expression
 };
 
+const INDEXES_SCHEMA = [_]row.ColumnSchema{
+    .{ .col_type = .text, .nullable = false }, // name
+    .{ .col_type = .int, .nullable = false }, // table_id
+    .{ .col_type = .int, .nullable = false }, // is_unique
+    .{ .col_type = .int, .nullable = false }, // btree_root
+};
+
+const INDEX_COLS_SCHEMA = [_]row.ColumnSchema{
+    .{ .col_type = .int, .nullable = false }, // index_id
+    .{ .col_type = .int, .nullable = false }, // position
+    .{ .col_type = .int, .nullable = false }, // col_index (attnum)
+};
+
 const COL = struct {
     const table_id: usize = 0;
     const attnum: usize = 1;
@@ -35,7 +48,29 @@ const COL = struct {
     const default_expr: usize = 5;
 };
 
+const IDX = struct {
+    const name: usize = 0;
+    const table_id: usize = 1;
+    const is_unique: usize = 2;
+    const btree_root: usize = 3;
+};
+
+const IDXCOL = struct {
+    const index_id: usize = 0;
+    const position: usize = 1;
+    const col_index: usize = 2;
+};
+
 // ── Public types ──────────────────────────────────────────────────────────────
+
+pub const IndexMeta = struct {
+    id: u64,
+    name: []const u8,
+    table_name: []const u8,
+    is_unique: bool,
+    btree_root: u32,
+    col_indices: []u32, // attnums of indexed columns in index order
+};
 
 pub const ColumnMeta = struct {
     /// 0-based physical storage slot number; stable across renames, never reused
@@ -58,6 +93,7 @@ pub const TableMeta = struct {
     btree_root: u32,
     rowid_counter: u64,
     columns: []ColumnMeta,
+    indexes: []IndexMeta,
 
     pub fn findColumn(self: *TableMeta, name: []const u8) ?*const ColumnMeta {
         for (self.columns) |*column| {
@@ -86,6 +122,8 @@ pub const Catalog = struct {
     tables: std.StringHashMap(TableMeta),
     next_table_id: u64,
     next_col_rowid: u64,
+    next_idx_id: u64,
+    next_idx_col_rowid: u64,
 
     pub fn init(allocator: std.mem.Allocator, pager: *Pager) Catalog {
         return .{
@@ -94,6 +132,8 @@ pub const Catalog = struct {
             .tables = std.StringHashMap(TableMeta).init(allocator),
             .next_table_id = 1,
             .next_col_rowid = 1,
+            .next_idx_id = 1,
+            .next_idx_col_rowid = 1,
         };
     }
 
@@ -136,6 +176,7 @@ pub const Catalog = struct {
                 .btree_root = btree_root,
                 .rowid_counter = rowid_counter,
                 .columns = &.{},
+                .indexes = &.{},
             };
             if (cell.rowid > max_table_id) max_table_id = cell.rowid;
             try self.tables.put(meta.name, meta);
@@ -180,6 +221,87 @@ pub const Catalog = struct {
             }
         }
         self.next_col_rowid = max_col_rowid + 1;
+
+        // Pass 3+4: load index metadata and column mappings.
+        // Skipped when no indexes have been created yet (sys_indexes_root == 0).
+        if (self.pager.sys_indexes_root != 0) {
+            // Temporary struct for raw index rows before col_indices are assembled.
+            const RawIndex = struct {
+                name: []const u8,
+                table_id: u64,
+                is_unique: bool,
+                btree_root: u32,
+            };
+            var idx_map = std.AutoHashMap(u64, RawIndex).init(tmp);
+
+            var max_idx_id: u64 = 0;
+            var idx_scan = try btree.ScanIterator.init(self.pager, self.pager.sys_indexes_root);
+            while (try idx_scan.next()) |cell| {
+                if (cell.rowid > max_idx_id) max_idx_id = cell.rowid;
+                const vals = try row.decodeRow(&INDEXES_SCHEMA, cell.row_data, tmp);
+                try idx_map.put(cell.rowid, .{
+                    .name = try tmp.dupe(u8, vals[IDX.name].text),
+                    .table_id = @intCast(vals[IDX.table_id].int),
+                    .is_unique = vals[IDX.is_unique].int != 0,
+                    .btree_root = @intCast(vals[IDX.btree_root].int),
+                });
+            }
+            self.next_idx_id = max_idx_id + 1;
+
+            // Collect (position, col_index) pairs per index_id.
+            // ArrayListUnmanaged avoids the local-struct type restriction on ArrayList.
+            const ColEntry = struct { position: u32, col_index: u32 };
+            var col_lists = std.AutoHashMap(u64, std.ArrayListUnmanaged(ColEntry)).init(tmp);
+
+            var max_idx_col_rowid: u64 = 0;
+            var icol_scan = try btree.ScanIterator.init(self.pager, self.pager.sys_index_cols_root);
+            while (try icol_scan.next()) |cell| {
+                if (cell.rowid > max_idx_col_rowid) max_idx_col_rowid = cell.rowid;
+                const vals = try row.decodeRow(&INDEX_COLS_SCHEMA, cell.row_data, tmp);
+                const idx_id: u64 = @intCast(vals[IDXCOL.index_id].int);
+                const gop = try col_lists.getOrPut(idx_id);
+                if (!gop.found_existing) gop.value_ptr.* = .empty;
+                try gop.value_ptr.append(tmp, .{
+                    .position = @intCast(vals[IDXCOL.position].int),
+                    .col_index = @intCast(vals[IDXCOL.col_index].int),
+                });
+            }
+            self.next_idx_col_rowid = max_idx_col_rowid + 1;
+
+            // Assemble IndexMeta and attach to the owning table.
+            var idx_it = idx_map.iterator();
+            while (idx_it.next()) |entry| {
+                const idx_id = entry.key_ptr.*;
+                const raw = entry.value_ptr.*;
+
+                // Sort columns by their position in the index key.
+                const col_items: []ColEntry = if (col_lists.getPtr(idx_id)) |l| l.items else &.{};
+                std.mem.sort(ColEntry, col_items, {}, struct {
+                    fn lt(_: void, a: ColEntry, b: ColEntry) bool {
+                        return a.position < b.position;
+                    }
+                }.lt);
+
+                const col_indices = try alloc.alloc(u32, col_items.len);
+                for (col_items, 0..) |ce, i| col_indices[i] = ce.col_index;
+
+                var tbl_it = self.tables.valueIterator();
+                while (tbl_it.next()) |tbl| {
+                    if (tbl.id == raw.table_id) {
+                        const idx_meta = IndexMeta{
+                            .id = idx_id,
+                            .name = try alloc.dupe(u8, raw.name),
+                            .table_name = tbl.name,
+                            .is_unique = raw.is_unique,
+                            .btree_root = raw.btree_root,
+                            .col_indices = col_indices,
+                        };
+                        tbl.indexes = try appendIndex(alloc, tbl.indexes, idx_meta);
+                        break;
+                    }
+                }
+            }
+        }
     }
 
     pub fn createTable(
@@ -267,8 +389,67 @@ pub const Catalog = struct {
             .btree_root = root_page,
             .rowid_counter = 1,
             .columns = duped_cols,
+            .indexes = &.{},
         };
         try self.tables.put(meta.name, meta);
+        return meta;
+    }
+
+    pub fn createIndex(
+        self: *Catalog,
+        name: []const u8,
+        table_name: []const u8,
+        col_indices: []const u32,
+        is_unique: bool,
+        btree_root_val: u32,
+    ) !IndexMeta {
+        const table = self.tables.getPtr(table_name) orelse return error.TableNotFound;
+
+        // Lazy-allocate index catalog roots on the very first createIndex call,
+        // mirroring the lazy allocation of table roots in createTable.
+        if (self.pager.sys_indexes_root == 0) {
+            const indexes_root = try self.pager.allocPage();
+            const idx_cols_root = try self.pager.allocPage();
+            self.pager.sys_indexes_root = indexes_root;
+            self.pager.sys_index_cols_root = idx_cols_root;
+            var idx_pw = PageWriter.init(self.pager, indexes_root);
+            btree.initLeafPage(&idx_pw, true);
+            try idx_pw.commit();
+            var icol_pw = PageWriter.init(self.pager, idx_cols_root);
+            btree.initLeafPage(&icol_pw, true);
+            try icol_pw.commit();
+            try page0.writeHeader(self.pager);
+        }
+
+        const idx_id = self.next_idx_id;
+
+        // Persist catalog rows for the new index.
+        try self.insertIndexesRow(idx_id, name, table.id, is_unique, btree_root_val);
+        for (col_indices, 0..) |col_idx, pos| {
+            try self.insertIndexColsRow(
+                self.next_idx_col_rowid + pos,
+                idx_id,
+                @intCast(pos),
+                col_idx,
+            );
+        }
+
+        // Advance in-memory counters.
+        self.next_idx_id = idx_id + 1;
+        self.next_idx_col_rowid += @as(u64, col_indices.len);
+
+        // Build the in-memory IndexMeta and attach it to the table.
+        const alloc = self.arena.allocator();
+        const meta = IndexMeta{
+            .id = idx_id,
+            .name = try alloc.dupe(u8, name),
+            .table_name = table.name,
+            .is_unique = is_unique,
+            .btree_root = btree_root_val,
+            .col_indices = try alloc.dupe(u32, col_indices),
+        };
+        table.indexes = try appendIndex(alloc, table.indexes, meta);
+
         return meta;
     }
 
@@ -332,6 +513,42 @@ pub const Catalog = struct {
         const len = row.encodeRow(&values, &buf);
         try btree.insert(self.pager, self.pager.sys_columns_root, rowid, buf[0..len], true);
     }
+
+    fn insertIndexesRow(
+        self: *Catalog,
+        rowid: u64,
+        name: []const u8,
+        table_id: u64,
+        is_unique: bool,
+        btree_root_val: u32,
+    ) !void {
+        const values = [_]row.Value{
+            .{ .text = name },
+            .{ .int = @intCast(table_id) },
+            .{ .int = if (is_unique) 1 else 0 },
+            .{ .int = @intCast(btree_root_val) },
+        };
+        var buf: [256]u8 = undefined;
+        const len = row.encodeRow(&values, &buf);
+        try btree.insert(self.pager, self.pager.sys_indexes_root, rowid, buf[0..len], true);
+    }
+
+    fn insertIndexColsRow(
+        self: *Catalog,
+        rowid: u64,
+        index_id: u64,
+        position: u32,
+        col_index: u32,
+    ) !void {
+        const values = [_]row.Value{
+            .{ .int = @intCast(index_id) },
+            .{ .int = @intCast(position) },
+            .{ .int = @intCast(col_index) },
+        };
+        var buf: [64]u8 = undefined;
+        const len = row.encodeRow(&values, &buf);
+        try btree.insert(self.pager, self.pager.sys_index_cols_root, rowid, buf[0..len], true);
+    }
 };
 
 // ── Helper ────────────────────────────────────────────────────────────────────
@@ -342,4 +559,12 @@ fn appendColumn(allocator: std.mem.Allocator, cols: []ColumnMeta, col: ColumnMet
     new_cols[cols.len] = col;
     if (cols.len > 0) allocator.free(cols);
     return new_cols;
+}
+
+fn appendIndex(allocator: std.mem.Allocator, idxs: []IndexMeta, idx: IndexMeta) ![]IndexMeta {
+    const new_idxs = try allocator.alloc(IndexMeta, idxs.len + 1);
+    @memcpy(new_idxs[0..idxs.len], idxs);
+    new_idxs[idxs.len] = idx;
+    if (idxs.len > 0) allocator.free(idxs);
+    return new_idxs;
 }

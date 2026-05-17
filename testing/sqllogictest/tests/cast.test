@@ -50,7 +50,7 @@ SELECT CAST('-99' AS INTEGER);
 -99
 
 # String to real
-query I
+query R
 SELECT CAST('3.14' AS REAL);
 ----
 3.14

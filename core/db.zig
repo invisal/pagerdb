@@ -1,9 +1,12 @@
 const std = @import("std");
 const t = @import("types.zig");
 const Pager = @import("pager/pager.zig").Pager;
+const PageWriter = @import("page_writer.zig").PageWriter;
 const page0 = @import("page0.zig");
 const btree = @import("btree.zig");
+const index_btree = @import("index_btree.zig");
 const row = @import("row.zig");
+const index_key_mod = @import("index_key.zig");
 const catalog = @import("catalog.zig");
 const overflow = @import("overflow.zig");
 const txn_mod = @import("txn.zig");
@@ -78,18 +81,44 @@ pub const Db = struct {
             i -= 1;
             switch (log[i]) {
                 .insert => |e| {
-                    // Undo the insert by deleting the row that was added.
+                    // Undo the insert: delete the row and its index entries.
                     const meta = self.cat.getTable(e.table) orelse continue;
+                    if (meta.indexes.len > 0) {
+                        if (try readAndDecodeRow(self, meta, e.rowid)) |vals| {
+                            defer freeValues(self.allocator, vals);
+                            try deleteFromIndexes(self, meta, e.rowid, vals);
+                        }
+                    }
                     _ = try btree.delete(&self.pager, meta.btree_root, e.rowid);
                 },
                 .delete => |e| {
-                    // Undo the delete by re-inserting the original row bytes.
+                    // Undo the delete: re-insert the original row and its index entries.
                     const meta = self.cat.getTable(e.table) orelse continue;
+                    if (meta.indexes.len > 0) {
+                        var schema_buf: [64]row.ColumnSchema = undefined;
+                        const cols = buildColSchema(meta.columns, &schema_buf);
+                        const vals = try row.decodeRow(cols, e.row_bytes, self.allocator);
+                        defer freeValues(self.allocator, vals);
+                        try insertToIndexes(self, meta, e.rowid, vals);
+                    }
                     try btree.insert(&self.pager, meta.btree_root, e.rowid, e.row_bytes, true);
                 },
                 .update => |e| {
-                    // Undo the update: remove new row, restore original bytes.
+                    // Undo the update: restore old row bytes and fix index entries.
                     const meta = self.cat.getTable(e.table) orelse continue;
+                    if (meta.indexes.len > 0) {
+                        // Delete the current (new) index entries before overwriting.
+                        if (try readAndDecodeRow(self, meta, e.rowid)) |new_vals| {
+                            defer freeValues(self.allocator, new_vals);
+                            try deleteFromIndexes(self, meta, e.rowid, new_vals);
+                        }
+                        // Insert index entries for the original row.
+                        var schema_buf: [64]row.ColumnSchema = undefined;
+                        const cols = buildColSchema(meta.columns, &schema_buf);
+                        const old_vals = try row.decodeRow(cols, e.old_row_bytes, self.allocator);
+                        defer freeValues(self.allocator, old_vals);
+                        try insertToIndexes(self, meta, e.rowid, old_vals);
+                    }
                     _ = try btree.delete(&self.pager, meta.btree_root, e.rowid);
                     try btree.insert(&self.pager, meta.btree_root, e.rowid, e.old_row_bytes, true);
                 },
@@ -100,6 +129,63 @@ pub const Db = struct {
         try self.pager.flush();
         self.txn.?.deinit();
         self.txn = null;
+    }
+
+    // Build a secondary index over an existing table, then register it in the catalog.
+    // Full table scan encodes a key for every existing row and inserts it into
+    // the new index B-tree.  For unique indexes, duplicate keys are rejected with
+    // error.UniqueViolation.
+    pub fn createIndex(
+        self: *Db,
+        name: []const u8,
+        table_name: []const u8,
+        col_indices: []const u32,
+        is_unique: bool,
+        if_not_exists: bool,
+    ) !void {
+        const table = self.cat.getTable(table_name) orelse return error.TableNotFound;
+
+        // Duplicate check before allocating any pages.
+        for (table.indexes) |idx| {
+            if (std.ascii.eqlIgnoreCase(idx.name, name)) {
+                if (if_not_exists) return;
+                return error.IndexAlreadyExists;
+            }
+        }
+
+        // Allocate a fresh leaf page for the index B-tree.
+        const index_root = try self.pager.allocPage();
+        var idx_pw = PageWriter.init(&self.pager, index_root);
+        btree.initLeafPage(&idx_pw, false);
+        try idx_pw.commit();
+
+        // Populate the index from existing rows.
+        var schema_buf: [64]row.ColumnSchema = undefined;
+        const cols = buildColSchema(table.columns, &schema_buf);
+        var it = try btree.ScanIterator.init(&self.pager, table.btree_root);
+        while (try it.next()) |cell| {
+            const row_bytes: []u8 = if (cell.is_overflow) blk: {
+                const out = try self.allocator.alloc(u8, cell.overflow_len);
+                try overflow.readChain(&self.pager, cell.overflow_page, cell.overflow_len, out);
+                break :blk out;
+            } else try self.allocator.dupe(u8, cell.row_data);
+            defer self.allocator.free(row_bytes);
+
+            const values = try row.decodeRow(cols, row_bytes, self.allocator);
+            defer freeValues(self.allocator, values);
+
+            var key_buf: [index_key_mod.MAX_KEY_LEN + 8]u8 = undefined;
+            const prefix_len = buildIndexKeyPrefix(values, col_indices, &key_buf);
+            if (is_unique) {
+                if (try index_btree.searchPrefix(&self.pager, index_root, key_buf[0..prefix_len]) != null)
+                    return error.UniqueViolation;
+            }
+            const full_len = index_key_mod.appendRowid(&key_buf, prefix_len, cell.rowid);
+            try index_btree.insertKey(&self.pager, index_root, key_buf[0..full_len]);
+        }
+
+        _ = try self.cat.createIndex(name, table_name, col_indices, is_unique, index_root);
+        try self.pager.flush();
     }
 
     // Define a new table and persist the catalog immediately.
@@ -161,7 +247,13 @@ pub const Db = struct {
         defer self.allocator.free(row_buf);
         _ = row.encodeRow(actual_values, row_buf);
 
+        // Enforce unique index constraints before touching the main B-tree so that
+        // a violation leaves the database in a clean state.
+        if (meta.indexes.len > 0) try checkUniqueConstraints(self, meta, actual_values);
+
         try btree.insert(&self.pager, meta.btree_root, rowid, row_buf, true);
+
+        if (meta.indexes.len > 0) try insertToIndexes(self, meta, rowid, actual_values);
 
         if (self.txn) |*active_txn| {
             try active_txn.logInsert(table, rowid);
@@ -175,21 +267,32 @@ pub const Db = struct {
     pub fn delete(self: *Db, table: []const u8, rowid: u64) !bool {
         const meta = self.cat.getTable(table) orelse return error.TableNotFound;
 
-        if (self.txn) |*active_txn| {
-            // Capture old row bytes before deletion so we can restore them on rollback.
+        // Read the row before deleting whenever we need it for the transaction
+        // log or for index key deletion.
+        const need_row = self.txn != null or meta.indexes.len > 0;
+        if (need_row) {
             var leaf_buf: [t.PAGE_SIZE]u8 = undefined;
             const cell = try btree.lookup(&self.pager, meta.btree_root, rowid, &leaf_buf) orelse return false;
 
-            if (cell.is_overflow) {
-                const tmp = try self.allocator.alloc(u8, cell.overflow_len);
-                defer self.allocator.free(tmp);
-                try overflow.readChain(&self.pager, cell.overflow_page, cell.overflow_len, tmp);
-                try active_txn.logDelete(table, rowid, tmp);
-            } else {
-                try active_txn.logDelete(table, rowid, cell.row_data);
+            const row_bytes: []u8 = if (cell.is_overflow) blk: {
+                const out = try self.allocator.alloc(u8, cell.overflow_len);
+                try overflow.readChain(&self.pager, cell.overflow_page, cell.overflow_len, out);
+                break :blk out;
+            } else try self.allocator.dupe(u8, cell.row_data);
+            defer self.allocator.free(row_bytes);
+
+            if (self.txn) |*active_txn| try active_txn.logDelete(table, rowid, row_bytes);
+
+            if (meta.indexes.len > 0) {
+                var schema_buf: [64]row.ColumnSchema = undefined;
+                const cols = buildColSchema(meta.columns, &schema_buf);
+                const values = try row.decodeRow(cols, row_bytes, self.allocator);
+                defer freeValues(self.allocator, values);
+                try deleteFromIndexes(self, meta, rowid, values);
             }
 
             _ = try btree.delete(&self.pager, meta.btree_root, rowid);
+            if (self.txn == null) try self.pager.flush();
             return true;
         }
 
@@ -207,18 +310,31 @@ pub const Db = struct {
     ) !bool {
         const meta = self.cat.getTable(table) orelse return error.TableNotFound;
 
-        if (self.txn) |*active_txn| {
-            // Capture old row bytes before mutation so we can restore them on rollback.
+        // Read old row whenever needed for the transaction log or index maintenance.
+        const need_old_row = self.txn != null or meta.indexes.len > 0;
+        if (need_old_row) {
             var leaf_buf: [t.PAGE_SIZE]u8 = undefined;
             const cell = try btree.lookup(&self.pager, meta.btree_root, rowid, &leaf_buf) orelse return false;
 
-            if (cell.is_overflow) {
-                const tmp = try self.allocator.alloc(u8, cell.overflow_len);
-                defer self.allocator.free(tmp);
-                try overflow.readChain(&self.pager, cell.overflow_page, cell.overflow_len, tmp);
-                try active_txn.logUpdate(table, rowid, tmp);
-            } else {
-                try active_txn.logUpdate(table, rowid, cell.row_data);
+            const old_row_bytes: []u8 = if (cell.is_overflow) blk: {
+                const out = try self.allocator.alloc(u8, cell.overflow_len);
+                try overflow.readChain(&self.pager, cell.overflow_page, cell.overflow_len, out);
+                break :blk out;
+            } else try self.allocator.dupe(u8, cell.row_data);
+            defer self.allocator.free(old_row_bytes);
+
+            if (self.txn) |*active_txn| try active_txn.logUpdate(table, rowid, old_row_bytes);
+
+            if (meta.indexes.len > 0) {
+                var schema_buf: [64]row.ColumnSchema = undefined;
+                const cols = buildColSchema(meta.columns, &schema_buf);
+                const old_values = try row.decodeRow(cols, old_row_bytes, self.allocator);
+                defer freeValues(self.allocator, old_values);
+                // Pre-check unique constraints before making any writes.
+                // Allow the current row's own entry to "conflict" (self-update).
+                try checkUniqueConstraintsExcept(self, meta, values, rowid);
+                try deleteFromIndexes(self, meta, rowid, old_values);
+                try insertToIndexes(self, meta, rowid, values);
             }
 
             _ = try btree.delete(&self.pager, meta.btree_root, rowid);
@@ -227,6 +343,7 @@ pub const Db = struct {
             defer self.allocator.free(row_buf);
             _ = row.encodeRow(values, row_buf);
             try btree.insert(&self.pager, meta.btree_root, rowid, row_buf, true);
+            if (self.txn == null) try self.pager.flush();
             return true;
         }
 
@@ -355,4 +472,93 @@ fn buildColSchema(cols: []const catalog.ColumnMeta, buf: []row.ColumnSchema) []c
         buf[i] = .{ .col_type = c.col_type, .nullable = c.nullable };
     }
     return buf[0..cols.len];
+}
+
+// Free heap-allocated text/blob inside a decoded row, then free the slice itself.
+fn freeValues(alloc: std.mem.Allocator, values: []const row.Value) void {
+    for (values) |v| switch (v) {
+        .text => |s| alloc.free(s),
+        .blob => |b| alloc.free(b),
+        else => {},
+    };
+    alloc.free(values);
+}
+
+// Encode the values at the given column positions into the first N bytes of buf.
+// Returns the number of bytes written (the prefix length before the rowid suffix).
+fn buildIndexKeyPrefix(values: []const row.Value, col_indices: []const u32, buf: []u8) usize {
+    var key_vals: [16]row.Value = undefined;
+    const n = @min(col_indices.len, key_vals.len);
+    for (col_indices[0..n], 0..) |attnum, k| {
+        key_vals[k] = if (attnum < values.len) values[attnum] else .null;
+    }
+    return index_key_mod.encodeKey(key_vals[0..n], buf);
+}
+
+// Read a row from the B-tree and decode it.  Caller must call freeValues on the result.
+fn readAndDecodeRow(self: *Db, meta: *const catalog.TableMeta, rowid: u64) !?[]row.Value {
+    var leaf_buf: [t.PAGE_SIZE]u8 = undefined;
+    const cell = try btree.lookup(&self.pager, meta.btree_root, rowid, &leaf_buf) orelse return null;
+    const row_bytes: []u8 = if (cell.is_overflow) blk: {
+        const out = try self.allocator.alloc(u8, cell.overflow_len);
+        try overflow.readChain(&self.pager, cell.overflow_page, cell.overflow_len, out);
+        break :blk out;
+    } else try self.allocator.dupe(u8, cell.row_data);
+    defer self.allocator.free(row_bytes);
+    var schema_buf: [64]row.ColumnSchema = undefined;
+    const cols = buildColSchema(meta.columns, &schema_buf);
+    return try row.decodeRow(cols, row_bytes, self.allocator);
+}
+
+// Pre-check: returns error.UniqueViolation if any unique index already contains
+// a matching column-value prefix.  Must be called BEFORE the main B-tree insert
+// so that a failure leaves the database in a clean state.
+fn checkUniqueConstraints(self: *Db, meta: *const catalog.TableMeta, values: []const row.Value) !void {
+    for (meta.indexes) |idx| {
+        if (!idx.is_unique) continue;
+        var key_buf: [index_key_mod.MAX_KEY_LEN + 8]u8 = undefined;
+        const prefix_len = buildIndexKeyPrefix(values, idx.col_indices, &key_buf);
+        if (try index_btree.searchPrefix(&self.pager, idx.btree_root, key_buf[0..prefix_len]) != null)
+            return error.UniqueViolation;
+    }
+}
+
+// Like checkUniqueConstraints but allows one rowid to be the conflicting entry.
+// Used during UPDATE so that a row can be updated to its own current unique value
+// without triggering a false violation.
+fn checkUniqueConstraintsExcept(
+    self: *Db,
+    meta: *const catalog.TableMeta,
+    values: []const row.Value,
+    except_rowid: u64,
+) !void {
+    for (meta.indexes) |idx| {
+        if (!idx.is_unique) continue;
+        var key_buf: [index_key_mod.MAX_KEY_LEN + 8]u8 = undefined;
+        const prefix_len = buildIndexKeyPrefix(values, idx.col_indices, &key_buf);
+        if (try index_btree.searchPrefix(&self.pager, idx.btree_root, key_buf[0..prefix_len])) |found_rowid| {
+            if (found_rowid != except_rowid) return error.UniqueViolation;
+        }
+    }
+}
+
+// Insert a key into every secondary index for this row (no unique check — caller
+// must call checkUniqueConstraints first).
+fn insertToIndexes(self: *Db, meta: *const catalog.TableMeta, rowid: u64, values: []const row.Value) !void {
+    for (meta.indexes) |idx| {
+        var key_buf: [index_key_mod.MAX_KEY_LEN + 8]u8 = undefined;
+        const prefix_len = buildIndexKeyPrefix(values, idx.col_indices, &key_buf);
+        const full_len = index_key_mod.appendRowid(&key_buf, prefix_len, rowid);
+        try index_btree.insertKey(&self.pager, idx.btree_root, key_buf[0..full_len]);
+    }
+}
+
+// Delete index entries for every secondary index on the table.
+fn deleteFromIndexes(self: *Db, meta: *const catalog.TableMeta, rowid: u64, values: []const row.Value) !void {
+    for (meta.indexes) |idx| {
+        var key_buf: [index_key_mod.MAX_KEY_LEN + 8]u8 = undefined;
+        const prefix_len = buildIndexKeyPrefix(values, idx.col_indices, &key_buf);
+        const full_len = index_key_mod.appendRowid(&key_buf, prefix_len, rowid);
+        _ = try index_btree.deleteKey(&self.pager, idx.btree_root, key_buf[0..full_len]);
+    }
 }
