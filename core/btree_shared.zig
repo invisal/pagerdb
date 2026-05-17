@@ -393,7 +393,10 @@ pub fn BTree(comptime Fmt: type) type {
         }
 
         // Remove a child pointer from a parent internal page when the child leaf becomes empty.
-        fn unlinkFromParent(pager: *Pager, parent_id: u32, child_id: u32) !void {
+        // Remove child_id from parent_id's internal cell list or rightmost pointer.
+        // Returns true when the parent ends up with no children at all (cell_count == 0
+        // and it was the rightmost child) — the caller must then free the parent too.
+        fn unlinkFromParent(pager: *Pager, parent_id: u32, child_id: u32) !bool {
             var pw = try PageWriter.open(pager, parent_id);
             var h = readBTreeHeader(&pw.buf);
 
@@ -404,7 +407,7 @@ pub fn BTree(comptime Fmt: type) type {
                     removeCellPtr(&pw, &h, @intCast(i));
                     writeBTreeHeader(&pw, h);
                     try pw.commit();
-                    return;
+                    return false;
                 }
             }
 
@@ -415,9 +418,16 @@ pub fn BTree(comptime Fmt: type) type {
                     h.dead_bytes += Fmt.internalCellSize(&pw.buf, last_off);
                     removeCellPtr(&pw, &h, h.cell_count - 1);
                     writeBTreeHeader(&pw, h);
+                    try pw.commit();
+                    return false;
                 }
+                // cell_count == 0: parent had exactly one child (this one).
+                // It is now completely empty — caller must free it.
                 try pw.commit();
+                return true;
             }
+
+            return false;
         }
 
         // ── Public API ───────────────────────────────────────────────────────
@@ -511,8 +521,49 @@ pub fn BTree(comptime Fmt: type) type {
             writeBTreeHeader(&pw, h);
 
             if (h.cell_count == 0 and leaf_id != root_id) {
+                // Splice this leaf out of the doubly-linked leaf chain before
+                // freeing it.  freePage() zeros the page, which would corrupt
+                // next_leaf to 0; any predecessor whose next_leaf still pointed
+                // here would then cause the scan iterator to miss all subsequent
+                // leaves and/or read garbage cells.
+                if (h.prev_leaf != 0) {
+                    var prev_pw = try PageWriter.open(pager, h.prev_leaf);
+                    var prev_h = readBTreeHeader(&prev_pw.buf);
+                    prev_h.next_leaf = h.next_leaf;
+                    writeBTreeHeader(&prev_pw, prev_h);
+                    try prev_pw.commit();
+                }
+                if (h.next_leaf != 0) {
+                    var next_pw = try PageWriter.open(pager, h.next_leaf);
+                    var next_h = readBTreeHeader(&next_pw.buf);
+                    next_h.prev_leaf = h.prev_leaf;
+                    writeBTreeHeader(&next_pw, next_h);
+                    try next_pw.commit();
+                }
                 try pager.freePage(leaf_id);
-                if (depth >= 2) try unlinkFromParent(pager, path[depth - 2], leaf_id);
+
+                // Walk up the path, freeing any internal node that has become
+                // completely childless after its only child was freed.
+                var freed_child = leaf_id;
+                var level: usize = depth - 1; // path[level-1] is the parent to unlink from
+                while (level >= 1) {
+                    const parent_id = path[level - 1];
+                    const childless = try unlinkFromParent(pager, parent_id, freed_child);
+                    if (!childless) break;
+                    if (parent_id == root_id) {
+                        // The root lost its last child.  Convert it back to an
+                        // empty leaf so the tree is in a valid empty state.
+                        // Leaving it as an internal node with a dangling
+                        // rightmost_child pointer would crash the next traversal.
+                        var root_pw = try PageWriter.open(pager, root_id);
+                        initLeafPage(&root_pw, Fmt.is_rowid);
+                        try root_pw.commit();
+                        break;
+                    }
+                    try pager.freePage(parent_id);
+                    freed_child = parent_id;
+                    level -= 1;
+                }
             } else {
                 try pw.commit();
             }

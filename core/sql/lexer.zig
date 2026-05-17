@@ -198,6 +198,7 @@ const keyword_pairs = [_]struct { text: []const u8, kind: TokenKind }{
     .{ .text = "int", .kind = .kw_int },
     .{ .text = "integer", .kind = .kw_int },
     .{ .text = "real", .kind = .kw_real },
+    .{ .text = "float", .kind = .kw_real },
     .{ .text = "text", .kind = .kw_text },
     .{ .text = "blob", .kind = .kw_blob },
     .{ .text = "primary", .kind = .kw_primary },
