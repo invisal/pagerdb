@@ -70,6 +70,7 @@ pub const PhysicalJoin = struct {
     left: PhysicalPlan,
     right: PhysicalPlan,
     condition: ?lp.Expr, // null for CROSS JOIN
+    join_type: lp.JoinType,
     schema: lp.Schema,
 };
 
@@ -257,6 +258,7 @@ pub const PhysicalPlanner = struct {
             .left = try self.plan(node.left.*),
             .right = try self.plan(node.right.*),
             .condition = node.condition,
+            .join_type = node.join_type,
             .schema = node.schema,
         };
         return .{ .join = join_node };

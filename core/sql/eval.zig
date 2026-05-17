@@ -210,6 +210,20 @@ fn evalFunc(
     row_values: []const row.Value,
     alloc: std.mem.Allocator,
 ) EvalError!EvalValue {
+    // short_circuit functions (e.g. COALESCE) must not have all arguments
+    // pre-evaluated: evaluate one at a time and stop as soon as the function
+    // returns a non-null result.  The mechanism lives here because evalExpr is
+    // only visible in this file; the *policy* (which functions opt in) is on
+    // ScalarFunc.short_circuit in scalar_func.zig.
+    if (f.func.short_circuit) {
+        for (f.args) |arg| {
+            const v = try evalExpr(arg, row_values, alloc);
+            const result = try f.func.eval(&.{v});
+            if (result != .null_) return result;
+        }
+        return .{ .null_ = {} };
+    }
+
     // Evaluate each argument expression, then hand the values to the function
     // implementation.  A small stack buffer covers the common case of low-arity
     // functions without heap allocation.
@@ -250,7 +264,8 @@ fn evalArith(op: @import("ast.zig").BinaryOp, a: EvalValue, b: EvalValue) EvalEr
                 .add => .{ .int = av + bv },
                 .sub => .{ .int = av - bv },
                 .mul => .{ .int = av * bv },
-                .div => if (bv == 0) EvalError.DivisionByZero else .{ .int = @divTrunc(av, bv) },
+                // SQLite returns NULL for division by zero rather than raising an error.
+                .div => if (bv == 0) .{ .null_ = {} } else .{ .int = @divTrunc(av, bv) },
                 else => EvalError.TypeMismatch,
             },
             .real => |bv| return evalArith(op, .{ .real = @as(f64, @floatFromInt(av)) }, .{ .real = bv }),
@@ -261,7 +276,7 @@ fn evalArith(op: @import("ast.zig").BinaryOp, a: EvalValue, b: EvalValue) EvalEr
                 .add => .{ .real = av + bv },
                 .sub => .{ .real = av - bv },
                 .mul => .{ .real = av * bv },
-                .div => if (bv == 0.0) EvalError.DivisionByZero else .{ .real = av / bv },
+                .div => if (bv == 0.0) .{ .null_ = {} } else .{ .real = av / bv },
                 else => EvalError.TypeMismatch,
             },
             .int => |bv| return evalArith(op, .{ .real = av }, .{ .real = @as(f64, @floatFromInt(bv)) }),
@@ -325,7 +340,7 @@ test "evalExpr arithmetic" {
     var b_div = lp.Expr.Binary{ .op = .div, .left = .{ .int_lit = 10 }, .right = .{ .int_lit = 0 } };
 
     try std.testing.expectEqual(@as(i64, 7), (try evalExpr(.{ .binary = &b_add }, vals, alloc)).int);
-    try std.testing.expectError(EvalError.DivisionByZero, evalExpr(.{ .binary = &b_div }, vals, alloc));
+    try std.testing.expect((try evalExpr(.{ .binary = &b_div }, vals, alloc)) == .null_);
 }
 
 test "evalExpr NULL propagation" {

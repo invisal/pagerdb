@@ -496,10 +496,12 @@ pub const DistinctCursor = struct {
 
 // ── Join cursor ────────────────────────────────────────────────────────────────
 
-// Nested-loop inner join with a materialized right side.
+// Nested-loop join with a materialized right side.
 // On open(), all right-side rows are collected into a slice so that for each
 // left row we can iterate the right side without re-opening the right cursor.
-// This is simple and correct; hash join can be added later as an optimisation.
+// Supports CROSS JOIN (no condition), INNER JOIN, and LEFT [OUTER] JOIN.
+// For LEFT JOIN, any left row with no matching right row is emitted with NULLs
+// padding the right-side columns.
 pub const JoinCursor = struct {
     left: *Cursor,
     right_rows: []Row, // all right rows, materialized at open time
@@ -507,6 +509,9 @@ pub const JoinCursor = struct {
     left_batch: []Row, // current batch pulled from left cursor
     left_pos: usize, // position within left_batch
     condition: ?lp.Expr, // null for CROSS JOIN (every left/right pair emitted)
+    is_left_join: bool, // true = LEFT JOIN: unmatched left rows emitted with NULLs
+    right_col_count: usize, // number of right-side columns (needed for NULL padding)
+    had_right_match: bool, // tracks whether the current left row matched any right row
 
     // Pull combined (left ++ right) rows that satisfy the join condition.
     // Returns up to BATCH_SIZE rows per call, or null when exhausted.
@@ -522,6 +527,7 @@ pub const JoinCursor = struct {
                 };
                 self.left_pos = 0;
                 self.right_pos = 0;
+                self.had_right_match = false;
             }
 
             const left_row = self.left_batch[self.left_pos];
@@ -542,6 +548,7 @@ pub const JoinCursor = struct {
                     break :blk eval.isTruthy(ev);
                 } else true;
                 if (should_emit) {
+                    self.had_right_match = true;
                     try out.append(a, .{ .rowid = left_row.rowid, .values = combined });
                 }
 
@@ -551,6 +558,16 @@ pub const JoinCursor = struct {
             // Finished right side for this left row; move to the next left row.
             self.left_pos += 1;
             self.right_pos = 0;
+
+            // LEFT JOIN: if no right row matched, emit the left row with NULLs for
+            // all right-side columns so the left row still appears in the result.
+            if (self.is_left_join and !self.had_right_match) {
+                const combined = try a.alloc(row_mod.Value, left_row.values.len + self.right_col_count);
+                @memcpy(combined[0..left_row.values.len], left_row.values);
+                @memset(combined[left_row.values.len..], .null);
+                try out.append(a, .{ .rowid = left_row.rowid, .values = combined });
+            }
+            self.had_right_match = false;
 
             // Return any accumulated rows rather than looping back to the left,
             // to avoid unbounded iteration when most left rows have no matches.
@@ -656,6 +673,9 @@ pub const Cursor = union(enum) {
                 jc.left_batch = &.{};
                 jc.left_pos = 0;
                 jc.condition = n.condition;
+                jc.is_left_join = n.join_type == .left;
+                jc.right_col_count = n.right.schema().columns.len;
+                jc.had_right_match = false;
                 break :blk .{ .join = jc };
             },
             else => error.UnsupportedPlan,

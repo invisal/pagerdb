@@ -255,12 +255,20 @@ pub const Parser = struct {
             };
         }
 
+        // A parenthesised join group — FROM (t1 CROSS JOIN t2) — is semantically
+        // identical to the unparenthesised form.  Consume the opening paren and
+        // flatten the contents into the same table_ref + joins list; the closing
+        // paren is consumed inside the loop below.
+        const paren_group = self.peek().kind == .lparen;
+        if (paren_group) _ = self.advance();
         opt_table_ref = try self.parseTableRef();
 
         // Parse optional JOIN clauses: INNER JOIN … ON …, CROSS JOIN …, or
         // comma-separated tables (implicit CROSS JOIN: FROM a, b).
         while (true) {
-            if (self.peek().kind == .comma) {
+            if (paren_group and self.peek().kind == .rparen) {
+                _ = self.advance(); // close the parenthesised group; outer JOINs may follow
+            } else if (self.peek().kind == .comma) {
                 _ = self.advance(); // consume ','
                 const tref = try self.parseTableRef();
                 try joins.append(self.alloc(), .{ .join_type = .cross, .table_ref = tref, .condition = null });
@@ -283,6 +291,14 @@ pub const Parser = struct {
                 _ = try self.expect(.kw_on);
                 const condition = try self.parseExpr();
                 try joins.append(self.alloc(), .{ .join_type = .inner, .table_ref = tref, .condition = condition });
+            } else if (self.peek().kind == .kw_left) {
+                _ = self.advance(); // consume LEFT
+                if (self.peek().kind == .kw_outer) _ = self.advance(); // consume optional OUTER
+                _ = try self.expect(.kw_join);
+                const tref = try self.parseTableRef();
+                _ = try self.expect(.kw_on);
+                const condition = try self.parseExpr();
+                try joins.append(self.alloc(), .{ .join_type = .left, .table_ref = tref, .condition = condition });
             } else break;
         }
 

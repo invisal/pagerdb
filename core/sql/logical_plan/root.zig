@@ -178,7 +178,8 @@ pub const Distinct = struct {
 pub const Join = struct {
     left: *LogicalPlan,
     right: *LogicalPlan,
-    condition: ?Expr, // null for CROSS JOIN; ON predicate for INNER JOIN
+    condition: ?Expr, // null for CROSS JOIN; ON predicate for INNER/LEFT JOIN
+    join_type: ast.JoinType, // determines emit behaviour (CROSS/INNER/LEFT)
     schema: Schema, // combined schema (left cols then right cols)
 };
 
@@ -297,6 +298,7 @@ pub const LogicalPlanner = struct {
                 .left = try self.box(current),
                 .right = try self.box(right.plan),
                 .condition = condition,
+                .join_type = join_clause.join_type,
                 .schema = merged_schema,
             };
             current = .{ .join = join_node };

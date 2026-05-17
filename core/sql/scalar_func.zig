@@ -13,11 +13,19 @@ pub const EvalFn = *const fn (args: []const EvalValue) EvalError!EvalValue;
 
 // A registered scalar function — mirrors the min_args/max_args pattern in
 // vtable/root.zig so optional arguments (e.g. round(x) vs round(x, n)) work.
+//
+// short_circuit = true means the evaluator must not pre-evaluate all arguments.
+// Instead it evaluates them one at a time and stops as soon as possible, calling
+// eval with only the values it has accumulated so far (length 1, then 2, …).
+// The function signals "stop here" by returning a non-null result from a prefix;
+// "keep going" means returning null_.  COALESCE uses this to avoid evaluating
+// unreachable arguments (which could otherwise raise errors like division by zero).
 pub const ScalarFunc = struct {
     name: []const u8,
     min_args: usize,
     max_args: usize,
     eval: EvalFn,
+    short_circuit: bool = false,
 };
 
 // ── Implementations ────────────────────────────────────────────────────────────
@@ -78,7 +86,7 @@ fn evalCoalesce(args: []const EvalValue) EvalError!EvalValue {
 const REGISTRY = [_]ScalarFunc{
     .{ .name = "abs", .min_args = 1, .max_args = 1, .eval = &evalAbs },
     .{ .name = "nullif", .min_args = 2, .max_args = 2, .eval = &evalNullIf },
-    .{ .name = "coalesce", .min_args = 1, .max_args = std.math.maxInt(usize), .eval = &evalCoalesce },
+    .{ .name = "coalesce", .min_args = 1, .max_args = std.math.maxInt(usize), .eval = &evalCoalesce, .short_circuit = true },
 };
 
 pub fn find(name: []const u8) ?*const ScalarFunc {
