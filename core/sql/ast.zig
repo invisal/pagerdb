@@ -284,11 +284,17 @@ pub const SelectStmt = struct {
     order_by: []OrderByItem = &.{}, // ORDER BY items; empty = no ordering
 };
 
+pub const InsertSource = union(enum) {
+    // INSERT INTO t VALUES (...)
+    values: [][]Expr,
+    // INSERT INTO t SELECT ...
+    select: *SelectStmt,
+};
+
 pub const InsertStmt = struct {
     table: []const u8, // arena-owned
     columns: [][]const u8, //arena-owned
-    // Each element is one row; within a row, values are positional per column.
-    values: [][]Expr,
+    source: InsertSource,
 };
 
 pub const Assignment = struct {

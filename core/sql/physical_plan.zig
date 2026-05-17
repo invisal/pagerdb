@@ -35,6 +35,15 @@ pub const PhysicalInsert = struct {
     schema: lp.Schema,
 };
 
+pub const PhysicalInsertSelect = struct {
+    table: []const u8,
+    schema: lp.Schema,
+    // col_map[target_col_idx] = source col idx from the SELECT output.
+    // Empty means positional (source col i → target col i).
+    col_map: []usize,
+    input: *PhysicalPlan,
+};
+
 pub const PhysicalUpdate = struct {
     table: []const u8,
     input: *PhysicalPlan,
@@ -105,6 +114,7 @@ pub const PhysicalPlan = union(enum) {
     distinct: *PhysicalDistinct,
     join: *PhysicalJoin,
     insert: PhysicalInsert,
+    insert_select: PhysicalInsertSelect,
     update: PhysicalUpdate,
     delete: PhysicalDelete,
     create_table: PhysicalCreateTable,
@@ -126,6 +136,7 @@ pub const PhysicalPlan = union(enum) {
             .distinct => |n| n.schema,
             .join => |n| n.schema,
             .insert => |n| n.schema,
+            .insert_select => |n| n.schema,
             .update => |n| n.schema,
             .delete => |n| n.schema,
             .create_table, .create_index, .begin, .commit, .rollback => lp.Schema{ .table = "", .columns = &.{} },
@@ -167,6 +178,7 @@ pub const PhysicalPlanner = struct {
             .distinct => |n| try self.planDistinct(n),
             .join => |n| try self.planJoin(n),
             .insert => |n| try self.planInsert(n),
+            .insert_select => |n| try self.planInsertSelect(n),
             .update => |n| try self.planUpdate(n),
             .delete => |n| try self.planDelete(n),
             .create_table => |n| .{ .create_table = .{ .table = n.table, .columns = n.columns } },
@@ -322,6 +334,17 @@ pub const PhysicalPlanner = struct {
             rows[i] = cols;
         }
         return .{ .insert = .{ .table = node.table, .values = rows, .schema = node.schema } };
+    }
+
+    fn planInsertSelect(self: *PhysicalPlanner, node: lp.LogicalInsertSelect) !PhysicalPlan {
+        const phys_input = try self.alloc().create(PhysicalPlan);
+        phys_input.* = try self.plan(node.input.*);
+        return .{ .insert_select = .{
+            .table = node.table,
+            .schema = node.schema,
+            .col_map = node.col_map,
+            .input = phys_input,
+        } };
     }
 
     fn planAggregate(self: *PhysicalPlanner, node: *lp.Aggregate) !PhysicalPlan {

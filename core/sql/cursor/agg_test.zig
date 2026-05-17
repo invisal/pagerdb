@@ -29,8 +29,8 @@ test "aggregate cursor: COUNT(*) and COUNT(col) without GROUP BY" {
     const input = try openSeqScanInput(h.db, a, "t");
 
     const specs = [_]cursor_mod.AggSpec{
-        .{ .func = &agg_mod.CountFunc, .col_idx = null },
-        .{ .func = &agg_mod.CountFunc, .col_idx = 1 },
+        .{ .func = &agg_mod.CountFunc, .input_expr = null },
+        .{ .func = &agg_mod.CountFunc, .input_expr = .{ .col_idx = 1 } },
     };
 
     var ac = cursor_mod.AggregateCursor{
@@ -42,11 +42,11 @@ test "aggregate cursor: COUNT(*) and COUNT(col) without GROUP BY" {
     };
     defer ac.deinit(a);
 
-    const batch = (try ac.next(a)).?;
+    const batch = (try ac.next(.{ .outer = &.{}, .alloc = a })).?;
     try std.testing.expectEqual(@as(usize, 1), batch.len);
     try std.testing.expectEqual(@as(i64, 3), batch[0].values[0].int); // COUNT(*)
     try std.testing.expectEqual(@as(i64, 2), batch[0].values[1].int); // COUNT(v)
-    try std.testing.expect((try ac.next(a)) == null);
+    try std.testing.expect((try ac.next(.{ .outer = &.{}, .alloc = a })) == null);
 }
 
 test "aggregate cursor: COUNT(*) with GROUP BY preserves first-seen group order" {
@@ -69,7 +69,7 @@ test "aggregate cursor: COUNT(*) with GROUP BY preserves first-seen group order"
     const input = try openSeqScanInput(h.db, a, "t");
 
     const specs = [_]cursor_mod.AggSpec{
-        .{ .func = &agg_mod.CountFunc, .col_idx = null },
+        .{ .func = &agg_mod.CountFunc, .input_expr = null },
     };
     const groups = [_]usize{0};
 
@@ -82,7 +82,7 @@ test "aggregate cursor: COUNT(*) with GROUP BY preserves first-seen group order"
     };
     defer ac.deinit(a);
 
-    const batch = (try ac.next(a)).?;
+    const batch = (try ac.next(.{ .outer = &.{}, .alloc = a })).?;
     try std.testing.expectEqual(@as(usize, 2), batch.len);
 
     // Output shape is [group_key..., agg_values...].
@@ -91,7 +91,7 @@ test "aggregate cursor: COUNT(*) with GROUP BY preserves first-seen group order"
 
     try std.testing.expectEqual(@as(i64, 1), batch[1].values[0].int);
     try std.testing.expectEqual(@as(i64, 1), batch[1].values[1].int);
-    try std.testing.expect((try ac.next(a)) == null);
+    try std.testing.expect((try ac.next(.{ .outer = &.{}, .alloc = a })) == null);
 }
 
 test "aggregate cursor: SUM/AVG/MIN/MAX without GROUP BY" {
@@ -114,10 +114,10 @@ test "aggregate cursor: SUM/AVG/MIN/MAX without GROUP BY" {
     const input = try openSeqScanInput(h.db, a, "t");
 
     const specs = [_]cursor_mod.AggSpec{
-        .{ .func = &agg_mod.SumFunc, .col_idx = 1 },
-        .{ .func = &agg_mod.AvgFunc, .col_idx = 1 },
-        .{ .func = &agg_mod.MinFunc, .col_idx = 1 },
-        .{ .func = &agg_mod.MaxFunc, .col_idx = 1 },
+        .{ .func = &agg_mod.SumFunc, .input_expr = .{ .col_idx = 1 } },
+        .{ .func = &agg_mod.AvgFunc, .input_expr = .{ .col_idx = 1 } },
+        .{ .func = &agg_mod.MinFunc, .input_expr = .{ .col_idx = 1 } },
+        .{ .func = &agg_mod.MaxFunc, .input_expr = .{ .col_idx = 1 } },
     };
 
     var ac = cursor_mod.AggregateCursor{
@@ -129,13 +129,13 @@ test "aggregate cursor: SUM/AVG/MIN/MAX without GROUP BY" {
     };
     defer ac.deinit(a);
 
-    const batch = (try ac.next(a)).?;
+    const batch = (try ac.next(.{ .outer = &.{}, .alloc = a })).?;
     try std.testing.expectEqual(@as(usize, 1), batch.len);
     try std.testing.expectEqual(@as(i64, 17), batch[0].values[0].int);
     try std.testing.expectApproxEqAbs(@as(f64, 8.5), batch[0].values[1].real, 1e-9);
     try std.testing.expectEqual(@as(i64, 7), batch[0].values[2].int);
     try std.testing.expectEqual(@as(i64, 10), batch[0].values[3].int);
-    try std.testing.expect((try ac.next(a)) == null);
+    try std.testing.expect((try ac.next(.{ .outer = &.{}, .alloc = a })) == null);
 }
 
 test "aggregate cursor: SUM/AVG/MIN/MAX with GROUP BY" {
@@ -159,10 +159,10 @@ test "aggregate cursor: SUM/AVG/MIN/MAX with GROUP BY" {
     const input = try openSeqScanInput(h.db, a, "t");
 
     const specs = [_]cursor_mod.AggSpec{
-        .{ .func = &agg_mod.SumFunc, .col_idx = 1 },
-        .{ .func = &agg_mod.AvgFunc, .col_idx = 1 },
-        .{ .func = &agg_mod.MinFunc, .col_idx = 1 },
-        .{ .func = &agg_mod.MaxFunc, .col_idx = 1 },
+        .{ .func = &agg_mod.SumFunc, .input_expr = .{ .col_idx = 1 } },
+        .{ .func = &agg_mod.AvgFunc, .input_expr = .{ .col_idx = 1 } },
+        .{ .func = &agg_mod.MinFunc, .input_expr = .{ .col_idx = 1 } },
+        .{ .func = &agg_mod.MaxFunc, .input_expr = .{ .col_idx = 1 } },
     };
     const groups = [_]usize{0};
 
@@ -175,7 +175,7 @@ test "aggregate cursor: SUM/AVG/MIN/MAX with GROUP BY" {
     };
     defer ac.deinit(a);
 
-    const batch = (try ac.next(a)).?;
+    const batch = (try ac.next(.{ .outer = &.{}, .alloc = a })).?;
     try std.testing.expectEqual(@as(usize, 2), batch.len);
 
     // First seen group key is 2.
@@ -190,5 +190,5 @@ test "aggregate cursor: SUM/AVG/MIN/MAX with GROUP BY" {
     try std.testing.expectApproxEqAbs(@as(f64, 1.5), batch[1].values[2].real, 1e-9);
     try std.testing.expectApproxEqAbs(@as(f64, 1.5), batch[1].values[3].real, 1e-9);
     try std.testing.expectApproxEqAbs(@as(f64, 1.5), batch[1].values[4].real, 1e-9);
-    try std.testing.expect((try ac.next(a)) == null);
+    try std.testing.expect((try ac.next(.{ .outer = &.{}, .alloc = a })) == null);
 }

@@ -99,11 +99,11 @@ test "parse INSERT" {
 
     const ins = res.insert;
     try std.testing.expectEqualStrings("t", ins.table);
-    try std.testing.expectEqual(@as(usize, 1), ins.values.len);
-    try std.testing.expectEqual(@as(usize, 3), ins.values[0].len);
-    try std.testing.expectEqualStrings("alice", ins.values[0][0].str_lit);
-    try std.testing.expectEqual(@as(i64, 42), ins.values[0][1].int_lit);
-    _ = ins.values[0][2].null_lit;
+    try std.testing.expectEqual(@as(usize, 1), ins.source.values.len);
+    try std.testing.expectEqual(@as(usize, 3), ins.source.values[0].len);
+    try std.testing.expectEqualStrings("alice", ins.source.values[0][0].str_lit);
+    try std.testing.expectEqual(@as(i64, 42), ins.source.values[0][1].int_lit);
+    _ = ins.source.values[0][2].null_lit;
 }
 
 test "parse INSERT with columns" {
@@ -114,8 +114,8 @@ test "parse INSERT with columns" {
 
     const ins = res.insert;
     try std.testing.expectEqualStrings("t", ins.table);
-    try std.testing.expectEqual(@as(usize, 1), ins.values.len);
-    try std.testing.expectEqual(@as(usize, 2), ins.values[0].len);
+    try std.testing.expectEqual(@as(usize, 1), ins.source.values.len);
+    try std.testing.expectEqual(@as(usize, 2), ins.source.values[0].len);
     try std.testing.expectEqual(@as(usize, 2), ins.columns.len);
     try std.testing.expectEqualStrings("id", ins.columns[0]);
     try std.testing.expectEqualStrings("name", ins.columns[1]);
@@ -219,7 +219,7 @@ test "parse string with escaped quote" {
     defer p.deinit();
     const res = try p.parse();
 
-    try std.testing.expectEqualStrings("alice's", res.insert.values[0][0].str_lit);
+    try std.testing.expectEqualStrings("alice's", res.insert.source.values[0][0].str_lit);
 }
 
 test "parse unary negation" {
@@ -228,7 +228,7 @@ test "parse unary negation" {
     defer p.deinit();
     const res = try p.parse();
 
-    const expr = res.insert.values[0][0];
+    const expr = res.insert.source.values[0][0];
     try std.testing.expectEqual(ast.UnaryOp.neg, expr.unary.op);
     try std.testing.expectEqual(@as(i64, 42), expr.unary.operand.int_lit);
 }

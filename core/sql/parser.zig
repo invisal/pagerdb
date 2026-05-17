@@ -464,6 +464,17 @@ pub const Parser = struct {
             }
         }
 
+        // INSERT INTO t SELECT ... — delegate to the SELECT parser
+        if (self.peek().kind == .kw_select) {
+            const sel = try self.alloc().create(ast.SelectStmt);
+            sel.* = try self.parseSelect();
+            return ast.InsertStmt{
+                .table = table,
+                .columns = try columns.toOwnedSlice(self.alloc()),
+                .source = .{ .select = sel },
+            };
+        }
+
         _ = try self.expect(.kw_values);
 
         var rows: std.ArrayList([]ast.Expr) = .empty;
@@ -494,8 +505,8 @@ pub const Parser = struct {
 
         return ast.InsertStmt{
             .table = table,
-            .values = try rows.toOwnedSlice(self.alloc()),
             .columns = try columns.toOwnedSlice(self.alloc()),
+            .source = .{ .values = try rows.toOwnedSlice(self.alloc()) },
         };
     }
 

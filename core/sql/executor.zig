@@ -69,6 +69,7 @@ pub const Executor = struct {
         return switch (plan) {
             else => .{ .result_set = try self.execQuery(plan) },
             .insert => |n| .{ .affected = try self.execInsert(n) },
+            .insert_select => |n| .{ .affected = try self.execInsertSelect(n) },
             .update => |n| .{ .affected = try self.execUpdate(n) },
             .delete => |n| .{ .affected = try self.execDelete(n) },
             .create_table => |n| blk: {
@@ -133,6 +134,36 @@ pub const Executor = struct {
             _ = try self.db.insert(n.table, vals);
         }
         return n.values.len;
+    }
+
+    fn execInsertSelect(self: *Executor, n: pp.PhysicalInsertSelect) !u64 {
+        var arena = std.heap.ArenaAllocator.init(self.alloc);
+        defer arena.deinit();
+        const a = arena.allocator();
+
+        const ctx = eval.EvalContext{ .outer = &.{}, .alloc = a };
+        var rows: std.ArrayList(Row) = .empty;
+        try collectRows(n.input.*, self.db, &rows, ctx);
+
+        const meta = self.db.cat.getTable(n.table) orelse return error.TableNotFound;
+        const col_count = meta.columns.len;
+
+        for (rows.items) |src_row| {
+            const vals = try self.alloc.alloc(row_mod.Value, col_count);
+            defer self.alloc.free(vals);
+
+            if (n.col_map.len > 0) {
+                // Named column list: col_map[target_i] = source position
+                for (0..col_count) |ti| vals[ti] = src_row.values[n.col_map[ti]];
+            } else {
+                // Positional: SELECT column i → target column i
+                for (0..col_count) |i| vals[i] = src_row.values[i];
+            }
+
+            _ = try self.db.insert(n.table, vals);
+        }
+
+        return rows.items.len;
     }
 
     fn execUpdate(self: *Executor, n: pp.PhysicalUpdate) !u64 {
