@@ -212,10 +212,19 @@ pub const Db = struct {
     }
 
     pub fn dropTable(self: *Db, name: []const u8, if_exists: bool) !void {
-        self.cat.dropTable(name) catch |e| {
-            if (e == error.TableNotFound and if_exists) return;
-            return e;
+        const table = self.cat.getTable(name) orelse {
+            if (if_exists) return;
+            return error.TableNotFound;
         };
+
+        // Free B-tree pages before removing catalog entries so the pager
+        // can reclaim them for future allocations.
+        try btree.RowidBTree.freeTree(&self.pager, table.btree_root);
+        for (table.indexes) |idx| {
+            try btree.IndexBTree.freeTree(&self.pager, idx.btree_root);
+        }
+
+        try self.cat.dropTable(name);
         try self.pager.flush();
     }
 

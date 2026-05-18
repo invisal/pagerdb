@@ -579,6 +579,34 @@ pub fn BTree(comptime Fmt: type) type {
             return Fmt.readScanItem(&buf, sr.cell_offset, leaf_id, sr.cell_index);
         }
 
+        // Recursively free every page in the tree, including overflow chains on
+        // leaf cells (via Fmt.beforeDeleteCell).  Call this before removing the
+        // tree's root from the catalog so the pages are returned to the free list.
+        pub fn freeTree(pager: *Pager, page_id: u32) !void {
+            var buf: [t.PAGE_SIZE]u8 = undefined;
+            try pager.readPage(page_id, &buf);
+            const ph = std.mem.bytesToValue(t.PageHeader, buf[0..@sizeOf(t.PageHeader)]);
+            const h = readBTreeHeader(&buf);
+
+            if (ph.page_type == .btree_internal) {
+                // Recurse into every child before freeing this internal page.
+                for (0..h.cell_count) |i| {
+                    const offset = getCellPtr(&buf, @intCast(i));
+                    const child = Fmt.internalGetLeftChild(&buf, offset);
+                    try freeTree(pager, child);
+                }
+                try freeTree(pager, getRightmostChild(&buf));
+            } else {
+                // Leaf: give the format a chance to clean up each cell (e.g. overflow chains).
+                for (0..h.cell_count) |i| {
+                    const offset = getCellPtr(&buf, @intCast(i));
+                    try Fmt.beforeDeleteCell(pager, &buf, offset);
+                }
+            }
+
+            try pager.freePage(page_id);
+        }
+
         pub const ScanIterator = struct {
             pager: *Pager,
             current_page: u32,
