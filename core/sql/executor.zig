@@ -77,7 +77,7 @@ pub const Executor = struct {
                 break :blk .{ .created = {} };
             },
             .create_index => |n| blk: {
-                try self.db.createIndex(n.name, n.table, n.col_indices, n.is_unique, n.if_not_exists);
+                try self.db.createIndex(n.name, n.table, n.col_indices, n.col_desc, n.is_unique, n.if_not_exists);
                 break :blk .{ .created = {} };
             },
             .create_view => |n| blk: {

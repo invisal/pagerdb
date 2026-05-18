@@ -139,6 +139,7 @@ pub const Db = struct {
         name: []const u8,
         table_name: []const u8,
         col_indices: []const u32,
+        col_desc: []const bool,
         is_unique: bool,
         if_not_exists: bool,
     ) !void {
@@ -174,7 +175,7 @@ pub const Db = struct {
             defer freeValues(self.allocator, values);
 
             var key_buf: [index_key_mod.MAX_KEY_LEN + 8]u8 = undefined;
-            const prefix_len = buildIndexKeyPrefix(values, col_indices, &key_buf);
+            const prefix_len = buildIndexKeyPrefix(values, col_indices, col_desc, &key_buf);
             if (is_unique) {
                 if (try btree.searchPrefix(&self.pager, index_root, key_buf[0..prefix_len]) != null)
                     return error.UniqueViolation;
@@ -183,7 +184,7 @@ pub const Db = struct {
             try btree.IndexBTree.insert(&self.pager, index_root, key_buf[0..full_len]);
         }
 
-        _ = try self.cat.createIndex(name, table_name, col_indices, is_unique, index_root);
+        _ = try self.cat.createIndex(name, table_name, col_indices, col_desc, is_unique, index_root);
         try self.pager.flush();
     }
 
@@ -498,13 +499,15 @@ fn freeValues(alloc: std.mem.Allocator, values: []const row.Value) void {
 
 // Encode the values at the given column positions into the first N bytes of buf.
 // Returns the number of bytes written (the prefix length before the rowid suffix).
-fn buildIndexKeyPrefix(values: []const row.Value, col_indices: []const u32, buf: []u8) usize {
+fn buildIndexKeyPrefix(values: []const row.Value, col_indices: []const u32, col_desc: []const bool, buf: []u8) usize {
     var key_vals: [16]row.Value = undefined;
+    var desc_flags: [16]bool = undefined;
     const n = @min(col_indices.len, key_vals.len);
     for (col_indices[0..n], 0..) |attnum, k| {
         key_vals[k] = if (attnum < values.len) values[attnum] else .null;
+        desc_flags[k] = if (k < col_desc.len) col_desc[k] else false;
     }
-    return index_key_mod.encodeKey(key_vals[0..n], buf);
+    return index_key_mod.encodeKeyWithDirections(key_vals[0..n], desc_flags[0..n], buf);
 }
 
 // Read a row from the B-tree and decode it.  Caller must call freeValues on the result.
@@ -529,7 +532,7 @@ fn checkUniqueConstraints(self: *Db, meta: *const catalog.TableMeta, values: []c
     for (meta.indexes) |idx| {
         if (!idx.is_unique) continue;
         var key_buf: [index_key_mod.MAX_KEY_LEN + 8]u8 = undefined;
-        const prefix_len = buildIndexKeyPrefix(values, idx.col_indices, &key_buf);
+        const prefix_len = buildIndexKeyPrefix(values, idx.col_indices, idx.col_desc, &key_buf);
         if (try btree.searchPrefix(&self.pager, idx.btree_root, key_buf[0..prefix_len]) != null)
             return error.UniqueViolation;
     }
@@ -547,7 +550,7 @@ fn checkUniqueConstraintsExcept(
     for (meta.indexes) |idx| {
         if (!idx.is_unique) continue;
         var key_buf: [index_key_mod.MAX_KEY_LEN + 8]u8 = undefined;
-        const prefix_len = buildIndexKeyPrefix(values, idx.col_indices, &key_buf);
+        const prefix_len = buildIndexKeyPrefix(values, idx.col_indices, idx.col_desc, &key_buf);
         if (try btree.searchPrefix(&self.pager, idx.btree_root, key_buf[0..prefix_len])) |found_rowid| {
             if (found_rowid != except_rowid) return error.UniqueViolation;
         }
@@ -559,7 +562,7 @@ fn checkUniqueConstraintsExcept(
 fn insertToIndexes(self: *Db, meta: *const catalog.TableMeta, rowid: u64, values: []const row.Value) !void {
     for (meta.indexes) |idx| {
         var key_buf: [index_key_mod.MAX_KEY_LEN + 8]u8 = undefined;
-        const prefix_len = buildIndexKeyPrefix(values, idx.col_indices, &key_buf);
+        const prefix_len = buildIndexKeyPrefix(values, idx.col_indices, idx.col_desc, &key_buf);
         const full_len = index_key_mod.appendRowid(&key_buf, prefix_len, rowid);
         try btree.IndexBTree.insert(&self.pager, idx.btree_root, key_buf[0..full_len]);
     }
@@ -569,7 +572,7 @@ fn insertToIndexes(self: *Db, meta: *const catalog.TableMeta, rowid: u64, values
 fn deleteFromIndexes(self: *Db, meta: *const catalog.TableMeta, rowid: u64, values: []const row.Value) !void {
     for (meta.indexes) |idx| {
         var key_buf: [index_key_mod.MAX_KEY_LEN + 8]u8 = undefined;
-        const prefix_len = buildIndexKeyPrefix(values, idx.col_indices, &key_buf);
+        const prefix_len = buildIndexKeyPrefix(values, idx.col_indices, idx.col_desc, &key_buf);
         const full_len = index_key_mod.appendRowid(&key_buf, prefix_len, rowid);
         _ = try btree.IndexBTree.delete(&self.pager, idx.btree_root, key_buf[0..full_len]);
     }

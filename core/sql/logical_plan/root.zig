@@ -149,6 +149,7 @@ pub const LogicalCreateIndex = struct {
     name: []const u8, // arena-owned
     table: []const u8, // arena-owned
     col_indices: []u32, // attnums of indexed columns, arena-owned
+    col_desc: []bool, // true = DESC per column, parallel to col_indices, arena-owned
     is_unique: bool,
     if_not_exists: bool,
 };
@@ -758,18 +759,21 @@ pub const LogicalPlanner = struct {
         };
 
         const col_indices = try self.alloc().alloc(u32, stmt.columns.len);
-        for (stmt.columns, 0..) |col_name, i| {
-            const col = meta.findColumn(col_name) orelse {
-                self.setError("Column '{s}' does not exist in table '{s}'", .{ col_name, stmt.table });
+        const col_desc = try self.alloc().alloc(bool, stmt.columns.len);
+        for (stmt.columns, 0..) |idx_col, i| {
+            const col = meta.findColumn(idx_col.name) orelse {
+                self.setError("Column '{s}' does not exist in table '{s}'", .{ idx_col.name, stmt.table });
                 return PlanError.ColumnNotFound;
             };
             col_indices[i] = col.attnum;
+            col_desc[i] = idx_col.desc;
         }
 
         return .{ .create_index = .{
             .name = try self.alloc().dupe(u8, stmt.name),
             .table = try self.alloc().dupe(u8, stmt.table),
             .col_indices = col_indices,
+            .col_desc = col_desc,
             .is_unique = stmt.is_unique,
             .if_not_exists = stmt.if_not_exists,
         } };

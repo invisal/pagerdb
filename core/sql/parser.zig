@@ -679,10 +679,22 @@ pub const Parser = struct {
         const table = try self.alloc().dupe(u8, self.tokenText(table_tok));
 
         _ = try self.expect(.lparen);
-        var cols: std.ArrayList([]const u8) = .empty;
+        var cols: std.ArrayList(ast.IndexColumn) = .empty;
         while (true) {
             const col_tok = try self.expect(.identifier);
-            try cols.append(self.alloc(), try self.alloc().dupe(u8, self.tokenText(col_tok)));
+            const col_name = try self.alloc().dupe(u8, self.tokenText(col_tok));
+            const desc = switch (self.peek().kind) {
+                .kw_desc => blk: {
+                    _ = self.advance();
+                    break :blk true;
+                },
+                .kw_asc => blk: {
+                    _ = self.advance();
+                    break :blk false;
+                },
+                else => false,
+            };
+            try cols.append(self.alloc(), .{ .name = col_name, .desc = desc });
             if (self.peek().kind != .comma) break;
             _ = self.advance();
         }

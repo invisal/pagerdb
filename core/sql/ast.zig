@@ -328,10 +328,15 @@ pub const CreateTableStmt = struct {
     columns: []ColumnDef,
 };
 
+pub const IndexColumn = struct {
+    name: []const u8, // arena-owned
+    desc: bool, // true = DESC, false = ASC (default)
+};
+
 pub const CreateIndexStmt = struct {
     name: []const u8, // arena-owned
     table: []const u8, // arena-owned
-    columns: [][]const u8, // arena-owned; column names in index order
+    columns: []IndexColumn, // arena-owned; column names and directions in index order
     is_unique: bool,
     if_not_exists: bool,
 };

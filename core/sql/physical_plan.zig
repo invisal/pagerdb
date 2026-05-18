@@ -72,6 +72,7 @@ pub const PhysicalCreateIndex = struct {
     name: []const u8,
     table: []const u8,
     col_indices: []u32,
+    col_desc: []bool,
     is_unique: bool,
     if_not_exists: bool,
 };
@@ -198,6 +199,7 @@ pub const PhysicalPlanner = struct {
                 .name = n.name,
                 .table = n.table,
                 .col_indices = n.col_indices,
+                .col_desc = n.col_desc,
                 .is_unique = n.is_unique,
                 .if_not_exists = n.if_not_exists,
             } },
