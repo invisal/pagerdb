@@ -236,6 +236,10 @@ pub const Db = struct {
     ) !u64 {
         const meta = self.cat.getTable(table) orelse return error.TableNotFound;
 
+        const auto_txn = self.txn == null;
+        if (auto_txn) self.pager.beginTxn();
+        errdefer if (auto_txn) self.pager.endTxn();
+
         // If the table has an INTEGER PRIMARY KEY column, use its value as the
         // rowid.  A null value means the user omitted it → auto-assign.
         // We also need to ensure the PK column value in the stored row bytes
@@ -288,6 +292,7 @@ pub const Db = struct {
         if (self.txn) |*active_txn| {
             try active_txn.logInsert(table, rowid);
         } else {
+            self.pager.endTxn();
             try self.pager.flush();
         }
         return rowid;
@@ -296,6 +301,10 @@ pub const Db = struct {
     // Remove a row by rowid. Returns false if the rowid does not exist.
     pub fn delete(self: *Db, table: []const u8, rowid: u64) !bool {
         const meta = self.cat.getTable(table) orelse return error.TableNotFound;
+
+        const auto_txn = self.txn == null;
+        if (auto_txn) self.pager.beginTxn();
+        errdefer if (auto_txn) self.pager.endTxn();
 
         // Read the row before deleting whenever we need it for the transaction
         // log or for index key deletion.
@@ -322,12 +331,18 @@ pub const Db = struct {
             }
 
             _ = try btree.RowidBTree.delete(&self.pager, meta.btree_root, rowid);
-            if (self.txn == null) try self.pager.flush();
+            if (auto_txn) {
+                self.pager.endTxn();
+                try self.pager.flush();
+            }
             return true;
         }
 
         const deleted = try btree.RowidBTree.delete(&self.pager, meta.btree_root, rowid);
-        if (deleted) try self.pager.flush();
+        if (deleted and auto_txn) {
+            self.pager.endTxn();
+            try self.pager.flush();
+        }
         return deleted;
     }
 
@@ -339,6 +354,10 @@ pub const Db = struct {
         values: []const row.Value,
     ) !bool {
         const meta = self.cat.getTable(table) orelse return error.TableNotFound;
+
+        const auto_txn = self.txn == null;
+        if (auto_txn) self.pager.beginTxn();
+        errdefer if (auto_txn) self.pager.endTxn();
 
         // Read old row whenever needed for the transaction log or index maintenance.
         const need_old_row = self.txn != null or meta.indexes.len > 0;
@@ -373,7 +392,10 @@ pub const Db = struct {
             defer self.allocator.free(row_buf);
             _ = row.encodeRow(values, row_buf);
             try btree.insertRow(&self.pager, meta.btree_root, rowid, row_buf);
-            if (self.txn == null) try self.pager.flush();
+            if (auto_txn) {
+                self.pager.endTxn();
+                try self.pager.flush();
+            }
             return true;
         }
 
@@ -386,7 +408,10 @@ pub const Db = struct {
         _ = row.encodeRow(values, row_buf);
 
         try btree.insertRow(&self.pager, meta.btree_root, rowid, row_buf);
-        try self.pager.flush();
+        if (auto_txn) {
+            self.pager.endTxn();
+            try self.pager.flush();
+        }
         return true;
     }
 
