@@ -586,6 +586,30 @@ pub const JoinCursor = struct {
 // ── Scalar subquery executor ───────────────────────────────────────────────────
 
 // Executes a scalar subquery and returns the first column of the first result
+// Executes an IN subquery and returns all first-column values from every result
+// row, allocated with alloc.  Registered as InSubqueryExecFn in executor.zig.
+pub fn execInSubquery(
+    inner: *anyopaque,
+    db_ptr: *anyopaque,
+    outer: []const row_mod.Value,
+    alloc: Allocator,
+) anyerror![]eval.EvalValue {
+    const plan: *pp.PhysicalPlan = @ptrCast(@alignCast(inner));
+    const db: *Db = @ptrCast(@alignCast(db_ptr));
+    const ctx = EvalContext{ .outer = outer, .alloc = alloc };
+    var cur = try Cursor.open(plan.*, db, alloc);
+    defer cur.deinit(alloc);
+    var results: std.ArrayListUnmanaged(eval.EvalValue) = .empty;
+    while (try cur.next(ctx)) |batch| {
+        for (batch) |result_row| {
+            if (result_row.values.len > 0) {
+                try results.append(alloc, eval.rowValToEval(result_row.values[0]));
+            }
+        }
+    }
+    return results.toOwnedSlice(alloc);
+}
+
 // row.  Registered as the SubqueryExecFn in executor.zig so PhysicalPlan can
 // hold a function pointer without importing cursor/root.zig (which would create
 // a circular dependency).

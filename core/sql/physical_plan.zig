@@ -172,6 +172,7 @@ pub const PhysicalPlanner = struct {
     // between physical_plan.zig and cursor/root.zig / db.zig.
     db_opaque: ?*anyopaque = null,
     subquery_exec: ?ee.SubqueryExecFn = null,
+    in_subquery_exec: ?ee.InSubqueryExecFn = null,
 
     pub fn init(allocator: std.mem.Allocator) PhysicalPlanner {
         return .{ .arena = std.heap.ArenaAllocator.init(allocator) };
@@ -301,6 +302,19 @@ pub const PhysicalPlanner = struct {
                     .exec_fn = self.subquery_exec.?,
                 };
                 break :blk .{ .subquery = node };
+            },
+            .in_subquery => |isq| blk: {
+                const inner = try self.alloc().create(PhysicalPlan);
+                inner.* = try self.plan(isq.plan.*);
+                const node = try self.alloc().create(ee.ExecExpr.InSubquery);
+                node.* = .{
+                    .operand = try self.planExpr(isq.operand),
+                    .inner = @ptrCast(inner),
+                    .db = self.db_opaque.?,
+                    .exec_fn = self.in_subquery_exec.?,
+                    .negated = isq.negated,
+                };
+                break :blk .{ .in_subquery = node };
             },
         };
     }

@@ -278,6 +278,7 @@ pub fn execute(allocator: std.mem.Allocator, db: *Db, sql: []const u8) !ExecResu
     // subqueries compiled by planExpr can execute against the live database.
     phys_planner.db_opaque = @ptrCast(db);
     phys_planner.subquery_exec = cursor_mod.execScalarSubquery;
+    phys_planner.in_subquery_exec = cursor_mod.execInSubquery;
     const physical = try phys_planner.plan(logical);
 
     var ex = Executor.init(db, allocator);

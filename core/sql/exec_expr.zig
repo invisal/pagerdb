@@ -28,6 +28,15 @@ pub const SubqueryExecFn = *const fn (
     alloc: std.mem.Allocator,
 ) anyerror!?EvalValue;
 
+// Executes an IN subquery and returns all first-column values from every
+// result row.  The returned slice is allocated with alloc and owned by the caller.
+pub const InSubqueryExecFn = *const fn (
+    inner: *anyopaque,
+    db: *anyopaque,
+    outer: []const row.Value,
+    alloc: std.mem.Allocator,
+) anyerror![]EvalValue;
+
 pub const ExecExpr = union(enum) {
     int_lit: i64,
     float_lit: f64,
@@ -41,6 +50,7 @@ pub const ExecExpr = union(enum) {
     func_call: *FuncCall,
     cast: *Cast,
     in_list: *InList,
+    in_subquery: *InSubquery,
     case_: *Case,
     is_null: *IsNull,
     subquery: *Subquery,
@@ -50,6 +60,13 @@ pub const ExecExpr = union(enum) {
     pub const FuncCall = struct { func: *const sf.ScalarFunc, args: []ExecExpr };
     pub const Cast = struct { target_type: t.ColType, operand: ExecExpr };
     pub const InList = struct { operand: ExecExpr, list: []ExecExpr, negated: bool };
+    pub const InSubquery = struct {
+        operand: ExecExpr,
+        inner: *anyopaque, // *PhysicalPlan
+        db: *anyopaque, // *Db
+        exec_fn: InSubqueryExecFn,
+        negated: bool,
+    };
     pub const Case = struct {
         pub const WhenClause = struct { cond: ExecExpr, then: ExecExpr };
         when_clauses: []WhenClause,

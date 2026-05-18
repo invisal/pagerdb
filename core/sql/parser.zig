@@ -952,6 +952,17 @@ pub const Parser = struct {
 
     fn parseInList(self: *Parser, operand: ast.Expr, negated: bool) ParseError!ast.Expr {
         _ = try self.expect(.lparen);
+        // IN (SELECT ...) — subquery form
+        if (self.peek().kind == .kw_select) {
+            const stmt = try self.parseSelect();
+            _ = try self.expect(.rparen);
+            const stmt_ptr = try self.alloc().create(ast.SelectStmt);
+            stmt_ptr.* = stmt;
+            const node = try self.alloc().create(ast.Expr.InSubquery);
+            node.* = .{ .operand = operand, .subquery = stmt_ptr, .negated = negated };
+            return .{ .in_subquery = node };
+        }
+        // IN (val1, val2, ...) — scalar list form
         var list: std.ArrayList(ast.Expr) = .empty;
         if (self.peek().kind != .rparen) {
             try list.append(self.alloc(), try self.parseExpr());

@@ -48,6 +48,18 @@ pub fn evalExpr(
             const result = try s.exec_fn(s.inner, s.db, row_values, ctx.alloc);
             break :blk result orelse .{ .null_ = {} };
         },
+        .in_subquery => |isq| blk: {
+            const operand = try evalExpr(isq.operand, row_values, ctx);
+            if (operand == .null_) break :blk .{ .null_ = {} };
+            // Run the subquery and collect all first-column values.
+            const set = try isq.exec_fn(isq.inner, isq.db, row_values, ctx.alloc);
+            for (set) |v| {
+                if (compareValues(operand, v) == .eq) {
+                    break :blk .{ .bool_ = !isq.negated };
+                }
+            }
+            break :blk .{ .bool_ = isq.negated };
+        },
     };
 }
 

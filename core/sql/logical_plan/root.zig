@@ -43,6 +43,7 @@ pub const Expr = union(enum) {
     func_call: *FuncCall,
     cast: *Cast,
     in_list: *InList,
+    in_subquery: *InSubquery,
     case_: *Case,
     is_null: *IsNull,
     // Scalar subquery: a nested SELECT that returns one row, one column.
@@ -57,6 +58,7 @@ pub const Expr = union(enum) {
     pub const FuncCall = struct { func: *const sf.ScalarFunc, args: []Expr };
     pub const Cast = struct { target_type: t.ColType, operand: Expr };
     pub const InList = struct { operand: Expr, list: []Expr, negated: bool };
+    pub const InSubquery = struct { operand: Expr, plan: *LogicalPlan, negated: bool };
     pub const Case = struct {
         pub const WhenClause = struct { cond: Expr, then: Expr };
         when_clauses: []WhenClause,
@@ -881,7 +883,7 @@ pub const LogicalPlanner = struct {
             .cast => |c| containsAggCall(c.operand),
             // Subqueries have their own aggregate context; they do not make the
             // outer query require an Aggregate node.
-            .subquery => false,
+            .subquery, .in_subquery => false,
             // Literals, column references, and other leaves can never be aggregates.
             else => false,
         };
@@ -1115,6 +1117,8 @@ pub const LogicalPlanner = struct {
             },
             .is_null => |n| try self.collectAggSpecs(n.operand, scan_schema, out),
             .cast => |c| try self.collectAggSpecs(c.operand, scan_schema, out),
+            // in_subquery has its own aggregate context; no specs to collect.
+            .in_subquery => {},
             else => {},
         }
     }
@@ -1338,6 +1342,23 @@ pub const LogicalPlanner = struct {
                 const sub = try self.alloc().create(Expr.LogicalSubquery);
                 sub.* = .{ .plan = try self.box(inner_plan) };
                 break :blk .{ .subquery = sub };
+            },
+            .in_subquery => |isq| blk: {
+                const outer_for_subquery: Schema = switch (ctx) {
+                    .plain => |schema| schema,
+                    .over_agg => |oa| oa.scan_schema,
+                };
+                const saved_outer = self.outer_schema;
+                self.outer_schema = outer_for_subquery;
+                defer self.outer_schema = saved_outer;
+                const inner_plan = try self.planSelect(isq.subquery.*);
+                const node = try self.alloc().create(Expr.InSubquery);
+                node.* = .{
+                    .operand = try self.resolveExprCtx(isq.operand, ctx),
+                    .plan = try self.box(inner_plan),
+                    .negated = isq.negated,
+                };
+                break :blk .{ .in_subquery = node };
             },
         };
     }
@@ -1645,6 +1666,7 @@ fn exprEqlInner(a: Expr, b: Expr) bool {
         .col_idx => |av| b == .col_idx and b.col_idx == av,
         .outer_col_idx => |av| b == .outer_col_idx and b.outer_col_idx == av,
         .subquery => |av| b == .subquery and av == b.subquery,
+        .in_subquery => |av| b == .in_subquery and av == b.in_subquery,
         .binary => |av| b == .binary and
             av.op == b.binary.op and
             exprEqlInner(av.left, b.binary.left) and
