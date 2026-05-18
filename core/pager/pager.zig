@@ -15,6 +15,7 @@ pub const Pager = struct {
     sys_columns_root: u32,
     sys_indexes_root: u32,
     sys_index_cols_root: u32,
+    sys_views_root: u32,
 
     pub const VTable = struct {
         readPage: *const fn (*anyopaque, u32, *[t.PAGE_SIZE]u8) anyerror!void,

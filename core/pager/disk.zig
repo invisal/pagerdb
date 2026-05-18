@@ -69,6 +69,7 @@ pub const DiskPager = struct {
             .sys_columns_root = 0,
             .sys_indexes_root = 0,
             .sys_index_cols_root = 0,
+            .sys_views_root = 0,
         };
         // Write a zero-filled page 0 to initialise the file.
         const blank = [_]u8{0} ** t.PAGE_SIZE;
@@ -95,6 +96,7 @@ pub const DiskPager = struct {
             .sys_columns_root = 0,
             .sys_indexes_root = 0,
             .sys_index_cols_root = 0,
+            .sys_views_root = 0,
         };
         const h = try page0.readHeader(&pager);
         try page0.validateHeader(h);
@@ -103,6 +105,7 @@ pub const DiskPager = struct {
         pager.sys_columns_root = h.sys_columns_root;
         pager.sys_indexes_root = h.sys_indexes_root;
         pager.sys_index_cols_root = h.sys_index_cols_root;
+        pager.sys_views_root = h.sys_views_root;
 
         self.wal = config.wal;
         return pager;

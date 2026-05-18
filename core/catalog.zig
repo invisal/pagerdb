@@ -39,6 +39,11 @@ const INDEX_COLS_SCHEMA = [_]row.ColumnSchema{
     .{ .col_type = .int, .nullable = false }, // col_index (attnum)
 };
 
+const VIEWS_SCHEMA = [_]row.ColumnSchema{
+    .{ .col_type = .text, .nullable = false }, // name
+    .{ .col_type = .text, .nullable = false }, // sql text (the SELECT body)
+};
+
 const COL = struct {
     const table_id: usize = 0;
     const attnum: usize = 1;
@@ -62,6 +67,12 @@ const IDXCOL = struct {
 };
 
 // ── Public types ──────────────────────────────────────────────────────────────
+
+pub const ViewMeta = struct {
+    id: u64,
+    name: []const u8, // arena-owned
+    sql: []const u8, // arena-owned; the SELECT text stored verbatim
+};
 
 pub const IndexMeta = struct {
     id: u64,
@@ -117,23 +128,27 @@ pub const Catalog = struct {
     /// Owns all catalog strings and metadata; freed in one shot on deinit.
     arena: std.heap.ArenaAllocator,
     pager: *Pager,
-    /// Uses the backing allocator so tables.deinit() reclaims its internal
-    /// array independently from the arena.
+    /// Uses the backing allocator so tables/views.deinit() reclaims internal
+    /// arrays independently from the arena.
     tables: std.StringHashMap(TableMeta),
+    views: std.StringHashMap(ViewMeta),
     next_table_id: u64,
     next_col_rowid: u64,
     next_idx_id: u64,
     next_idx_col_rowid: u64,
+    next_view_id: u64,
 
     pub fn init(allocator: std.mem.Allocator, pager: *Pager) Catalog {
         return .{
             .arena = std.heap.ArenaAllocator.init(allocator),
             .pager = pager,
             .tables = std.StringHashMap(TableMeta).init(allocator),
+            .views = std.StringHashMap(ViewMeta).init(allocator),
             .next_table_id = 1,
             .next_col_rowid = 1,
             .next_idx_id = 1,
             .next_idx_col_rowid = 1,
+            .next_view_id = 1,
         };
     }
 
@@ -221,6 +236,24 @@ pub const Catalog = struct {
             }
         }
         self.next_col_rowid = max_col_rowid + 1;
+
+        // Pass 5: load view definitions.
+        // Skipped when no views have been created yet (sys_views_root == 0).
+        if (self.pager.sys_views_root != 0) {
+            var max_view_id: u64 = 0;
+            var view_scan = try btree.RowidBTree.ScanIterator.init(self.pager, self.pager.sys_views_root);
+            while (try view_scan.next()) |cell| {
+                if (cell.rowid > max_view_id) max_view_id = cell.rowid;
+                const vals = try row.decodeRow(&VIEWS_SCHEMA, cell.row_data, tmp);
+                const meta = ViewMeta{
+                    .id = cell.rowid,
+                    .name = try alloc.dupe(u8, vals[0].text),
+                    .sql = try alloc.dupe(u8, vals[1].text),
+                };
+                try self.views.put(meta.name, meta);
+            }
+            self.next_view_id = max_view_id + 1;
+        }
 
         // Pass 3+4: load index metadata and column mappings.
         // Skipped when no indexes have been created yet (sys_indexes_root == 0).
@@ -457,9 +490,58 @@ pub const Catalog = struct {
         return self.tables.getPtr(name);
     }
 
+    pub fn getView(self: *Catalog, name: []const u8) ?*ViewMeta {
+        return self.views.getPtr(name);
+    }
+
+    pub fn createView(self: *Catalog, name: []const u8, sql: []const u8) !ViewMeta {
+        if (self.views.contains(name)) return error.ViewAlreadyExists;
+        if (self.tables.contains(name)) return error.ViewAlreadyExists;
+
+        // Lazy-allocate the sys_views B-tree on the first createView call.
+        if (self.pager.sys_views_root == 0) {
+            const views_root = try self.pager.allocPage();
+            self.pager.sys_views_root = views_root;
+            var views_pw = PageWriter.init(self.pager, views_root);
+            btree.initLeafPage(&views_pw, true);
+            try views_pw.commit();
+            try page0.writeHeader(self.pager);
+        }
+
+        const view_id = self.next_view_id;
+
+        const values = [_]row.Value{
+            .{ .text = name },
+            .{ .text = sql },
+        };
+        const row_size = row.encodedSize(&values);
+        const buf = try self.arena.child_allocator.alloc(u8, row_size);
+        defer self.arena.child_allocator.free(buf);
+        _ = row.encodeRow(&values, buf);
+        try btree.insertRow(self.pager, self.pager.sys_views_root, view_id, buf);
+
+        self.next_view_id = view_id + 1;
+
+        const alloc = self.arena.allocator();
+        const meta = ViewMeta{
+            .id = view_id,
+            .name = try alloc.dupe(u8, name),
+            .sql = try alloc.dupe(u8, sql),
+        };
+        try self.views.put(meta.name, meta);
+        return meta;
+    }
+
+    pub fn dropView(self: *Catalog, name: []const u8) !void {
+        const meta = self.views.get(name) orelse return error.ViewNotFound;
+        _ = try btree.RowidBTree.delete(self.pager, self.pager.sys_views_root, meta.id);
+        _ = self.views.remove(name);
+    }
+
     pub fn deinit(self: *Catalog) void {
-        // tables uses the backing allocator, so its internal array must be
-        // freed before the arena; the arena owns all the string/column data.
+        // tables/views use the backing allocator, so their internal arrays must
+        // be freed before the arena; the arena owns all string/column/sql data.
+        self.views.deinit();
         self.tables.deinit();
         self.arena.deinit();
     }

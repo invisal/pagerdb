@@ -80,6 +80,14 @@ pub const Executor = struct {
                 try self.db.createIndex(n.name, n.table, n.col_indices, n.is_unique, n.if_not_exists);
                 break :blk .{ .created = {} };
             },
+            .create_view => |n| blk: {
+                try self.db.createView(n.name, n.sql);
+                break :blk .{ .created = {} };
+            },
+            .drop_view => |n| blk: {
+                try self.db.dropView(n.name, n.if_exists);
+                break :blk .{ .created = {} };
+            },
             .begin => blk: {
                 try self.db.begin();
                 break :blk .{ .affected = 0 };
@@ -316,8 +324,11 @@ fn isSqlUserError(e: anyerror) bool {
         error.NoDefaultValue,
         error.UnknownFunction,
         error.WrongArgCount,
+        error.InvalidViewDefinition,
         // Schema / catalog errors
         error.TableAlreadyExists,
+        error.ViewAlreadyExists,
+        error.ViewNotFound,
         // Transaction errors
         error.TransactionAlreadyActive,
         error.NoActiveTransaction,

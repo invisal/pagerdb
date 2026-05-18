@@ -53,7 +53,7 @@ pub const ColType = enum(u8) {
 
 pub const DB_MAGIC: u32 = 0x50474442; // "PGDB"
 
-// 4+2+2+4+4+4+4+4+4+4+28 = 64 bytes
+// 4+2+2+4+4+4+4+4+4+4+4+24 = 64 bytes
 pub const DbHeader = extern struct {
     magic: u32,
     version_major: u16,
@@ -65,7 +65,8 @@ pub const DbHeader = extern struct {
     sys_columns_root: u32,
     sys_indexes_root: u32,
     sys_index_cols_root: u32,
-    _reserved: [28]u8,
+    sys_views_root: u32,
+    _reserved: [24]u8,
 };
 
 // 2+2+2+2+4+4+4+4 = 24 bytes
@@ -98,7 +99,7 @@ pub const FreePage = extern struct {
 // Compile-time size assertions
 comptime {
     std.debug.assert(@sizeOf(PageHeader) == 16);
-    std.debug.assert(@sizeOf(DbHeader) == 64); // 4+2+2+4+4+4+4+4+4+4+28
+    std.debug.assert(@sizeOf(DbHeader) == 64); // 4+2+2+4+4+4+4+4+4+4+4+24
     std.debug.assert(@sizeOf(BTreeHeader) == 24);
     std.debug.assert(@sizeOf(OverflowPage) == PAGE_SIZE);
 }

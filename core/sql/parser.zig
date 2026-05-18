@@ -117,6 +117,7 @@ pub const Parser = struct {
             .kw_update => .{ .update = try self.parseUpdate() },
             .kw_delete => .{ .delete = try self.parseDelete() },
             .kw_create => try self.parseCreate(),
+            .kw_drop => try self.parseDrop(),
             .kw_begin => blk: {
                 _ = self.advance();
                 break :blk .{ .begin = {} };
@@ -134,7 +135,7 @@ pub const Parser = struct {
                 const text = if (tok.kind == .eof) "end of input" else self.tokenText(tok);
                 self.error_message = std.fmt.allocPrint(
                     self.arena.allocator(),
-                    "[{d}] Unexpected '{s}': expected SELECT, INSERT, UPDATE, DELETE, CREATE, BEGIN, COMMIT, or ROLLBACK",
+                    "[{d}] Unexpected '{s}': expected SELECT, INSERT, UPDATE, DELETE, CREATE, DROP, BEGIN, COMMIT, or ROLLBACK",
                     .{ tok.start, text },
                 ) catch "";
                 return ParseError.UnexpectedToken;
@@ -577,16 +578,85 @@ pub const Parser = struct {
                 _ = try self.expect(.kw_index);
                 break :blk .{ .create_index = try self.parseCreateIndex(true) };
             },
+            .kw_view => blk: {
+                _ = self.advance(); // consume VIEW
+                break :blk .{ .create_view = try self.parseCreateView() };
+            },
             else => {
                 const tok = self.peek();
                 self.error_message = std.fmt.allocPrint(
                     self.arena.allocator(),
-                    "[{d}] Expected TABLE or INDEX after CREATE, got '{s}'",
+                    "[{d}] Expected TABLE, INDEX, UNIQUE INDEX, or VIEW after CREATE, got '{s}'",
                     .{ tok.start, self.tokenText(tok) },
                 ) catch "";
                 return ParseError.UnexpectedToken;
             },
         };
+    }
+
+    fn parseDrop(self: *Parser) ParseError!ast.Stmt {
+        _ = try self.expect(.kw_drop);
+        return switch (self.peek().kind) {
+            .kw_view => blk: {
+                _ = self.advance(); // consume VIEW
+                break :blk .{ .drop_view = try self.parseDropView() };
+            },
+            else => {
+                const tok = self.peek();
+                self.error_message = std.fmt.allocPrint(
+                    self.arena.allocator(),
+                    "[{d}] Expected VIEW after DROP, got '{s}'",
+                    .{ tok.start, self.tokenText(tok) },
+                ) catch "";
+                return ParseError.UnexpectedToken;
+            },
+        };
+    }
+
+    fn parseDropView(self: *Parser) ParseError!ast.DropViewStmt {
+        // DROP VIEW [IF EXISTS] name
+        var if_exists = false;
+        if (self.peek().kind == .kw_if) {
+            _ = self.advance(); // consume IF
+            _ = try self.expect(.kw_exists);
+            if_exists = true;
+        }
+        const name_tok = try self.expect(.identifier);
+        const name = try self.alloc().dupe(u8, self.tokenText(name_tok));
+        return ast.DropViewStmt{ .name = name, .if_exists = if_exists };
+    }
+
+    fn parseCreateView(self: *Parser) ParseError!ast.CreateViewStmt {
+        // CREATE VIEW name AS SELECT ...
+        const name_tok = try self.expect(.identifier);
+        const name = try self.alloc().dupe(u8, self.tokenText(name_tok));
+        _ = try self.expect(.kw_as);
+
+        // Validate next token is SELECT and record the byte offset where it starts.
+        const select_start_tok = self.peek();
+        if (select_start_tok.kind != .kw_select) {
+            self.error_message = std.fmt.allocPrint(
+                self.arena.allocator(),
+                "[{d}] Expected SELECT after AS in CREATE VIEW, got '{s}'",
+                .{ select_start_tok.start, self.tokenText(select_start_tok) },
+            ) catch "";
+            return ParseError.UnexpectedToken;
+        }
+        const sql_start = select_start_tok.start;
+
+        // Parse the SELECT to validate it and advance the token position.
+        // We discard the parsed AST and store the SQL text instead, keeping
+        // the catalog independent from the parser's arena lifetime.
+        _ = try self.parseSelect();
+
+        // End of SQL text: just before a trailing semicolon, or at end of input.
+        var sql_end: usize = self.src.len;
+        if (self.peek().kind == .semicolon) {
+            sql_end = self.peek().start;
+        }
+
+        const sql = try self.alloc().dupe(u8, self.src[sql_start..sql_end]);
+        return ast.CreateViewStmt{ .name = name, .sql = sql };
     }
 
     fn parseCreateIndex(self: *Parser, is_unique: bool) ParseError!ast.CreateIndexStmt {

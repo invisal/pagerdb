@@ -5,6 +5,7 @@ const catalog = @import("../../catalog.zig");
 const vtab_mod = @import("../../vtable/root.zig");
 const sf = @import("../scalar_func.zig");
 const agg_mod = @import("../cursor/agg_func.zig");
+const Parser = @import("../parser.zig").Parser;
 
 // ── Schema ─────────────────────────────────────────────────────────────────────
 
@@ -152,6 +153,16 @@ pub const LogicalCreateIndex = struct {
     if_not_exists: bool,
 };
 
+pub const LogicalCreateView = struct {
+    name: []const u8, // arena-owned
+    sql: []const u8, // arena-owned; the SELECT text to store
+};
+
+pub const LogicalDropView = struct {
+    name: []const u8, // arena-owned
+    if_exists: bool,
+};
+
 // Aggregate node: consumes all input rows, groups by group_by column indices,
 // and computes one aggregate result per group.  Output schema is:
 //   [group_key_cols..., agg_result_cols...]
@@ -216,6 +227,8 @@ pub const LogicalPlan = union(enum) {
     delete: LogicalDelete,
     create_table: LogicalCreateTable,
     create_index: LogicalCreateIndex,
+    create_view: LogicalCreateView,
+    drop_view: LogicalDropView,
     begin: void,
     commit: void,
     rollback: void,
@@ -234,7 +247,7 @@ pub const LogicalPlan = union(enum) {
             .insert_select => |n| n.schema,
             .update => |n| n.schema,
             .delete => |n| n.schema,
-            .const_scan, .create_table, .create_index, .begin, .commit, .rollback => Schema{ .table = "", .columns = &.{} },
+            .const_scan, .create_table, .create_index, .create_view, .drop_view, .begin, .commit, .rollback => Schema{ .table = "", .columns = &.{} },
         };
     }
 };
@@ -255,6 +268,7 @@ pub const PlanError = error{
     WrongArgCount,
     MultiplePrimaryKeys,
     PrimaryKeyMustBeInteger,
+    InvalidViewDefinition,
 };
 
 pub const LogicalPlanner = struct {
@@ -265,6 +279,9 @@ pub const LogicalPlanner = struct {
     // resolveExpr falls back to this schema when a column ref is not found in
     // the inner schema, producing outer_col_idx instead of col_idx.
     outer_schema: ?Schema = null,
+    // Tracks recursive view expansion depth to detect circular view definitions.
+    // Incremented before expanding a view, decremented after; error at >= 16.
+    view_depth: usize = 0,
 
     pub fn init(cat: *catalog.Catalog, allocator: std.mem.Allocator) LogicalPlanner {
         return .{ .cat = cat, .arena = std.heap.ArenaAllocator.init(allocator) };
@@ -290,6 +307,8 @@ pub const LogicalPlanner = struct {
             .delete => |s| try self.planDelete(s),
             .create_table => |s| try self.planCreateTable(s),
             .create_index => |s| try self.planCreateIndex(s),
+            .create_view => |s| try self.planCreateView(s),
+            .drop_view => |s| try self.planDropView(s),
             .begin => .{ .begin = {} },
             .commit => .{ .commit = {} },
             .rollback => .{ .rollback = {} },
@@ -753,6 +772,42 @@ pub const LogicalPlanner = struct {
             .col_indices = col_indices,
             .is_unique = stmt.is_unique,
             .if_not_exists = stmt.if_not_exists,
+        } };
+    }
+
+    fn planCreateView(self: *LogicalPlanner, stmt: ast.CreateViewStmt) PlanError!LogicalPlan {
+        if (self.cat.getTable(stmt.name) != null or self.cat.getView(stmt.name) != null) {
+            self.setError("View or table '{s}' already exists", .{stmt.name});
+            return PlanError.TableNotFound;
+        }
+
+        // Validate the stored SQL by parsing and planning it — this catches
+        // bad column references, unknown tables, type mismatches, etc.
+        var tmp_parser = Parser.init(stmt.sql, self.alloc());
+        const inner_stmt = tmp_parser.parse() catch {
+            self.error_message = tmp_parser.error_message;
+            return PlanError.InvalidViewDefinition;
+        };
+        if (inner_stmt != .select) {
+            self.setError("View body must be a SELECT statement", .{});
+            return PlanError.InvalidViewDefinition;
+        }
+        _ = try self.planSelect(inner_stmt.select);
+
+        return .{ .create_view = .{
+            .name = try self.alloc().dupe(u8, stmt.name),
+            .sql = try self.alloc().dupe(u8, stmt.sql),
+        } };
+    }
+
+    fn planDropView(self: *LogicalPlanner, stmt: ast.DropViewStmt) PlanError!LogicalPlan {
+        if (!stmt.if_exists and self.cat.getView(stmt.name) == null) {
+            self.setError("View '{s}' does not exist", .{stmt.name});
+            return PlanError.TableNotFound;
+        }
+        return .{ .drop_view = .{
+            .name = try self.alloc().dupe(u8, stmt.name),
+            .if_exists = stmt.if_exists,
         } };
     }
 
@@ -1422,8 +1477,47 @@ pub const LogicalPlanner = struct {
                             .schema = s,
                         };
                     }
+
+                    // Not a user table — check the view catalog.
+                    if (self.cat.getView(q.name)) |view_meta| {
+                        if (self.view_depth >= 16) {
+                            self.setError("View '{s}': circular view definition or recursion limit exceeded", .{q.name});
+                            return PlanError.InvalidViewDefinition;
+                        }
+                        self.view_depth += 1;
+                        defer self.view_depth -= 1;
+
+                        // Parse and plan the stored SELECT text recursively.
+                        var vp = Parser.init(view_meta.sql, self.alloc());
+                        const vstmt = vp.parse() catch {
+                            self.setError("View '{s}' has an invalid SQL definition", .{q.name});
+                            return PlanError.InvalidViewDefinition;
+                        };
+                        if (vstmt != .select) {
+                            self.setError("View '{s}' body is not a SELECT", .{q.name});
+                            return PlanError.InvalidViewDefinition;
+                        }
+                        const inner_plan = try self.planSelect(vstmt.select);
+                        const inner_schema = inner_plan.schema();
+
+                        // Re-label output columns with the effective name (alias or view name)
+                        // so outer queries can qualify columns as view_name.col or alias.col.
+                        const duped_eff = try self.alloc().dupe(u8, effective);
+                        const view_cols = try self.alloc().alloc(SchemaCol, inner_schema.columns.len);
+                        for (inner_schema.columns, 0..) |col, i| {
+                            view_cols[i] = .{
+                                .name = try self.alloc().dupe(u8, col.name),
+                                .table = duped_eff,
+                                .col_type = col.col_type,
+                                .nullable = col.nullable,
+                                .index = i,
+                            };
+                        }
+                        const view_schema = Schema{ .table = duped_eff, .columns = view_cols };
+                        break :blk ScanResult{ .plan = inner_plan, .schema = view_schema };
+                    }
                 }
-                // Not a user table — try the vtab registry (zero-arg access).
+                // Not a user table or view — try the vtab registry (zero-arg access).
                 const vt = vtab_mod.find(q.schema orelse "main", q.name) orelse {
                     self.setError("Table '{s}' does not exist", .{q.name});
                     return PlanError.TableNotFound;

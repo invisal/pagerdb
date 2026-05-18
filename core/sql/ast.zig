@@ -336,6 +336,16 @@ pub const CreateIndexStmt = struct {
     if_not_exists: bool,
 };
 
+pub const CreateViewStmt = struct {
+    name: []const u8, // arena-owned; the view name
+    sql: []const u8, // arena-owned; the SELECT text (body of the view)
+};
+
+pub const DropViewStmt = struct {
+    name: []const u8, // arena-owned
+    if_exists: bool,
+};
+
 pub const Stmt = union(enum) {
     select: SelectStmt,
     insert: InsertStmt,
@@ -343,6 +353,8 @@ pub const Stmt = union(enum) {
     delete: DeleteStmt,
     create_table: CreateTableStmt,
     create_index: CreateIndexStmt,
+    create_view: CreateViewStmt,
+    drop_view: DropViewStmt,
     begin: void,
     commit: void,
     rollback: void,
