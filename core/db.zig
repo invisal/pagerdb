@@ -211,6 +211,14 @@ pub const Db = struct {
         try self.pager.flush();
     }
 
+    pub fn dropTable(self: *Db, name: []const u8, if_exists: bool) !void {
+        self.cat.dropTable(name) catch |e| {
+            if (e == error.TableNotFound and if_exists) return;
+            return e;
+        };
+        try self.pager.flush();
+    }
+
     // Encode and insert a row, returning the assigned rowid.
     pub fn insert(
         self: *Db,

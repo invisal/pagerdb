@@ -351,6 +351,11 @@ pub const DropViewStmt = struct {
     if_exists: bool,
 };
 
+pub const DropTableStmt = struct {
+    name: []const u8, // arena-owned
+    if_exists: bool,
+};
+
 pub const Stmt = union(enum) {
     select: SelectStmt,
     insert: InsertStmt,
@@ -360,6 +365,7 @@ pub const Stmt = union(enum) {
     create_index: CreateIndexStmt,
     create_view: CreateViewStmt,
     drop_view: DropViewStmt,
+    drop_table: DropTableStmt,
     begin: void,
     commit: void,
     rollback: void,

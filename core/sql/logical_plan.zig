@@ -27,6 +27,7 @@ pub const LogicalDelete = root.LogicalDelete;
 pub const LogicalCreateTable = root.LogicalCreateTable;
 pub const LogicalCreateView = root.LogicalCreateView;
 pub const LogicalDropView = root.LogicalDropView;
+pub const LogicalDropTable = root.LogicalDropTable;
 pub const LogicalPlan = root.LogicalPlan;
 pub const LogicalPlanner = root.LogicalPlanner;
 pub const PlanError = root.PlanError;

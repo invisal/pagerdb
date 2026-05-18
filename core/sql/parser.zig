@@ -601,16 +601,33 @@ pub const Parser = struct {
                 _ = self.advance(); // consume VIEW
                 break :blk .{ .drop_view = try self.parseDropView() };
             },
+            .kw_table => blk: {
+                _ = self.advance(); // consume TABLE
+                break :blk .{ .drop_table = try self.parseDropTable() };
+            },
             else => {
                 const tok = self.peek();
                 self.error_message = std.fmt.allocPrint(
                     self.arena.allocator(),
-                    "[{d}] Expected VIEW after DROP, got '{s}'",
+                    "[{d}] Expected VIEW or TABLE after DROP, got '{s}'",
                     .{ tok.start, self.tokenText(tok) },
                 ) catch "";
                 return ParseError.UnexpectedToken;
             },
         };
+    }
+
+    fn parseDropTable(self: *Parser) ParseError!ast.DropTableStmt {
+        // DROP TABLE [IF EXISTS] name
+        var if_exists = false;
+        if (self.peek().kind == .kw_if) {
+            _ = self.advance(); // consume IF
+            _ = try self.expect(.kw_exists);
+            if_exists = true;
+        }
+        const name_tok = try self.expect(.identifier);
+        const name = try self.alloc().dupe(u8, self.tokenText(name_tok));
+        return ast.DropTableStmt{ .name = name, .if_exists = if_exists };
     }
 
     fn parseDropView(self: *Parser) ParseError!ast.DropViewStmt {

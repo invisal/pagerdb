@@ -88,6 +88,10 @@ pub const Executor = struct {
                 try self.db.dropView(n.name, n.if_exists);
                 break :blk .{ .created = {} };
             },
+            .drop_table => |n| blk: {
+                try self.db.dropTable(n.name, n.if_exists);
+                break :blk .{ .created = {} };
+            },
             .begin => blk: {
                 try self.db.begin();
                 break :blk .{ .affected = 0 };

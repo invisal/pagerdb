@@ -1,0 +1,59 @@
+statement ok
+CREATE TABLE t1 (id INTEGER, name TEXT)
+
+statement ok
+INSERT INTO t1 VALUES (1, 'alice')
+
+query IT
+SELECT id, name FROM t1
+----
+1
+alice
+
+statement ok
+DROP TABLE t1
+
+statement error
+SELECT id, name FROM t1
+
+# IF EXISTS does not error when table is absent
+statement ok
+DROP TABLE IF EXISTS t1
+
+# Re-create with the same name works after drop
+statement ok
+CREATE TABLE t1 (x INTEGER)
+
+statement ok
+INSERT INTO t1 VALUES (42)
+
+query I
+SELECT x FROM t1
+----
+42
+
+statement ok
+DROP TABLE t1
+
+# Drop table with indexes removes index catalog entries cleanly
+statement ok
+CREATE TABLE t2 (a INTEGER, b TEXT)
+
+statement ok
+CREATE UNIQUE INDEX idx_t2_a ON t2 (a)
+
+statement ok
+INSERT INTO t2 VALUES (1, 'x')
+
+statement ok
+DROP TABLE t2
+
+# Re-create t2 with same index name — would fail if catalog entry wasn't cleaned up
+statement ok
+CREATE TABLE t2 (a INTEGER, b TEXT)
+
+statement ok
+CREATE UNIQUE INDEX idx_t2_a ON t2 (a)
+
+statement ok
+DROP TABLE t2

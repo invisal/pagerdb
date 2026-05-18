@@ -550,6 +550,52 @@ pub const Catalog = struct {
         _ = self.views.remove(name);
     }
 
+    pub fn dropTable(self: *Catalog, name: []const u8) !void {
+        const table = self.tables.get(name) orelse return error.TableNotFound;
+
+        var tmp_arena = std.heap.ArenaAllocator.init(self.arena.child_allocator);
+        defer tmp_arena.deinit();
+        const tmp = tmp_arena.allocator();
+
+        // Delete from sys_tables.
+        _ = try btree.RowidBTree.delete(self.pager, self.pager.sys_tables_root, table.id);
+
+        // Collect and delete all sys_columns rows for this table.
+        var col_rowids: std.ArrayListUnmanaged(u64) = .empty;
+        var col_scan = try btree.RowidBTree.ScanIterator.init(self.pager, self.pager.sys_columns_root);
+        while (try col_scan.next()) |cell| {
+            const vals = try row.decodeRow(&COLUMNS_SCHEMA, cell.row_data, tmp);
+            if (@as(u64, @intCast(vals[COL.table_id].int)) == table.id) {
+                try col_rowids.append(tmp, cell.rowid);
+            }
+        }
+        for (col_rowids.items) |rowid| {
+            _ = try btree.RowidBTree.delete(self.pager, self.pager.sys_columns_root, rowid);
+        }
+
+        // Delete index catalog entries if any indexes exist.
+        if (self.pager.sys_indexes_root != 0) {
+            for (table.indexes) |idx| {
+                _ = try btree.RowidBTree.delete(self.pager, self.pager.sys_indexes_root, idx.id);
+
+                // Collect and delete all sys_index_cols rows for this index.
+                var icol_rowids: std.ArrayListUnmanaged(u64) = .empty;
+                var icol_scan = try btree.RowidBTree.ScanIterator.init(self.pager, self.pager.sys_index_cols_root);
+                while (try icol_scan.next()) |cell| {
+                    const vals = try row.decodeRow(&INDEX_COLS_SCHEMA, cell.row_data, tmp);
+                    if (@as(u64, @intCast(vals[IDXCOL.index_id].int)) == idx.id) {
+                        try icol_rowids.append(tmp, cell.rowid);
+                    }
+                }
+                for (icol_rowids.items) |rowid| {
+                    _ = try btree.RowidBTree.delete(self.pager, self.pager.sys_index_cols_root, rowid);
+                }
+            }
+        }
+
+        _ = self.tables.remove(name);
+    }
+
     pub fn deinit(self: *Catalog) void {
         // tables/views use the backing allocator, so their internal arrays must
         // be freed before the arena; the arena owns all string/column/sql data.

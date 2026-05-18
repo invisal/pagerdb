@@ -164,6 +164,11 @@ pub const LogicalDropView = struct {
     if_exists: bool,
 };
 
+pub const LogicalDropTable = struct {
+    name: []const u8, // arena-owned
+    if_exists: bool,
+};
+
 // Aggregate node: consumes all input rows, groups by group_by column indices,
 // and computes one aggregate result per group.  Output schema is:
 //   [group_key_cols..., agg_result_cols...]
@@ -230,6 +235,7 @@ pub const LogicalPlan = union(enum) {
     create_index: LogicalCreateIndex,
     create_view: LogicalCreateView,
     drop_view: LogicalDropView,
+    drop_table: LogicalDropTable,
     begin: void,
     commit: void,
     rollback: void,
@@ -248,7 +254,7 @@ pub const LogicalPlan = union(enum) {
             .insert_select => |n| n.schema,
             .update => |n| n.schema,
             .delete => |n| n.schema,
-            .const_scan, .create_table, .create_index, .create_view, .drop_view, .begin, .commit, .rollback => Schema{ .table = "", .columns = &.{} },
+            .const_scan, .create_table, .create_index, .create_view, .drop_view, .drop_table, .begin, .commit, .rollback => Schema{ .table = "", .columns = &.{} },
         };
     }
 };
@@ -310,6 +316,7 @@ pub const LogicalPlanner = struct {
             .create_index => |s| try self.planCreateIndex(s),
             .create_view => |s| try self.planCreateView(s),
             .drop_view => |s| try self.planDropView(s),
+            .drop_table => |s| try self.planDropTable(s),
             .begin => .{ .begin = {} },
             .commit => .{ .commit = {} },
             .rollback => .{ .rollback = {} },
@@ -810,6 +817,17 @@ pub const LogicalPlanner = struct {
             return PlanError.TableNotFound;
         }
         return .{ .drop_view = .{
+            .name = try self.alloc().dupe(u8, stmt.name),
+            .if_exists = stmt.if_exists,
+        } };
+    }
+
+    fn planDropTable(self: *LogicalPlanner, stmt: ast.DropTableStmt) PlanError!LogicalPlan {
+        if (!stmt.if_exists and self.cat.getTable(stmt.name) == null) {
+            self.setError("Table '{s}' does not exist", .{stmt.name});
+            return PlanError.TableNotFound;
+        }
+        return .{ .drop_table = .{
             .name = try self.alloc().dupe(u8, stmt.name),
             .if_exists = stmt.if_exists,
         } };
