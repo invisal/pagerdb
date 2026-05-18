@@ -1,0 +1,123 @@
+# View tests
+
+# Setup base tables
+statement ok
+CREATE TABLE employees (id INTEGER PRIMARY KEY, name TEXT NOT NULL, dept_id INTEGER NOT NULL, salary INTEGER NOT NULL)
+
+statement ok
+CREATE TABLE departments (id INTEGER PRIMARY KEY, dept_name TEXT NOT NULL)
+
+statement ok
+INSERT INTO departments VALUES (1, 'Engineering')
+
+statement ok
+INSERT INTO departments VALUES (2, 'Marketing')
+
+statement ok
+INSERT INTO employees VALUES (1, 'alice', 1, 90000)
+
+statement ok
+INSERT INTO employees VALUES (2, 'bob', 2, 70000)
+
+statement ok
+INSERT INTO employees VALUES (3, 'carol', 1, 85000)
+
+# Basic CREATE VIEW
+statement ok
+CREATE VIEW eng_employees AS SELECT id, name, salary FROM employees WHERE dept_id = 1
+
+# SELECT from view
+query ITI rowsort
+SELECT id, name, salary FROM eng_employees
+----
+1
+alice
+90000
+3
+carol
+85000
+
+# SELECT with WHERE on top of view
+query ITI
+SELECT id, name, salary FROM eng_employees WHERE salary > 87000
+----
+1
+alice
+90000
+
+# SELECT with alias on view
+query ITI rowsort
+SELECT e.id, e.name, e.salary FROM eng_employees AS e
+----
+1
+alice
+90000
+3
+carol
+85000
+
+# View with JOIN
+statement ok
+CREATE VIEW emp_dept AS SELECT e.name AS emp_name, d.dept_name FROM employees AS e JOIN departments AS d ON e.dept_id = d.id
+
+query TT rowsort
+SELECT emp_name, dept_name FROM emp_dept
+----
+alice
+Engineering
+bob
+Marketing
+carol
+Engineering
+
+# View with aggregate
+statement ok
+CREATE VIEW dept_headcount AS SELECT dept_id, COUNT(*) AS headcount FROM employees GROUP BY dept_id
+
+query II rowsort
+SELECT dept_id, headcount FROM dept_headcount
+----
+1
+2
+2
+1
+
+# Duplicate view name is an error
+statement error
+CREATE VIEW eng_employees AS SELECT id FROM employees
+
+# View name colliding with table name is an error
+statement error
+CREATE VIEW employees AS SELECT id FROM employees
+
+# SELECT from nonexistent name is an error
+statement error
+SELECT * FROM no_such_view
+
+# DROP VIEW
+statement ok
+DROP VIEW eng_employees
+
+# After DROP VIEW, name no longer resolves
+statement error
+SELECT * FROM eng_employees
+
+# DROP VIEW IF EXISTS on nonexistent view does not error
+statement ok
+DROP VIEW IF EXISTS eng_employees
+
+# DROP VIEW without IF EXISTS on nonexistent view is an error
+statement error
+DROP VIEW eng_employees
+
+# Re-create a dropped view under the same name
+statement ok
+CREATE VIEW eng_employees AS SELECT id, name FROM employees WHERE dept_id = 1
+
+query IT rowsort
+SELECT id, name FROM eng_employees
+----
+1
+alice
+3
+carol

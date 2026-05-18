@@ -197,6 +197,19 @@ pub const Db = struct {
         try self.pager.flush();
     }
 
+    pub fn createView(self: *Db, name: []const u8, sql: []const u8) !void {
+        _ = try self.cat.createView(name, sql);
+        try self.pager.flush();
+    }
+
+    pub fn dropView(self: *Db, name: []const u8, if_exists: bool) !void {
+        self.cat.dropView(name) catch |e| {
+            if (e == error.ViewNotFound and if_exists) return;
+            return e;
+        };
+        try self.pager.flush();
+    }
+
     // Encode and insert a row, returning the assigned rowid.
     pub fn insert(
         self: *Db,

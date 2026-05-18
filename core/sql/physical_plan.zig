@@ -76,6 +76,16 @@ pub const PhysicalCreateIndex = struct {
     if_not_exists: bool,
 };
 
+pub const PhysicalCreateView = struct {
+    name: []const u8,
+    sql: []const u8,
+};
+
+pub const PhysicalDropView = struct {
+    name: []const u8,
+    if_exists: bool,
+};
+
 pub const PhysicalJoin = struct {
     left: PhysicalPlan,
     right: PhysicalPlan,
@@ -119,6 +129,8 @@ pub const PhysicalPlan = union(enum) {
     delete: PhysicalDelete,
     create_table: PhysicalCreateTable,
     create_index: PhysicalCreateIndex,
+    create_view: PhysicalCreateView,
+    drop_view: PhysicalDropView,
     begin: void,
     commit: void,
     rollback: void,
@@ -139,7 +151,7 @@ pub const PhysicalPlan = union(enum) {
             .insert_select => |n| n.schema,
             .update => |n| n.schema,
             .delete => |n| n.schema,
-            .create_table, .create_index, .begin, .commit, .rollback => lp.Schema{ .table = "", .columns = &.{} },
+            .create_table, .create_index, .create_view, .drop_view, .begin, .commit, .rollback => lp.Schema{ .table = "", .columns = &.{} },
         };
     }
 };
@@ -189,6 +201,8 @@ pub const PhysicalPlanner = struct {
                 .is_unique = n.is_unique,
                 .if_not_exists = n.if_not_exists,
             } },
+            .create_view => |n| .{ .create_view = .{ .name = n.name, .sql = n.sql } },
+            .drop_view => |n| .{ .drop_view = .{ .name = n.name, .if_exists = n.if_exists } },
             .begin => .{ .begin = {} },
             .commit => .{ .commit = {} },
             .rollback => .{ .rollback = {} },
