@@ -163,6 +163,69 @@ pub const PhysicalPlan = union(enum) {
     }
 };
 
+// ── Correlation detection ──────────────────────────────────────────────────────
+
+// Returns true if expr directly contains an outer_col_idx node — meaning it
+// references a column from an enclosing query.  Does NOT recurse into nested
+// subquery/in_subquery nodes because those have their own outer context.
+fn exprHasOuterRef(expr: ee.ExecExpr) bool {
+    return switch (expr) {
+        .outer_col_idx => true,
+        .binary => |b| exprHasOuterRef(b.left) or exprHasOuterRef(b.right),
+        .unary => |u| exprHasOuterRef(u.operand),
+        .func_call => |f| for (f.args) |a| {
+            if (exprHasOuterRef(a)) break true;
+        } else false,
+        .cast => |c| exprHasOuterRef(c.operand),
+        .in_list => |il| blk: {
+            if (exprHasOuterRef(il.operand)) break :blk true;
+            for (il.list) |e| if (exprHasOuterRef(e)) break :blk true;
+            break :blk false;
+        },
+        .case_ => |c| blk: {
+            for (c.when_clauses) |w| {
+                if (exprHasOuterRef(w.cond) or exprHasOuterRef(w.then)) break :blk true;
+            }
+            if (c.else_) |e| if (exprHasOuterRef(e)) break :blk true;
+            break :blk false;
+        },
+        .is_null => |n| exprHasOuterRef(n.operand),
+        // Nested subqueries own their outer context — refs inside them are
+        // relative to that subquery's outer row, not to ours.
+        .subquery, .in_subquery => false,
+        else => false,
+    };
+}
+
+// Returns true if any expression within plan references an outer_col_idx,
+// meaning the plan's result can change per outer row (it is correlated).
+fn planHasOuterRef(plan: PhysicalPlan) bool {
+    return switch (plan) {
+        .seq_scan, .vtab_scan, .const_scan, .point_lookup => false,
+        .filter => |f| exprHasOuterRef(f.predicate) or planHasOuterRef(f.input),
+        .project => |p| blk: {
+            for (p.exprs) |e| if (exprHasOuterRef(e)) break :blk true;
+            break :blk planHasOuterRef(p.input);
+        },
+        .aggregate => |ag| blk: {
+            for (ag.agg_specs) |spec| {
+                if (spec.input_expr) |e| if (exprHasOuterRef(e)) break :blk true;
+            }
+            break :blk planHasOuterRef(ag.input.*);
+        },
+        .sort => |s| blk: {
+            for (s.keys) |k| if (exprHasOuterRef(k.expr)) break :blk true;
+            break :blk planHasOuterRef(s.input.*);
+        },
+        .distinct => |d| planHasOuterRef(d.input.*),
+        .join => |j| blk: {
+            if (j.condition) |c| if (exprHasOuterRef(c)) break :blk true;
+            break :blk planHasOuterRef(j.left) or planHasOuterRef(j.right);
+        },
+        else => false,
+    };
+}
+
 // ── Planner ────────────────────────────────────────────────────────────────────
 
 pub const PhysicalPlanner = struct {
@@ -313,6 +376,7 @@ pub const PhysicalPlanner = struct {
                     .db = self.db_opaque.?,
                     .exec_fn = self.in_subquery_exec.?,
                     .negated = isq.negated,
+                    .is_correlated = planHasOuterRef(inner.*),
                 };
                 break :blk .{ .in_subquery = node };
             },

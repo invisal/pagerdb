@@ -10,11 +10,14 @@
 //   zig build slt -- --jobs 4                            — limit to 4 parallel workers
 //   zig build slt -- --json out.json                     — write per-file results as JSON
 //   zig build slt -- --commit abc123                     — embed git SHA in JSON output
+//
+// Each file runs with a 256 MB memory cap (hard limit, not configurable).
 
 const std = @import("std");
 const runner = @import("runner.zig");
 
 const DEFAULT_TEST_DIR = "testing/sqllogictest/tests";
+const MEM_LIMIT_BYTES: usize = 256 * 1024 * 1024;
 const Dir = std.Io.Dir;
 
 // Per-file result written by the owning worker thread.
@@ -22,6 +25,8 @@ const Dir = std.Io.Dir;
 const FileResult = struct {
     passed: usize = 0,
     failed: usize = 0,
+    peak_mem_bytes: usize = 0,
+    db_size_bytes: usize = 0,
 };
 
 const WorkerCtx = struct {
@@ -34,6 +39,79 @@ const WorkerCtx = struct {
     thread_count: usize,
     file_results: []FileResult,
 };
+
+// Wraps a backing allocator to track current and peak bytes in use.
+// Alloc/resize/remap return failure once MEM_LIMIT_BYTES would be exceeded.
+// Thread-safety: one CountingAllocator per file/thread, no sharing.
+const CountingAllocator = struct {
+    backing: std.mem.Allocator,
+    current_bytes: usize = 0,
+    peak_bytes: usize = 0,
+
+    pub fn allocator(self: *CountingAllocator) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &vtable };
+    }
+
+    const vtable = std.mem.Allocator.VTable{
+        .alloc = alloc,
+        .resize = resize,
+        .remap = remap,
+        .free = free,
+    };
+
+    fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
+        const self: *CountingAllocator = @ptrCast(@alignCast(ctx));
+        if (self.current_bytes + len > MEM_LIMIT_BYTES) return null;
+        const result = self.backing.rawAlloc(len, alignment, ret_addr) orelse return null;
+        self.current_bytes += len;
+        if (self.current_bytes > self.peak_bytes) self.peak_bytes = self.current_bytes;
+        return result;
+    }
+
+    fn resize(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) bool {
+        const self: *CountingAllocator = @ptrCast(@alignCast(ctx));
+        if (new_len > memory.len) {
+            const delta = new_len - memory.len;
+            if (self.current_bytes + delta > MEM_LIMIT_BYTES) return false;
+        }
+        if (!self.backing.rawResize(memory, alignment, new_len, ret_addr)) return false;
+        if (new_len > memory.len) {
+            self.current_bytes += new_len - memory.len;
+            if (self.current_bytes > self.peak_bytes) self.peak_bytes = self.current_bytes;
+        } else {
+            self.current_bytes -= memory.len - new_len;
+        }
+        return true;
+    }
+
+    fn remap(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) ?[*]u8 {
+        const self: *CountingAllocator = @ptrCast(@alignCast(ctx));
+        if (new_len > memory.len) {
+            const delta = new_len - memory.len;
+            if (self.current_bytes + delta > MEM_LIMIT_BYTES) return null;
+        }
+        const result = self.backing.rawRemap(memory, alignment, new_len, ret_addr) orelse return null;
+        if (new_len > memory.len) {
+            self.current_bytes += new_len - memory.len;
+            if (self.current_bytes > self.peak_bytes) self.peak_bytes = self.current_bytes;
+        } else {
+            self.current_bytes -= memory.len - new_len;
+        }
+        return result;
+    }
+
+    fn free(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret_addr: usize) void {
+        const self: *CountingAllocator = @ptrCast(@alignCast(ctx));
+        self.backing.rawFree(memory, alignment, ret_addr);
+        self.current_bytes -= memory.len;
+    }
+};
+
+fn fmtMem(bytes: usize) struct { value: usize, unit: []const u8 } {
+    if (bytes >= 1024 * 1024) return .{ .value = bytes / (1024 * 1024), .unit = "MB" };
+    if (bytes >= 1024) return .{ .value = bytes / 1024, .unit = "KB" };
+    return .{ .value = bytes, .unit = "B" };
+}
 
 const JsonSummary = struct { passed: usize, failed: usize, files: usize };
 const JsonFile = struct { path: []const u8, passed: usize, failed: usize };
@@ -164,21 +242,39 @@ fn workerFn(ctx: WorkerCtx) void {
     for (ctx.paths, 0..) |path, file_idx| {
         if (std.hash.Wyhash.hash(0, path) % ctx.thread_count != ctx.thread_id) continue;
 
-        var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+        // CountingAllocator wraps page_allocator and serves as the backing
+        // store for both the file-level arena and per-statement arenas (via
+        // page_alloc in runner). This lets us measure peak bytes in use at
+        // any point during the file run, and enforce the 256 MB hard cap.
+        var counter = CountingAllocator{ .backing = std.heap.page_allocator };
+        var arena = std.heap.ArenaAllocator.init(counter.allocator());
         defer arena.deinit();
 
-        const result = runner.runFile(arena.allocator(), ctx.io, path, ctx.show_errors, ctx.agent, ctx.sqlite) catch |err| {
-            std.debug.print("error in {s}: {s}\n", .{ path, @errorName(err) });
+        var db_bytes: usize = 0;
+        const result = runner.runFile(arena.allocator(), counter.allocator(), ctx.io, path, ctx.show_errors, ctx.agent, ctx.sqlite, &db_bytes) catch |err| {
+            const db = fmtMem(db_bytes);
+            if (err == error.OutOfMemory) {
+                std.debug.print("{s}: exceeded 256 MB memory limit [db:{d}{s}]\n", .{ path, db.value, db.unit });
+            } else {
+                std.debug.print("error in {s}: {s} [db:{d}{s}]\n", .{ path, @errorName(err), db.value, db.unit });
+            }
             ctx.file_results[file_idx].failed += 1;
             if (ctx.agent) break;
             continue;
         };
 
-        ctx.file_results[file_idx] = .{ .passed = result.passed, .failed = result.failed };
+        const peak = fmtMem(counter.peak_bytes);
+        const db = fmtMem(db_bytes);
+        ctx.file_results[file_idx] = .{
+            .passed = result.passed,
+            .failed = result.failed,
+            .peak_mem_bytes = counter.peak_bytes,
+            .db_size_bytes = db_bytes,
+        };
 
         const status = if (result.failed == 0) "ok" else "FAILED";
-        std.debug.print("{s}: {d} passed, {d} failed [{s}]\n", .{
-            path, result.passed, result.failed, status,
+        std.debug.print("{s}: {d} passed, {d} failed [{s}] db:{d}{s} peak:{d}{s}\n", .{
+            path, result.passed, result.failed, status, db.value, db.unit, peak.value, peak.unit,
         });
 
         if (ctx.agent and result.failed > 0) break;

@@ -28,14 +28,18 @@ pub const SubqueryExecFn = *const fn (
     alloc: std.mem.Allocator,
 ) anyerror!?EvalValue;
 
-// Executes an IN subquery and returns all first-column values from every
-// result row.  The returned slice is allocated with alloc and owned by the caller.
+// Executes an IN subquery.  For non-correlated subqueries (is_correlated=false
+// on InSubquery) the caller passes a non-null cache so the result set is
+// materialised once and reused; for correlated ones cache is null and the
+// cursor is streamed afresh for every outer row.
 pub const InSubqueryExecFn = *const fn (
+    needle: EvalValue,
     inner: *anyopaque,
     db: *anyopaque,
     outer: []const row.Value,
     alloc: std.mem.Allocator,
-) anyerror![]EvalValue;
+    cache: ?*types.SubqueryCache,
+) anyerror!bool;
 
 pub const ExecExpr = union(enum) {
     int_lit: i64,
@@ -66,6 +70,9 @@ pub const ExecExpr = union(enum) {
         db: *anyopaque, // *Db
         exec_fn: InSubqueryExecFn,
         negated: bool,
+        // True when the inner plan contains outer_col_idx refs — result changes
+        // per outer row, so caching is disabled and the cursor is re-streamed.
+        is_correlated: bool,
     };
     pub const Case = struct {
         pub const WhenClause = struct { cond: ExecExpr, then: ExecExpr };
