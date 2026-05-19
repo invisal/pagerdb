@@ -13,10 +13,30 @@ const EvalContext = eval.EvalContext;
 
 pub const BATCH_SIZE: usize = 64;
 
-pub const Row = struct {
+// BorrowedRow: values are allocated on the batch arena and are valid only until
+// the next cursor.next() call.  Call .clone(alloc) to copy into a longer-lived
+// allocator when a row must survive past the current batch.
+pub const BorrowedRow = struct {
     rowid: u64,
     values: []row_mod.Value,
+
+    pub fn clone(self: BorrowedRow, alloc: Allocator) !BorrowedRow {
+        const vals = try alloc.alloc(row_mod.Value, self.values.len);
+        for (self.values, 0..) |v, i| vals[i] = try v.clone(alloc);
+        return .{ .rowid = self.rowid, .values = vals };
+    }
 };
+
+// Resets an arena between batch allocations.
+// Debug: free_all returns pages to the OS — any stale pointer access faults immediately.
+// Release: retain_capacity keeps pages mapped for reuse, making the next alloc fast.
+fn resetArena(arena: *std.heap.ArenaAllocator) void {
+    if (@import("builtin").mode == .Debug) {
+        _ = arena.reset(.free_all);
+    } else {
+        _ = arena.reset(.retain_capacity);
+    }
+}
 
 // ── Leaf cursors ───────────────────────────────────────────────────────────────
 
@@ -25,15 +45,22 @@ pub const Row = struct {
 // additional heap allocation per batch beyond the Row slice itself.
 pub const SeqScanCursor = struct {
     it: Db.DbRowIterator,
+    batch_arena: std.heap.ArenaAllocator,
 
-    pub fn next(self: *SeqScanCursor, ctx: EvalContext) !?[]Row {
-        var buf = try ctx.alloc.alloc(Row, BATCH_SIZE);
+    pub fn deinit(self: *SeqScanCursor) void {
+        self.batch_arena.deinit();
+    }
+
+    pub fn next(self: *SeqScanCursor, _: EvalContext) !?[]BorrowedRow {
+        resetArena(&self.batch_arena);
+        const ba = self.batch_arena.allocator();
+        var buf = try ba.alloc(BorrowedRow, BATCH_SIZE);
         var n: usize = 0;
         while (n < BATCH_SIZE) {
-            const hit = try self.it.next(ctx.alloc) orelse break;
+            const hit = try self.it.next(ba) orelse break;
             // Append __rowid, __pageid, __slotid as the last three values so
             // they align with the synthetic SchemaCol entries injected by buildSchema.
-            const vals = try ctx.alloc.alloc(row_mod.Value, hit.values.len + 3);
+            const vals = try ba.alloc(row_mod.Value, hit.values.len + 3);
             @memcpy(vals[0..hit.values.len], hit.values);
             vals[hit.values.len] = .{ .int = @intCast(hit.rowid) };
             vals[hit.values.len + 1] = .{ .int = @intCast(hit.page_id) };
@@ -52,12 +79,19 @@ pub const VTabScanCursor = struct {
     cursor: vtab_mod.VTabCursor,
     // 1-indexed rowid, incremented for every row returned across all batches
     rowid: u64,
+    batch_arena: std.heap.ArenaAllocator,
 
-    pub fn next(self: *VTabScanCursor, ctx: EvalContext) !?[]Row {
-        var buf: std.ArrayListUnmanaged(Row) = .empty;
+    pub fn deinit(self: *VTabScanCursor) void {
+        self.batch_arena.deinit();
+    }
+
+    pub fn next(self: *VTabScanCursor, _: EvalContext) !?[]BorrowedRow {
+        resetArena(&self.batch_arena);
+        const ba = self.batch_arena.allocator();
+        var buf: std.ArrayListUnmanaged(BorrowedRow) = .empty;
         while (buf.items.len < BATCH_SIZE) {
-            const vals = try self.cursor.next(ctx.alloc) orelse break;
-            try buf.append(ctx.alloc, .{ .rowid = self.rowid, .values = vals });
+            const vals = try self.cursor.next(ba) orelse break;
+            try buf.append(ba, .{ .rowid = self.rowid, .values = vals });
             self.rowid += 1;
         }
         if (buf.items.len == 0) return null;
@@ -67,13 +101,14 @@ pub const VTabScanCursor = struct {
 
 // Produces exactly one empty row for SELECT without FROM.
 // The projection layer above evaluates expressions against this row.
+// Single allocation in the query arena — called at most once per query.
 pub const ConstantScanCursor = struct {
     first: bool = true,
 
-    pub fn next(self: *ConstantScanCursor, ctx: EvalContext) !?[]Row {
+    pub fn next(self: *ConstantScanCursor, ctx: EvalContext) !?[]BorrowedRow {
         if (!self.first) return null;
         self.first = false;
-        const t = try ctx.alloc.alloc(Row, 1);
+        const t = try ctx.alloc.alloc(BorrowedRow, 1);
         t[0] = .{ .rowid = 0, .values = try ctx.alloc.alloc(row_mod.Value, 0) };
         return t;
     }
@@ -81,13 +116,15 @@ pub const ConstantScanCursor = struct {
 
 // Point lookups fetch exactly one row (or nothing) from the btree.
 // We return it as a 1-element batch so the calling loop stays uniform.
+// The row is pre-built into the query arena at open() time; next() wraps it
+// in a slice allocated from the query arena (called at most once).
 pub const PointLookupCursor = struct {
-    row: ?Row,
+    row: ?BorrowedRow,
 
-    pub fn next(self: *PointLookupCursor, ctx: EvalContext) !?[]Row {
+    pub fn next(self: *PointLookupCursor, ctx: EvalContext) !?[]BorrowedRow {
         const r = self.row orelse return null;
         self.row = null;
-        const buf = try ctx.alloc.alloc(Row, 1);
+        const buf = try ctx.alloc.alloc(BorrowedRow, 1);
         buf[0] = r;
         return buf;
     }
@@ -98,17 +135,29 @@ pub const PointLookupCursor = struct {
 pub const FilterCursor = struct {
     input: *Cursor,
     predicate: ee.ExecExpr,
+    // Owns memory for the filtered row-pointer array and predicate eval strings.
+    // Reset at the start of each next() call; never reset between inner loops
+    // so predicate strings from failed batches accumulate (bounded, freed next call).
+    batch_arena: std.heap.ArenaAllocator,
 
     // Pull batches from the input and return only the rows that pass the
     // predicate.  We keep pulling until we have at least one match or the
     // input is exhausted, so callers never receive an empty non-null slice.
-    pub fn next(self: *FilterCursor, ctx: EvalContext) !?[]Row {
-        var out: std.ArrayList(Row) = .empty;
+    pub fn next(self: *FilterCursor, ctx: EvalContext) !?[]BorrowedRow {
+        resetArena(&self.batch_arena);
+        const ba = self.batch_arena.allocator();
+        // Route evalExpr string allocations (e.g. CAST) into our own batch arena.
+        const eval_ctx = EvalContext{ .outer = ctx.outer, .alloc = ctx.alloc, .batch_alloc = ba, .subquery_cache = ctx.subquery_cache };
+        var out: std.ArrayListUnmanaged(BorrowedRow) = .empty;
         while (out.items.len == 0) {
+            // input.next() resets the input cursor's own batch arena, invalidating
+            // its previous batch.  Re-init out so appends start fresh.
             const batch = try self.input.next(ctx) orelse return null;
+            out = .empty;
             for (batch) |r| {
-                const ev = try eval.evalExpr(self.predicate, r.values, ctx);
-                if (eval.isTruthy(ev)) try out.append(ctx.alloc, r);
+                const ev = try eval.evalExpr(self.predicate, r.values, eval_ctx);
+                // r is a struct copy; values pointer still lives in input's arena.
+                if (eval.isTruthy(ev)) try out.append(ba, r);
             }
         }
         return out.items;
@@ -117,20 +166,28 @@ pub const FilterCursor = struct {
     pub fn deinit(self: *FilterCursor, a: Allocator) void {
         self.input.deinit(a);
         a.destroy(self.input);
+        self.batch_arena.deinit();
     }
 };
 
 pub const ProjectCursor = struct {
     input: *Cursor,
     exprs: []ee.ExecExpr,
+    // Owns computed value slices and any strings produced by expression evaluation.
+    // Passthrough column values are shallow-copied from the input's batch arena
+    // and remain valid as long as the input cursor has not been advanced.
+    batch_arena: std.heap.ArenaAllocator,
 
-    pub fn next(self: *ProjectCursor, ctx: EvalContext) !?[]Row {
+    pub fn next(self: *ProjectCursor, ctx: EvalContext) !?[]BorrowedRow {
+        resetArena(&self.batch_arena);
+        const ba = self.batch_arena.allocator();
+        const eval_ctx = EvalContext{ .outer = ctx.outer, .alloc = ctx.alloc, .batch_alloc = ba, .subquery_cache = ctx.subquery_cache };
         const batch = try self.input.next(ctx) orelse return null;
-        const out = try ctx.alloc.alloc(Row, batch.len);
+        const out = try ba.alloc(BorrowedRow, batch.len);
         for (batch, 0..) |r, i| {
-            const projected = try ctx.alloc.alloc(row_mod.Value, self.exprs.len);
+            const projected = try ba.alloc(row_mod.Value, self.exprs.len);
             for (self.exprs, 0..) |expr, j| {
-                const v = try eval.evalExpr(expr, r.values, ctx);
+                const v = try eval.evalExpr(expr, r.values, eval_ctx);
                 projected[j] = evalValueToRowValue(v);
             }
             out[i] = .{ .rowid = r.rowid, .values = projected };
@@ -141,6 +198,7 @@ pub const ProjectCursor = struct {
     pub fn deinit(self: *ProjectCursor, a: Allocator) void {
         self.input.deinit(a);
         a.destroy(self.input);
+        self.batch_arena.deinit();
     }
 };
 
@@ -193,10 +251,10 @@ pub const AggregateCursor = struct {
     input: *Cursor,
     agg_specs: []const AggSpec,
     group_by: []const usize, // column indices; empty = single global group
-    result: ?[]Row, // materialized output, null until first next() call
+    result: ?[]BorrowedRow, // materialized output, null until first next() call
     pos: usize, // next unread position within result
 
-    pub fn next(self: *AggregateCursor, ctx: EvalContext) !?[]Row {
+    pub fn next(self: *AggregateCursor, ctx: EvalContext) !?[]BorrowedRow {
         if (self.result == null) self.result = try self.compute(ctx);
         const rows = self.result.?;
         if (self.pos >= rows.len) return null;
@@ -213,7 +271,7 @@ pub const AggregateCursor = struct {
     // Pulls all rows from input, groups them, and returns the result slice.
     // Hashing finds candidate groups quickly; value equality confirms matches
     // to handle collisions and content-based text/blob comparison.
-    fn compute(self: *AggregateCursor, ctx: EvalContext) ![]Row {
+    fn compute(self: *AggregateCursor, ctx: EvalContext) ![]BorrowedRow {
         const a = ctx.alloc;
         var groups: std.ArrayList(GroupState) = .empty;
         var buckets = std.AutoHashMap(u64, std.ArrayListUnmanaged(usize)).init(a);
@@ -274,7 +332,10 @@ pub const AggregateCursor = struct {
                         const val = v.?;
                         // Skip SQL NULLs — same behaviour as the non-distinct path.
                         if (val == .null) continue;
-                        const gop = try g.distinct_sets[i].getOrPut(a, val);
+                        // Clone into the query arena before storing: val may contain a string
+                        // pointer into the batch arena that will be reset on the next batch.
+                        const val_owned = try val.clone(a);
+                        const gop = try g.distinct_sets[i].getOrPut(a, val_owned);
                         if (gop.found_existing) continue;
                     }
                     try spec.func.step(g.acc_states[i], v, a);
@@ -294,7 +355,7 @@ pub const AggregateCursor = struct {
             try groups.append(a, .{ .key_values = &.{}, .acc_states = acc_states, .distinct_sets = distinct_sets });
         }
 
-        const out = try a.alloc(Row, groups.items.len);
+        const out = try a.alloc(BorrowedRow, groups.items.len);
         for (groups.items, 0..) |g, row_idx| {
             const values = try a.alloc(row_mod.Value, self.group_by.len + self.agg_specs.len);
 
@@ -365,10 +426,10 @@ fn compareValues(a: row_mod.Value, b: row_mod.Value) std.math.Order {
 pub const SortCursor = struct {
     input: *Cursor,
     keys: []ee.ExecSortKey,
-    result: ?[]Row, // null until first next() triggers compute()
+    result: ?[]BorrowedRow, // null until first next() triggers compute()
     pos: usize,
 
-    pub fn next(self: *SortCursor, ctx: EvalContext) !?[]Row {
+    pub fn next(self: *SortCursor, ctx: EvalContext) !?[]BorrowedRow {
         if (self.result == null) self.result = try self.compute(ctx);
         const rows = self.result.?;
         if (self.pos >= rows.len) return null;
@@ -385,15 +446,17 @@ pub const SortCursor = struct {
     // Pairs a row with its pre-evaluated sort key values so the comparison
     // function can run without error propagation.
     const SortRow = struct {
-        row: Row,
+        row: BorrowedRow,
         key_values: []row_mod.Value,
     };
 
-    fn compute(self: *SortCursor, ctx: EvalContext) ![]Row {
+    fn compute(self: *SortCursor, ctx: EvalContext) ![]BorrowedRow {
         const a = ctx.alloc;
         var sort_rows: std.ArrayList(SortRow) = .empty;
 
-        // Materialise all rows and eagerly evaluate the sort key expressions.
+        // Materialise all rows into the query arena before the batch resets.
+        // Each input.next() call resets the batch arena (via the leaf cursor),
+        // so rows must be cloned into ctx.alloc to survive across batches.
         while (try self.input.next(ctx)) |batch| {
             for (batch) |r| {
                 const key_vals = try a.alloc(row_mod.Value, self.keys.len);
@@ -401,7 +464,7 @@ pub const SortCursor = struct {
                     const ev = try eval.evalExpr(key.expr, r.values, ctx);
                     key_vals[i] = evalValueToRowValue(ev);
                 }
-                try sort_rows.append(a, .{ .row = r, .key_values = key_vals });
+                try sort_rows.append(a, .{ .row = try r.clone(a), .key_values = key_vals });
             }
         }
 
@@ -415,7 +478,7 @@ pub const SortCursor = struct {
             }
         }.lessThan);
 
-        const out = try a.alloc(Row, sort_rows.items.len);
+        const out = try a.alloc(BorrowedRow, sort_rows.items.len);
         for (sort_rows.items, 0..) |sr, i| out[i] = sr.row;
         return out;
     }
@@ -430,10 +493,10 @@ pub const SortCursor = struct {
 pub const DistinctCursor = struct {
     input: *Cursor,
     col_count: usize,
-    result: ?[]Row,
+    result: ?[]BorrowedRow,
     pos: usize,
 
-    pub fn next(self: *DistinctCursor, ctx: EvalContext) !?[]Row {
+    pub fn next(self: *DistinctCursor, ctx: EvalContext) !?[]BorrowedRow {
         if (self.result == null) self.result = try self.compute(ctx);
         const rows = self.result.?;
         if (self.pos >= rows.len) return null;
@@ -447,7 +510,7 @@ pub const DistinctCursor = struct {
         a.destroy(self.input);
     }
 
-    fn compute(self: *DistinctCursor, ctx: EvalContext) ![]Row {
+    fn compute(self: *DistinctCursor, ctx: EvalContext) ![]BorrowedRow {
         const a = ctx.alloc;
         // Build a full-column index array so we can reuse hashGroupRow/groupKeyMatches.
         const all_cols = try a.alloc(usize, self.col_count);
@@ -464,7 +527,7 @@ pub const DistinctCursor = struct {
             buckets.deinit();
         }
 
-        var output: std.ArrayList(Row) = .empty;
+        var output: std.ArrayList(BorrowedRow) = .empty;
 
         while (try self.input.next(ctx)) |batch| {
             for (batch) |r| {
@@ -486,7 +549,9 @@ pub const DistinctCursor = struct {
                     const gop = try buckets.getOrPut(h);
                     if (!gop.found_existing) gop.value_ptr.* = .empty;
                     try gop.value_ptr.append(a, new_idx);
-                    try output.append(a, r);
+                    // Clone into query arena: r.values points into the batch arena
+                    // which will be reset on the next input.next() call.
+                    try output.append(a, try r.clone(a));
                 }
             }
         }
@@ -505,24 +570,37 @@ pub const DistinctCursor = struct {
 // padding the right-side columns.
 pub const JoinCursor = struct {
     left: *Cursor,
-    right_rows: []Row, // all right rows, materialized at open time
+    right_rows: []BorrowedRow, // all right rows, materialized at open time into query arena
     right_pos: usize, // current position within right_rows for this left row
-    left_batch: []Row, // current batch pulled from left cursor
+    left_batch: []BorrowedRow, // current batch from left cursor; lives in left's batch arena
     left_pos: usize, // position within left_batch
     condition: ?ee.ExecExpr, // null for CROSS JOIN (every left/right pair emitted)
     is_left_join: bool, // true = LEFT JOIN: unmatched left rows emitted with NULLs
     right_col_count: usize, // number of right-side columns (needed for NULL padding)
     had_right_match: bool, // tracks whether the current left row matched any right row
+    // Owns combined value slices for the current output batch.
+    // Reset each time we fetch a new left batch (left_batch exhausted).
+    batch_arena: std.heap.ArenaAllocator,
 
     // Pull combined (left ++ right) rows that satisfy the join condition.
     // Returns up to BATCH_SIZE rows per call, or null when exhausted.
-    pub fn next(self: *JoinCursor, ctx: EvalContext) !?[]Row {
-        const a = ctx.alloc;
-        var out: std.ArrayList(Row) = .empty;
+    //
+    // left_batch lives in the left cursor's own batch arena and stays valid
+    // across multiple JoinCursor.next() calls for the same left batch because
+    // we only call left.next() (which resets the left cursor's arena) once
+    // left_batch is fully consumed.
+    pub fn next(self: *JoinCursor, ctx: EvalContext) !?[]BorrowedRow {
+        const ba = self.batch_arena.allocator();
+        const eval_ctx = EvalContext{ .outer = ctx.outer, .alloc = ctx.alloc, .batch_alloc = ba, .subquery_cache = ctx.subquery_cache };
+        var out: std.ArrayListUnmanaged(BorrowedRow) = .empty;
 
         while (true) {
-            // Advance to the next left row when the current one is exhausted.
+            // Fetch the next left batch when the current one is exhausted.
+            // Reset our arena here: all combined rows from the previous left batch
+            // are no longer needed, and left.next() may reorder left's arena.
             while (self.left_pos >= self.left_batch.len) {
+                resetArena(&self.batch_arena);
+                out = .empty;
                 self.left_batch = try self.left.next(ctx) orelse {
                     if (out.items.len > 0) return out.items;
                     return null;
@@ -541,17 +619,17 @@ pub const JoinCursor = struct {
 
                 // Build a combined values slice: left_vals ++ right_vals.
                 // col_idx values in the condition already reference merged positions.
-                const combined = try a.alloc(row_mod.Value, left_row.values.len + right_row.values.len);
+                const combined = try ba.alloc(row_mod.Value, left_row.values.len + right_row.values.len);
                 @memcpy(combined[0..left_row.values.len], left_row.values);
                 @memcpy(combined[left_row.values.len..], right_row.values);
 
                 const should_emit = if (self.condition) |cond| blk: {
-                    const ev = try eval.evalExpr(cond, combined, ctx);
+                    const ev = try eval.evalExpr(cond, combined, eval_ctx);
                     break :blk eval.isTruthy(ev);
                 } else true;
                 if (should_emit) {
                     self.had_right_match = true;
-                    try out.append(a, .{ .rowid = left_row.rowid, .values = combined });
+                    try out.append(ba, .{ .rowid = left_row.rowid, .values = combined });
                 }
 
                 if (out.items.len >= BATCH_SIZE) return out.items;
@@ -564,10 +642,10 @@ pub const JoinCursor = struct {
             // LEFT JOIN: if no right row matched, emit the left row with NULLs for
             // all right-side columns so the left row still appears in the result.
             if (self.is_left_join and !self.had_right_match) {
-                const combined = try a.alloc(row_mod.Value, left_row.values.len + self.right_col_count);
+                const combined = try ba.alloc(row_mod.Value, left_row.values.len + self.right_col_count);
                 @memcpy(combined[0..left_row.values.len], left_row.values);
                 @memset(combined[left_row.values.len..], .null);
-                try out.append(a, .{ .rowid = left_row.rowid, .values = combined });
+                try out.append(ba, .{ .rowid = left_row.rowid, .values = combined });
             }
             self.had_right_match = false;
 
@@ -580,6 +658,7 @@ pub const JoinCursor = struct {
     pub fn deinit(self: *JoinCursor, a: Allocator) void {
         self.left.deinit(a);
         a.destroy(self.left);
+        self.batch_arena.deinit();
     }
 };
 
@@ -624,8 +703,17 @@ pub fn execInSubquery(
         var results: std.ArrayListUnmanaged(eval.EvalValue) = .empty;
         while (try cur.next(ctx)) |batch| {
             for (batch) |result_row| {
-                if (result_row.values.len > 0)
-                    try results.append(alloc, eval.rowValToEval(result_row.values[0]));
+                if (result_row.values.len > 0) {
+                    const raw = eval.rowValToEval(result_row.values[0]);
+                    // result_row.values live in the cursor's batch arena which resets
+                    // on the next cur.next() call.  Clone text into alloc so cached
+                    // results remain valid for the lifetime of the query.
+                    const owned: eval.EvalValue = switch (raw) {
+                        .text => |s| .{ .text = try alloc.dupe(u8, s) },
+                        else => raw,
+                    };
+                    try results.append(alloc, owned);
+                }
             }
         }
         const cached = try results.toOwnedSlice(alloc);
@@ -674,7 +762,13 @@ pub fn execScalarSubquery(
     defer cur.deinit(alloc);
     const batch = try cur.next(ctx) orelse return null;
     if (batch.len == 0 or batch[0].values.len == 0) return null;
-    return eval.rowValToEval(batch[0].values[0]);
+    const raw = eval.rowValToEval(batch[0].values[0]);
+    // Clone text into alloc before defer fires cur.deinit(), which frees the
+    // leaf cursor's batch arena where the string data lives.
+    return switch (raw) {
+        .text => |s| eval.EvalValue{ .text = try alloc.dupe(u8, s) },
+        else => raw,
+    };
 }
 
 // ── Cursor union ───────────────────────────────────────────────────────────────
@@ -692,25 +786,29 @@ pub const Cursor = union(enum) {
     join: *JoinCursor,
 
     pub fn open(plan: pp.PhysicalPlan, db: *Db, a: Allocator) !Cursor {
-        // Default context for open(): no outer row (top-level plan), alloc = a.
-        // Used only for the join's right-side materialisation at open time.
-        const init_ctx = EvalContext{ .outer = &.{}, .alloc = a };
         return switch (plan) {
             .const_scan => .{ .const_scan = .{} },
-            .seq_scan => |n| .{ .seq_scan = .{ .it = try db.scanOpen(n.table) } },
+            .seq_scan => |n| .{ .seq_scan = .{
+                .it = try db.scanOpen(n.table),
+                .batch_arena = std.heap.ArenaAllocator.init(a),
+            } },
             .vtab_scan => |n| blk: {
                 const vtab_cursor = try n.vtab.open(a, &db.cat, n.args);
-                break :blk .{ .vtab_scan = .{ .cursor = vtab_cursor, .rowid = 1 } };
+                break :blk .{ .vtab_scan = .{
+                    .cursor = vtab_cursor,
+                    .rowid = 1,
+                    .batch_arena = std.heap.ArenaAllocator.init(a),
+                } };
             },
             .point_lookup => |n| blk: {
                 const vals = try db.getByRowid(n.table, n.rowid, a);
-                const r: ?Row = if (vals) |v| blk2: {
+                const r: ?BorrowedRow = if (vals) |v| blk2: {
                     const full = try a.alloc(row_mod.Value, v.len + 3);
                     @memcpy(full[0..v.len], v);
                     full[v.len] = .{ .int = @intCast(n.rowid) };
                     full[v.len + 1] = .null;
                     full[v.len + 2] = .null;
-                    break :blk2 Row{ .rowid = n.rowid, .values = full };
+                    break :blk2 BorrowedRow{ .rowid = n.rowid, .values = full };
                 } else null;
                 break :blk .{ .point_lookup = .{ .row = r } };
             },
@@ -719,6 +817,7 @@ pub const Cursor = union(enum) {
                 fc.input = try a.create(Cursor);
                 fc.input.* = try open(n.input, db, a);
                 fc.predicate = n.predicate;
+                fc.batch_arena = std.heap.ArenaAllocator.init(a);
                 break :blk .{ .filter = fc };
             },
             .project => |n| blk: {
@@ -726,6 +825,7 @@ pub const Cursor = union(enum) {
                 pc.input = try a.create(Cursor);
                 pc.input.* = try open(n.input, db, a);
                 pc.exprs = n.exprs;
+                pc.batch_arena = std.heap.ArenaAllocator.init(a);
                 break :blk .{ .project = pc };
             },
             .aggregate => |n| blk: {
@@ -756,13 +856,15 @@ pub const Cursor = union(enum) {
                 break :blk .{ .distinct = dc };
             },
             .join => |n| blk: {
-                // Materialize the right side once so each left row can scan it
-                // without re-opening a cursor.
-                var right_rows: std.ArrayList(Row) = .empty;
+                // Materialize the right side once into the query arena so each left row
+                // can scan it without re-opening a cursor.  The right cursor owns its own
+                // batch arena (per the per-cursor design), so rows are cloned into `a`.
+                const right_init_ctx = EvalContext{ .outer = &.{}, .alloc = a };
+                var right_rows: std.ArrayList(BorrowedRow) = .empty;
                 var right_cur = try open(n.right, db, a);
                 defer right_cur.deinit(a);
-                while (try right_cur.next(init_ctx)) |batch| {
-                    try right_rows.appendSlice(a, batch);
+                while (try right_cur.next(right_init_ctx)) |batch| {
+                    for (batch) |r| try right_rows.append(a, try r.clone(a));
                 }
                 const jc = try a.create(JoinCursor);
                 jc.left = try a.create(Cursor);
@@ -775,13 +877,14 @@ pub const Cursor = union(enum) {
                 jc.is_left_join = n.join_type == .left;
                 jc.right_col_count = n.right.schema().columns.len;
                 jc.had_right_match = false;
+                jc.batch_arena = std.heap.ArenaAllocator.init(a);
                 break :blk .{ .join = jc };
             },
             else => error.UnsupportedPlan,
         };
     }
 
-    pub fn next(self: *Cursor, ctx: EvalContext) !?[]Row {
+    pub fn next(self: *Cursor, ctx: EvalContext) !?[]BorrowedRow {
         return switch (self.*) {
             .seq_scan => |*s| s.next(ctx),
             .const_scan => |*s| s.next(ctx),
@@ -798,6 +901,8 @@ pub const Cursor = union(enum) {
 
     pub fn deinit(self: *Cursor, a: Allocator) void {
         switch (self.*) {
+            .seq_scan => |*s| s.deinit(),
+            .vtab_scan => |*s| s.deinit(),
             .filter => |f| f.deinit(a),
             .project => |p| p.deinit(a),
             .aggregate => |ag| ag.deinit(a),

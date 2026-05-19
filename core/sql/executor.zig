@@ -11,8 +11,9 @@ const cursor_mod = @import("cursor/root.zig");
 
 // ── Result types ───────────────────────────────────────────────────────────────
 
-// Row is defined alongside the cursor layer so that both share the same type.
-pub const Row = cursor_mod.Row;
+// Row re-exported from the cursor layer for callers that store result rows.
+// Rows in ResultSet.rows are cloned into the result arena and are fully owned.
+pub const Row = cursor_mod.BorrowedRow;
 
 pub const ResultSet = struct {
     columns: [][]const u8, // column names, arena-owned
@@ -233,7 +234,9 @@ fn collectRows(
     var cur = try cursor_mod.Cursor.open(plan, db, ctx.alloc);
     defer cur.deinit(ctx.alloc);
     while (try cur.next(ctx)) |batch| {
-        try out.appendSlice(ctx.alloc, batch);
+        // batch rows are BorrowedRows on the batch arena; clone each one into
+        // the query arena (ctx.alloc) before the next next() call resets the batch.
+        for (batch) |r| try out.append(ctx.alloc, try r.clone(ctx.alloc));
     }
 }
 

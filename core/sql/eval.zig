@@ -10,16 +10,21 @@ pub const SubqueryCache = types.SubqueryCache;
 pub const ExecExpr = ee.ExecExpr;
 
 // Execution context passed through evalExpr and cursor next() calls.
-// outer: the current outer query row, used to evaluate outer_col_idx nodes
-//        in correlated subqueries.  Empty slice for top-level queries.
-// alloc: arena allocator for any allocations evalExpr needs to make
-//        (CAST to text, etc.).
-// subquery_cache: per-query cache for non-correlated IN subquery results.
-//        Null inside correlated subquery executions or when not provided.
+// alloc:       query-lifetime arena; survives the entire query execution.
+// batch_alloc: the calling cursor's own batch arena allocator, used for
+//              temporary allocations inside evalExpr (e.g. CAST to text).
+//              Each cursor sets this to its own arena before calling evalExpr.
+//              Null falls back to alloc (subquery callers, unit tests).
+// outer:       current outer-query row for correlated subquery resolution.
 pub const EvalContext = struct {
     outer: []const row.Value,
     alloc: std.mem.Allocator,
+    batch_alloc: ?std.mem.Allocator = null,
     subquery_cache: ?*types.SubqueryCache = null,
+
+    pub fn batchAlloc(self: EvalContext) std.mem.Allocator {
+        return self.batch_alloc orelse self.alloc;
+    }
 };
 
 pub fn evalExpr(
@@ -216,8 +221,8 @@ fn evalCast(
         },
         .text, .blob => switch (val) {
             .text => val,
-            .int => |n| .{ .text = try std.fmt.allocPrint(ctx.alloc, "{d}", .{n}) },
-            .real => |f| .{ .text = try std.fmt.allocPrint(ctx.alloc, "{d}", .{f}) },
+            .int => |n| .{ .text = try std.fmt.allocPrint(ctx.batchAlloc(), "{d}", .{n}) },
+            .real => |f| .{ .text = try std.fmt.allocPrint(ctx.batchAlloc(), "{d}", .{f}) },
             .bool_ => |b| .{ .text = if (b) "1" else "0" },
             .null_ => unreachable,
         },
