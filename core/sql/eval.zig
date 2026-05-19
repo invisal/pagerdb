@@ -6,6 +6,7 @@ const types = @import("types.zig");
 
 pub const EvalValue = types.EvalValue;
 pub const EvalError = types.EvalError;
+pub const SubqueryCache = types.SubqueryCache;
 pub const ExecExpr = ee.ExecExpr;
 
 // Execution context passed through evalExpr and cursor next() calls.
@@ -13,9 +14,12 @@ pub const ExecExpr = ee.ExecExpr;
 //        in correlated subqueries.  Empty slice for top-level queries.
 // alloc: arena allocator for any allocations evalExpr needs to make
 //        (CAST to text, etc.).
+// subquery_cache: per-query cache for non-correlated IN subquery results.
+//        Null inside correlated subquery executions or when not provided.
 pub const EvalContext = struct {
     outer: []const row.Value,
     alloc: std.mem.Allocator,
+    subquery_cache: ?*types.SubqueryCache = null,
 };
 
 pub fn evalExpr(
@@ -51,14 +55,11 @@ pub fn evalExpr(
         .in_subquery => |isq| blk: {
             const operand = try evalExpr(isq.operand, row_values, ctx);
             if (operand == .null_) break :blk .{ .null_ = {} };
-            // Run the subquery and collect all first-column values.
-            const set = try isq.exec_fn(isq.inner, isq.db, row_values, ctx.alloc);
-            for (set) |v| {
-                if (compareValues(operand, v) == .eq) {
-                    break :blk .{ .bool_ = !isq.negated };
-                }
-            }
-            break :blk .{ .bool_ = isq.negated };
+            // Pass the cache only for non-correlated subqueries; correlated ones
+            // get null so execInSubquery knows to stream without caching.
+            const cache = if (!isq.is_correlated) ctx.subquery_cache else null;
+            const found = try isq.exec_fn(operand, isq.inner, isq.db, row_values, ctx.alloc, cache);
+            break :blk .{ .bool_ = found != isq.negated };
         },
     };
 }
@@ -265,7 +266,7 @@ fn evalFunc(
     return f.func.eval(evaled);
 }
 
-fn compareValues(a: EvalValue, b: EvalValue) std.math.Order {
+pub fn compareValues(a: EvalValue, b: EvalValue) std.math.Order {
     return switch (a) {
         .int => |av| switch (b) {
             .int => |bv| std.math.order(av, bv),

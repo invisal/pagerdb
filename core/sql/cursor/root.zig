@@ -585,29 +585,74 @@ pub const JoinCursor = struct {
 
 // ── Scalar subquery executor ───────────────────────────────────────────────────
 
-// Executes a scalar subquery and returns the first column of the first result
-// Executes an IN subquery and returns all first-column values from every result
-// row, allocated with alloc.  Registered as InSubqueryExecFn in executor.zig.
+// Executes an IN subquery check for needle against the subquery's first column.
+//
+// Non-correlated (cache != null): the result set is the same for every outer
+// row, so we materialise it once into the per-query arena and cache it by
+// plan pointer.  Subsequent calls are a cheap linear scan of the cached slice.
+// The cache is propagated into nested subquery contexts so inner non-correlated
+// subqueries also get cached on their first evaluation.
+//
+// Correlated (cache == null): the result varies per outer row, so we open a
+// fresh cursor each call and stream rows through a private arena that is freed
+// on return.  Memory stays O(batch_size) regardless of table size or nesting.
 pub fn execInSubquery(
+    needle: eval.EvalValue,
     inner: *anyopaque,
     db_ptr: *anyopaque,
     outer: []const row_mod.Value,
     alloc: Allocator,
-) anyerror![]eval.EvalValue {
+    cache: ?*eval.SubqueryCache,
+) anyerror!bool {
     const plan: *pp.PhysicalPlan = @ptrCast(@alignCast(inner));
     const db: *Db = @ptrCast(@alignCast(db_ptr));
-    const ctx = EvalContext{ .outer = outer, .alloc = alloc };
-    var cur = try Cursor.open(plan.*, db, alloc);
-    defer cur.deinit(alloc);
-    var results: std.ArrayListUnmanaged(eval.EvalValue) = .empty;
+
+    if (cache) |c| {
+        // Cache hit: scan the previously materialised result set.
+        if (c.get(inner)) |cached| {
+            for (cached) |v| {
+                if (eval.compareValues(needle, v) == .eq) return true;
+            }
+            return false;
+        }
+
+        // Cache miss: execute once, store in per-query arena, then check.
+        // Propagate the cache so nested non-correlated subqueries are also cached.
+        const ctx = EvalContext{ .outer = outer, .alloc = alloc, .subquery_cache = cache };
+        var cur = try Cursor.open(plan.*, db, alloc);
+        defer cur.deinit(alloc);
+        var results: std.ArrayListUnmanaged(eval.EvalValue) = .empty;
+        while (try cur.next(ctx)) |batch| {
+            for (batch) |result_row| {
+                if (result_row.values.len > 0)
+                    try results.append(alloc, eval.rowValToEval(result_row.values[0]));
+            }
+        }
+        const cached = try results.toOwnedSlice(alloc);
+        try c.put(alloc, inner, cached);
+        for (cached) |v| {
+            if (eval.compareValues(needle, v) == .eq) return true;
+        }
+        return false;
+    }
+
+    // Correlated: stream with a private arena freed on return.
+    // Pass null cache so nested allocations do not escape into a dead arena.
+    var tmp = std.heap.ArenaAllocator.init(alloc);
+    defer tmp.deinit();
+    const a = tmp.allocator();
+    const ctx = EvalContext{ .outer = outer, .alloc = a, .subquery_cache = null };
+    var cur = try Cursor.open(plan.*, db, a);
+    defer cur.deinit(a);
     while (try cur.next(ctx)) |batch| {
         for (batch) |result_row| {
             if (result_row.values.len > 0) {
-                try results.append(alloc, eval.rowValToEval(result_row.values[0]));
+                if (eval.compareValues(needle, eval.rowValToEval(result_row.values[0])) == .eq)
+                    return true;
             }
         }
     }
-    return results.toOwnedSlice(alloc);
+    return false;
 }
 
 // row.  Registered as the SubqueryExecFn in executor.zig so PhysicalPlan can

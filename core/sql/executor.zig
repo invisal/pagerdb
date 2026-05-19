@@ -116,8 +116,11 @@ pub const Executor = struct {
         errdefer arena.deinit();
         const a = arena.allocator();
 
+        // Per-query cache for non-correlated IN subquery results.
+        // Entries are allocated on the per-query arena and freed with it.
+        var cache = eval.SubqueryCache{};
         var result_rows: std.ArrayList(Row) = .empty;
-        const ctx = eval.EvalContext{ .outer = &.{}, .alloc = a };
+        const ctx = eval.EvalContext{ .outer = &.{}, .alloc = a, .subquery_cache = &cache };
         try collectRows(plan, self.db, &result_rows, ctx);
 
         const schema = plan.schema();

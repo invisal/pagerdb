@@ -18,6 +18,7 @@ const Database = core.Database;
 const InMemoryPager = core.InMemoryPager;
 const execute = core.execute;
 const Dir = std.Io.Dir;
+const PAGE_SIZE = core.PAGE_SIZE;
 
 // Path where the agent report is written on first failure in --agent mode.
 const AGENT_REPORT_PATH = "testing/sqllogictest/last_error.md";
@@ -221,12 +222,24 @@ pub const RunResult = struct {
     failed: usize,
 };
 
+// Returns the total bytes consumed by all allocated pages in the backend.
+// For SQLite (opaque handle) we cannot query this, so we return 0.
+fn backendSizeBytes(backend: Backend) usize {
+    return switch (backend) {
+        .pagerdb => |db| @as(usize, db.pager.total_pages) * PAGE_SIZE,
+        .sqlite => 0,
+    };
+}
+
 // show_errors: print up to this many individual failure messages per file.
 // 0 = suppress all individual failure output (summary-only mode).
 // agent: stop at first failure, write a markdown report (diff + DB state) to
 // testing/sqllogictest/last_error.md, then print a one-line instruction to stdout.
 // sqlite: run against an in-memory SQLite3 instance instead of PagerDB.
-pub fn runFile(alloc: Allocator, io: std.Io, path: []const u8, show_errors: usize, agent: bool, sqlite: bool) !RunResult {
+// page_alloc: backing allocator used for per-statement arenas; passing the
+// same CountingAllocator that backs the file-level arena lets the caller track
+// total peak memory (file state + peak transient execution memory) in one place.
+pub fn runFile(alloc: Allocator, page_alloc: Allocator, io: std.Io, path: []const u8, show_errors: usize, agent: bool, sqlite: bool, db_bytes_out: ?*usize) !RunResult {
     const std_file = try Dir.cwd().openFile(io, path, .{ .mode = .read_only });
     defer std_file.close(io);
 
@@ -246,6 +259,10 @@ pub fn runFile(alloc: Allocator, io: std.Io, path: []const u8, show_errors: usiz
     defer switch (backend) {
         .pagerdb => |db| db.close(),
         .sqlite => |db| _ = c.sqlite3_close(db),
+    };
+    // Runs before the close defer (LIFO), so the pager is still live when we read total_pages.
+    defer if (db_bytes_out) |p| {
+        p.* = backendSizeBytes(backend);
     };
 
     var result = RunResult{ .passed = 0, .failed = 0 };
@@ -271,10 +288,10 @@ pub fn runFile(alloc: Allocator, io: std.Io, path: []const u8, show_errors: usiz
                     skip_next = false;
                     continue;
                 }
-                // Per-statement arena backed by page_allocator so that deinit()
-                // actually returns memory to the OS rather than being a no-op
-                // against the file-level arena.
-                var stmt_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+                // Per-statement arena backed by page_alloc (the same CountingAllocator
+                // that backs the file-level arena) so that transient execution memory
+                // is included in peak tracking and the limit applies globally.
+                var stmt_arena = std.heap.ArenaAllocator.init(page_alloc);
                 defer stmt_arena.deinit();
                 const print_err = agent or (show_errors > 0 and failures_shown < show_errors);
                 const report: ?*std.ArrayList(u8) = if (agent) &report_buf else null;
@@ -295,7 +312,7 @@ pub fn runFile(alloc: Allocator, io: std.Io, path: []const u8, show_errors: usiz
                     skip_next = false;
                     continue;
                 }
-                var stmt_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+                var stmt_arena = std.heap.ArenaAllocator.init(page_alloc);
                 defer stmt_arena.deinit();
                 const print_err = agent or (show_errors > 0 and failures_shown < show_errors);
                 const report: ?*std.ArrayList(u8) = if (agent) &report_buf else null;
