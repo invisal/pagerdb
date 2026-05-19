@@ -16,6 +16,8 @@ alice
 bob
 
 # TVF alias allows qualified column reference
+# generate_series is a PagerDB/PostgreSQL extension; SQLite has no equivalent.
+skipif sqlite
 query I
 SELECT gs.generate_series FROM generate_series(5) AS gs ORDER BY 1;
 ----
@@ -39,6 +41,7 @@ SELECT o.id, u.name FROM orders AS o INNER JOIN users AS u ON o.user_id = u.id;
 alice
 
 # JOIN two aliased TVFs — keeps values that appear in both ranges
+skipif sqlite
 query I
 SELECT gs.generate_series
 FROM generate_series(10) AS gs
@@ -58,6 +61,7 @@ CREATE TABLE items (id INTEGER NOT NULL, label TEXT NOT NULL);
 statement ok
 INSERT INTO items VALUES (1, 'one'), (2, 'two'), (3, 'three');
 
+skipif sqlite
 query I
 SELECT COUNT(*) FROM items AS i INNER JOIN generate_series(4) AS gs ON i.id = gs.generate_series;
 ----

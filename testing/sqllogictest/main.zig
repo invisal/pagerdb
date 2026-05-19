@@ -6,6 +6,7 @@
 //   zig build slt -- path/to/test.slt                    — run specific file(s)
 //   zig build slt -- --show-errors 5                     — show up to 5 failure details per file
 //   zig build slt -- --agent                             — stop at first failure, write full diff and DB state to last_error.md
+//   zig build slt -- --sqlite                            — run against SQLite3 instead of PagerDB
 //   zig build slt -- --jobs 4                            — limit to 4 parallel workers
 //   zig build slt -- --json out.json                     — write per-file results as JSON
 //   zig build slt -- --commit abc123                     — embed git SHA in JSON output
@@ -28,6 +29,7 @@ const WorkerCtx = struct {
     paths: []const []const u8,
     show_errors: usize,
     agent: bool,
+    sqlite: bool,
     thread_id: usize,
     thread_count: usize,
     file_results: []FileResult,
@@ -52,6 +54,7 @@ pub fn main(init: std.process.Init) !void {
     var scan_dir: []const u8 = DEFAULT_TEST_DIR;
     var show_errors: usize = 0;
     var agent: bool = false;
+    var sqlite: bool = false;
     var n_jobs: ?usize = null;
     var json_path: ?[]const u8 = null;
     var commit: []const u8 = "";
@@ -68,6 +71,8 @@ pub fn main(init: std.process.Init) !void {
             show_errors = std.fmt.parseInt(usize, args[i], 10) catch 0;
         } else if (std.mem.eql(u8, args[i], "--agent")) {
             agent = true;
+        } else if (std.mem.eql(u8, args[i], "--sqlite")) {
+            sqlite = true;
         } else if (std.mem.eql(u8, args[i], "--jobs") and i + 1 < args.len) {
             i += 1;
             n_jobs = std.fmt.parseInt(usize, args[i], 10) catch null;
@@ -127,6 +132,7 @@ pub fn main(init: std.process.Init) !void {
             .paths = all_files.items,
             .show_errors = show_errors,
             .agent = agent,
+            .sqlite = sqlite,
             .thread_id = id,
             .thread_count = thread_count,
             .file_results = file_results,
@@ -161,7 +167,7 @@ fn workerFn(ctx: WorkerCtx) void {
         var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
         defer arena.deinit();
 
-        const result = runner.runFile(arena.allocator(), ctx.io, path, ctx.show_errors, ctx.agent) catch |err| {
+        const result = runner.runFile(arena.allocator(), ctx.io, path, ctx.show_errors, ctx.agent, ctx.sqlite) catch |err| {
             std.debug.print("error in {s}: {s}\n", .{ path, @errorName(err) });
             ctx.file_results[file_idx].failed += 1;
             if (ctx.agent) break;

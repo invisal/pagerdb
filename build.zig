@@ -82,8 +82,10 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("testing/sqllogictest/main.zig"),
         .target = target,
         .optimize = optimize,
+        .link_libc = true,
     });
     slt_mod.addImport("core", core_mod);
+    slt_mod.linkSystemLibrary("sqlite3", .{});
 
     const slt_exe = b.addExecutable(.{
         .name = "sqllogictest",

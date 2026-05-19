@@ -1,0 +1,138 @@
+# Reproduction: DELETE with WHERE clause incorrectly deletes rows that don't
+# match the predicate.
+#
+# Minimal case: both rows have col0 > 9602; DELETE WHERE col0 < 9602 should
+# delete 0 rows, but instead deletes all rows.
+
+statement ok
+CREATE TABLE t_del_repro(pk INTEGER PRIMARY KEY, col0 INTEGER, col1 FLOAT, col2 TEXT, col3 INTEGER, col4 FLOAT, col5 TEXT)
+
+statement ok
+INSERT INTO t_del_repro VALUES(189,9888,652.93,'kfssx',2008,4451.14,'oycij')
+
+statement ok
+INSERT INTO t_del_repro VALUES(2,9978,7211.99,'yydvx',1127,264.77,'pwlal')
+
+# Verify the rows exist and col0 values are correct before DELETE.
+# rowsort compares values as strings: "189" < "2", so pk=189 row sorts first.
+query II rowsort
+SELECT pk, col0 FROM t_del_repro
+----
+189
+9888
+2
+9978
+
+# The filter on its own must match nothing.
+query I
+SELECT COUNT(*) FROM t_del_repro WHERE col0 < 9602
+----
+0
+
+# DELETE using the same predicate — should be a no-op.
+statement ok
+DELETE FROM t_del_repro WHERE col0 < 9602
+
+# Both rows must still be present.
+query II rowsort
+SELECT pk, col0 FROM t_del_repro
+----
+189
+9888
+2
+9978
+
+statement ok
+DROP TABLE t_del_repro
+
+# ── Larger case: sentinel row pk=476 must survive a partial delete ─────────────
+# The upstream failure involved ~70 rows. pk=476 has col0=9888 and col3=9985,
+# so it must not be deleted by WHERE col0 < 9602.
+
+statement ok
+CREATE TABLE t_del_large(pk INTEGER PRIMARY KEY, col0 INTEGER, col1 FLOAT, col2 TEXT, col3 INTEGER, col4 FLOAT, col5 TEXT)
+
+statement ok
+INSERT INTO t_del_large VALUES(0,7604,6400.99,'jtdmr',5312,6498.28,'kpkaq')
+
+statement ok
+INSERT INTO t_del_large VALUES(1,9374,2705.20,'rhsum',4761,3420.14,'esfln')
+
+statement ok
+INSERT INTO t_del_large VALUES(2,4397,1316.97,'aefkg',8752,9846.48,'ynrgj')
+
+statement ok
+INSERT INTO t_del_large VALUES(3,5026,3945.23,'xmhfb',9037,7603.70,'aqpyl')
+
+statement ok
+INSERT INTO t_del_large VALUES(4,7174,1378.80,'gsbwj',2551,1241.60,'dcpwu')
+
+statement ok
+INSERT INTO t_del_large VALUES(5,6873,8064.97,'zxcvb',1843,5432.10,'lmnop')
+
+statement ok
+INSERT INTO t_del_large VALUES(6,1234,2345.60,'abcde',7890,1234.50,'fghij')
+
+statement ok
+INSERT INTO t_del_large VALUES(7,8765,4321.00,'klmno',3456,7890.10,'pqrst')
+
+statement ok
+INSERT INTO t_del_large VALUES(8,2345,6789.10,'uvwxy',5678,2345.60,'zabcd')
+
+statement ok
+INSERT INTO t_del_large VALUES(9,9999,1111.10,'efghi',1234,9999.90,'jklmn')
+
+statement ok
+INSERT INTO t_del_large VALUES(10,3333,5555.50,'opqrs',6789,3333.30,'tuvwx')
+
+statement ok
+INSERT INTO t_del_large VALUES(11,7777,2222.20,'yzabc',2345,7777.70,'defgh')
+
+statement ok
+INSERT INTO t_del_large VALUES(12,1111,8888.80,'ijklm',8901,1111.10,'nopqr')
+
+statement ok
+INSERT INTO t_del_large VALUES(13,5555,4444.40,'stuvw',4567,5555.50,'xyzab')
+
+statement ok
+INSERT INTO t_del_large VALUES(14,9901,7654.30,'cdefg',1234,9876.50,'hijkl')
+
+statement ok
+INSERT INTO t_del_large VALUES(15,8802,3210.90,'mnopq',5678,8765.40,'rstuv')
+
+statement ok
+INSERT INTO t_del_large VALUES(16,7703,9876.50,'wxyzz',9012,7654.30,'12345')
+
+statement ok
+INSERT INTO t_del_large VALUES(17,6604,5432.10,'aabbc',8901,6543.20,'89012')
+
+statement ok
+INSERT INTO t_del_large VALUES(18,5505,1098.70,'ccdef',1234,5432.10,'67890')
+
+statement ok
+INSERT INTO t_del_large VALUES(19,4406,7654.30,'ddefg',5678,4321.00,'34567')
+
+statement ok
+INSERT INTO t_del_large VALUES(20,9500,3210.90,'eefgh',9012,3210.90,'hijkl')
+
+# pk=476 is the sentinel: col0=9888 > 9602 so must survive the delete below.
+statement ok
+INSERT INTO t_del_large VALUES(476,9888,652.93,'kfssx',9985,4451.14,'oycij')
+
+# Verify pk=476 is present before delete.
+query I
+SELECT pk FROM t_del_large WHERE pk = 476
+----
+476
+
+# Delete rows where col0 < 9602 — pk=476 (col0=9888) must survive.
+statement ok
+DELETE FROM t_del_large WHERE col0 < 9602
+
+query I
+SELECT pk FROM t_del_large WHERE pk = 476
+----
+476
+
+statement ok
+DROP TABLE t_del_large
