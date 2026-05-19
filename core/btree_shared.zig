@@ -145,8 +145,16 @@ pub fn scanFirst(pager: *Pager, root_id: u32) !u32 {
         const ph = std.mem.bytesToValue(t.PageHeader, buf[0..@sizeOf(t.PageHeader)]);
         if (ph.page_type == .btree_leaf) return page_id;
         const h = readBTreeHeader(&buf);
-        if (h.cell_count == 0) return page_id;
-        page_id = std.mem.readInt(u32, buf[getCellPtr(&buf, 0)..][0..4], .little);
+        // When all separator cells have been removed by unlinkFromParent but a
+        // rightmost child still exists, follow that child to reach the remaining
+        // subtree.  Without this, scanFirst would wrongly return the internal
+        // node itself (cell_count == 0 was previously used as an "empty tree"
+        // sentinel, but that only applies to root leaves, not internal nodes).
+        if (h.cell_count == 0) {
+            page_id = getRightmostChild(&buf);
+        } else {
+            page_id = std.mem.readInt(u32, buf[getCellPtr(&buf, 0)..][0..4], .little);
+        }
     }
 }
 
