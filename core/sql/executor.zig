@@ -77,7 +77,7 @@ pub const Executor = struct {
                 break :blk .{ .created = {} };
             },
             .create_index => |n| blk: {
-                try self.db.createIndex(n.name, n.table, n.col_indices, n.is_unique, n.if_not_exists);
+                try self.db.createIndex(n.name, n.table, n.col_indices, n.col_desc, n.is_unique, n.if_not_exists);
                 break :blk .{ .created = {} };
             },
             .create_view => |n| blk: {
@@ -86,6 +86,10 @@ pub const Executor = struct {
             },
             .drop_view => |n| blk: {
                 try self.db.dropView(n.name, n.if_exists);
+                break :blk .{ .created = {} };
+            },
+            .drop_table => |n| blk: {
+                try self.db.dropTable(n.name, n.if_exists);
                 break :blk .{ .created = {} };
             },
             .begin => blk: {
@@ -274,6 +278,7 @@ pub fn execute(allocator: std.mem.Allocator, db: *Db, sql: []const u8) !ExecResu
     // subqueries compiled by planExpr can execute against the live database.
     phys_planner.db_opaque = @ptrCast(db);
     phys_planner.subquery_exec = cursor_mod.execScalarSubquery;
+    phys_planner.in_subquery_exec = cursor_mod.execInSubquery;
     const physical = try phys_planner.plan(logical);
 
     var ex = Executor.init(db, allocator);

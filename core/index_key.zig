@@ -19,8 +19,16 @@ const row_mod = @import("row.zig");
 pub const MAX_KEY_LEN: usize = 512;
 
 pub fn encodeKey(values: []const row_mod.Value, buf: []u8) usize {
+    return encodeKeyWithDirections(values, &.{}, buf);
+}
+
+/// Like encodeKey but inverts the byte encoding for DESC columns (XOR 0xFF per byte).
+/// desc_flags[i] = true means column i sorts descending.  If desc_flags is shorter
+/// than values, remaining columns default to ASC.
+pub fn encodeKeyWithDirections(values: []const row_mod.Value, desc_flags: []const bool, buf: []u8) usize {
     var pos: usize = 0;
-    for (values) |val| {
+    for (values, 0..) |val, i| {
+        const start = pos;
         switch (val) {
             .null => {
                 buf[pos] = 0x00;
@@ -60,6 +68,10 @@ pub fn encodeKey(values: []const row_mod.Value, buf: []u8) usize {
                 buf[pos] = 0x00;
                 pos += 1;
             },
+        }
+        // For DESC columns, invert all bytes of this field to reverse sort order.
+        if (i < desc_flags.len and desc_flags[i]) {
+            for (buf[start..pos]) |*byte| byte.* ^= 0xFF;
         }
     }
     return pos;

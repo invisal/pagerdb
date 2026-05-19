@@ -37,6 +37,7 @@ const INDEX_COLS_SCHEMA = [_]row.ColumnSchema{
     .{ .col_type = .int, .nullable = false }, // index_id
     .{ .col_type = .int, .nullable = false }, // position
     .{ .col_type = .int, .nullable = false }, // col_index (attnum)
+    .{ .col_type = .int, .nullable = false }, // desc (0 = ASC, 1 = DESC)
 };
 
 const VIEWS_SCHEMA = [_]row.ColumnSchema{
@@ -64,6 +65,7 @@ const IDXCOL = struct {
     const index_id: usize = 0;
     const position: usize = 1;
     const col_index: usize = 2;
+    const desc: usize = 3;
 };
 
 // ── Public types ──────────────────────────────────────────────────────────────
@@ -81,6 +83,7 @@ pub const IndexMeta = struct {
     is_unique: bool,
     btree_root: u32,
     col_indices: []u32, // attnums of indexed columns in index order
+    col_desc: []bool, // true = DESC per column, parallel to col_indices
 };
 
 pub const ColumnMeta = struct {
@@ -281,9 +284,9 @@ pub const Catalog = struct {
             }
             self.next_idx_id = max_idx_id + 1;
 
-            // Collect (position, col_index) pairs per index_id.
+            // Collect (position, col_index, desc) triples per index_id.
             // ArrayListUnmanaged avoids the local-struct type restriction on ArrayList.
-            const ColEntry = struct { position: u32, col_index: u32 };
+            const ColEntry = struct { position: u32, col_index: u32, desc: bool };
             var col_lists = std.AutoHashMap(u64, std.ArrayListUnmanaged(ColEntry)).init(tmp);
 
             var max_idx_col_rowid: u64 = 0;
@@ -297,6 +300,7 @@ pub const Catalog = struct {
                 try gop.value_ptr.append(tmp, .{
                     .position = @intCast(vals[IDXCOL.position].int),
                     .col_index = @intCast(vals[IDXCOL.col_index].int),
+                    .desc = vals[IDXCOL.desc].int != 0,
                 });
             }
             self.next_idx_col_rowid = max_idx_col_rowid + 1;
@@ -316,7 +320,11 @@ pub const Catalog = struct {
                 }.lt);
 
                 const col_indices = try alloc.alloc(u32, col_items.len);
-                for (col_items, 0..) |ce, i| col_indices[i] = ce.col_index;
+                const col_desc = try alloc.alloc(bool, col_items.len);
+                for (col_items, 0..) |ce, i| {
+                    col_indices[i] = ce.col_index;
+                    col_desc[i] = ce.desc;
+                }
 
                 var tbl_it = self.tables.valueIterator();
                 while (tbl_it.next()) |tbl| {
@@ -328,6 +336,7 @@ pub const Catalog = struct {
                             .is_unique = raw.is_unique,
                             .btree_root = raw.btree_root,
                             .col_indices = col_indices,
+                            .col_desc = col_desc,
                         };
                         tbl.indexes = try appendIndex(alloc, tbl.indexes, idx_meta);
                         break;
@@ -433,6 +442,7 @@ pub const Catalog = struct {
         name: []const u8,
         table_name: []const u8,
         col_indices: []const u32,
+        col_desc: []const bool,
         is_unique: bool,
         btree_root_val: u32,
     ) !IndexMeta {
@@ -464,6 +474,7 @@ pub const Catalog = struct {
                 idx_id,
                 @intCast(pos),
                 col_idx,
+                pos < col_desc.len and col_desc[pos],
             );
         }
 
@@ -480,6 +491,7 @@ pub const Catalog = struct {
             .is_unique = is_unique,
             .btree_root = btree_root_val,
             .col_indices = try alloc.dupe(u32, col_indices),
+            .col_desc = try alloc.dupe(bool, col_desc),
         };
         table.indexes = try appendIndex(alloc, table.indexes, meta);
 
@@ -536,6 +548,52 @@ pub const Catalog = struct {
         const meta = self.views.get(name) orelse return error.ViewNotFound;
         _ = try btree.RowidBTree.delete(self.pager, self.pager.sys_views_root, meta.id);
         _ = self.views.remove(name);
+    }
+
+    pub fn dropTable(self: *Catalog, name: []const u8) !void {
+        const table = self.tables.get(name) orelse return error.TableNotFound;
+
+        var tmp_arena = std.heap.ArenaAllocator.init(self.arena.child_allocator);
+        defer tmp_arena.deinit();
+        const tmp = tmp_arena.allocator();
+
+        // Delete from sys_tables.
+        _ = try btree.RowidBTree.delete(self.pager, self.pager.sys_tables_root, table.id);
+
+        // Collect and delete all sys_columns rows for this table.
+        var col_rowids: std.ArrayListUnmanaged(u64) = .empty;
+        var col_scan = try btree.RowidBTree.ScanIterator.init(self.pager, self.pager.sys_columns_root);
+        while (try col_scan.next()) |cell| {
+            const vals = try row.decodeRow(&COLUMNS_SCHEMA, cell.row_data, tmp);
+            if (@as(u64, @intCast(vals[COL.table_id].int)) == table.id) {
+                try col_rowids.append(tmp, cell.rowid);
+            }
+        }
+        for (col_rowids.items) |rowid| {
+            _ = try btree.RowidBTree.delete(self.pager, self.pager.sys_columns_root, rowid);
+        }
+
+        // Delete index catalog entries if any indexes exist.
+        if (self.pager.sys_indexes_root != 0) {
+            for (table.indexes) |idx| {
+                _ = try btree.RowidBTree.delete(self.pager, self.pager.sys_indexes_root, idx.id);
+
+                // Collect and delete all sys_index_cols rows for this index.
+                var icol_rowids: std.ArrayListUnmanaged(u64) = .empty;
+                var icol_scan = try btree.RowidBTree.ScanIterator.init(self.pager, self.pager.sys_index_cols_root);
+                while (try icol_scan.next()) |cell| {
+                    const vals = try row.decodeRow(&INDEX_COLS_SCHEMA, cell.row_data, tmp);
+                    if (@as(u64, @intCast(vals[IDXCOL.index_id].int)) == idx.id) {
+                        try icol_rowids.append(tmp, cell.rowid);
+                    }
+                }
+                for (icol_rowids.items) |rowid| {
+                    _ = try btree.RowidBTree.delete(self.pager, self.pager.sys_index_cols_root, rowid);
+                }
+            }
+        }
+
+        _ = self.tables.remove(name);
     }
 
     pub fn deinit(self: *Catalog) void {
@@ -621,11 +679,13 @@ pub const Catalog = struct {
         index_id: u64,
         position: u32,
         col_index: u32,
+        desc: bool,
     ) !void {
         const values = [_]row.Value{
             .{ .int = @intCast(index_id) },
             .{ .int = @intCast(position) },
             .{ .int = @intCast(col_index) },
+            .{ .int = if (desc) 1 else 0 },
         };
         var buf: [64]u8 = undefined;
         const len = row.encodeRow(&values, &buf);

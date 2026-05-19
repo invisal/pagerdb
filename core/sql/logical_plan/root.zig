@@ -43,6 +43,7 @@ pub const Expr = union(enum) {
     func_call: *FuncCall,
     cast: *Cast,
     in_list: *InList,
+    in_subquery: *InSubquery,
     case_: *Case,
     is_null: *IsNull,
     // Scalar subquery: a nested SELECT that returns one row, one column.
@@ -57,6 +58,7 @@ pub const Expr = union(enum) {
     pub const FuncCall = struct { func: *const sf.ScalarFunc, args: []Expr };
     pub const Cast = struct { target_type: t.ColType, operand: Expr };
     pub const InList = struct { operand: Expr, list: []Expr, negated: bool };
+    pub const InSubquery = struct { operand: Expr, plan: *LogicalPlan, negated: bool };
     pub const Case = struct {
         pub const WhenClause = struct { cond: Expr, then: Expr };
         when_clauses: []WhenClause,
@@ -149,6 +151,7 @@ pub const LogicalCreateIndex = struct {
     name: []const u8, // arena-owned
     table: []const u8, // arena-owned
     col_indices: []u32, // attnums of indexed columns, arena-owned
+    col_desc: []bool, // true = DESC per column, parallel to col_indices, arena-owned
     is_unique: bool,
     if_not_exists: bool,
 };
@@ -159,6 +162,11 @@ pub const LogicalCreateView = struct {
 };
 
 pub const LogicalDropView = struct {
+    name: []const u8, // arena-owned
+    if_exists: bool,
+};
+
+pub const LogicalDropTable = struct {
     name: []const u8, // arena-owned
     if_exists: bool,
 };
@@ -229,6 +237,7 @@ pub const LogicalPlan = union(enum) {
     create_index: LogicalCreateIndex,
     create_view: LogicalCreateView,
     drop_view: LogicalDropView,
+    drop_table: LogicalDropTable,
     begin: void,
     commit: void,
     rollback: void,
@@ -247,7 +256,7 @@ pub const LogicalPlan = union(enum) {
             .insert_select => |n| n.schema,
             .update => |n| n.schema,
             .delete => |n| n.schema,
-            .const_scan, .create_table, .create_index, .create_view, .drop_view, .begin, .commit, .rollback => Schema{ .table = "", .columns = &.{} },
+            .const_scan, .create_table, .create_index, .create_view, .drop_view, .drop_table, .begin, .commit, .rollback => Schema{ .table = "", .columns = &.{} },
         };
     }
 };
@@ -309,6 +318,7 @@ pub const LogicalPlanner = struct {
             .create_index => |s| try self.planCreateIndex(s),
             .create_view => |s| try self.planCreateView(s),
             .drop_view => |s| try self.planDropView(s),
+            .drop_table => |s| try self.planDropTable(s),
             .begin => .{ .begin = {} },
             .commit => .{ .commit = {} },
             .rollback => .{ .rollback = {} },
@@ -758,18 +768,21 @@ pub const LogicalPlanner = struct {
         };
 
         const col_indices = try self.alloc().alloc(u32, stmt.columns.len);
-        for (stmt.columns, 0..) |col_name, i| {
-            const col = meta.findColumn(col_name) orelse {
-                self.setError("Column '{s}' does not exist in table '{s}'", .{ col_name, stmt.table });
+        const col_desc = try self.alloc().alloc(bool, stmt.columns.len);
+        for (stmt.columns, 0..) |idx_col, i| {
+            const col = meta.findColumn(idx_col.name) orelse {
+                self.setError("Column '{s}' does not exist in table '{s}'", .{ idx_col.name, stmt.table });
                 return PlanError.ColumnNotFound;
             };
             col_indices[i] = col.attnum;
+            col_desc[i] = idx_col.desc;
         }
 
         return .{ .create_index = .{
             .name = try self.alloc().dupe(u8, stmt.name),
             .table = try self.alloc().dupe(u8, stmt.table),
             .col_indices = col_indices,
+            .col_desc = col_desc,
             .is_unique = stmt.is_unique,
             .if_not_exists = stmt.if_not_exists,
         } };
@@ -806,6 +819,17 @@ pub const LogicalPlanner = struct {
             return PlanError.TableNotFound;
         }
         return .{ .drop_view = .{
+            .name = try self.alloc().dupe(u8, stmt.name),
+            .if_exists = stmt.if_exists,
+        } };
+    }
+
+    fn planDropTable(self: *LogicalPlanner, stmt: ast.DropTableStmt) PlanError!LogicalPlan {
+        if (!stmt.if_exists and self.cat.getTable(stmt.name) == null) {
+            self.setError("Table '{s}' does not exist", .{stmt.name});
+            return PlanError.TableNotFound;
+        }
+        return .{ .drop_table = .{
             .name = try self.alloc().dupe(u8, stmt.name),
             .if_exists = stmt.if_exists,
         } };
@@ -859,7 +883,7 @@ pub const LogicalPlanner = struct {
             .cast => |c| containsAggCall(c.operand),
             // Subqueries have their own aggregate context; they do not make the
             // outer query require an Aggregate node.
-            .subquery => false,
+            .subquery, .in_subquery => false,
             // Literals, column references, and other leaves can never be aggregates.
             else => false,
         };
@@ -1093,6 +1117,8 @@ pub const LogicalPlanner = struct {
             },
             .is_null => |n| try self.collectAggSpecs(n.operand, scan_schema, out),
             .cast => |c| try self.collectAggSpecs(c.operand, scan_schema, out),
+            // in_subquery has its own aggregate context; no specs to collect.
+            .in_subquery => {},
             else => {},
         }
     }
@@ -1316,6 +1342,23 @@ pub const LogicalPlanner = struct {
                 const sub = try self.alloc().create(Expr.LogicalSubquery);
                 sub.* = .{ .plan = try self.box(inner_plan) };
                 break :blk .{ .subquery = sub };
+            },
+            .in_subquery => |isq| blk: {
+                const outer_for_subquery: Schema = switch (ctx) {
+                    .plain => |schema| schema,
+                    .over_agg => |oa| oa.scan_schema,
+                };
+                const saved_outer = self.outer_schema;
+                self.outer_schema = outer_for_subquery;
+                defer self.outer_schema = saved_outer;
+                const inner_plan = try self.planSelect(isq.subquery.*);
+                const node = try self.alloc().create(Expr.InSubquery);
+                node.* = .{
+                    .operand = try self.resolveExprCtx(isq.operand, ctx),
+                    .plan = try self.box(inner_plan),
+                    .negated = isq.negated,
+                };
+                break :blk .{ .in_subquery = node };
             },
         };
     }
@@ -1623,6 +1666,7 @@ fn exprEqlInner(a: Expr, b: Expr) bool {
         .col_idx => |av| b == .col_idx and b.col_idx == av,
         .outer_col_idx => |av| b == .outer_col_idx and b.outer_col_idx == av,
         .subquery => |av| b == .subquery and av == b.subquery,
+        .in_subquery => |av| b == .in_subquery and av == b.in_subquery,
         .binary => |av| b == .binary and
             av.op == b.binary.op and
             exprEqlInner(av.left, b.binary.left) and

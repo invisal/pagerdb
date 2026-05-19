@@ -601,16 +601,33 @@ pub const Parser = struct {
                 _ = self.advance(); // consume VIEW
                 break :blk .{ .drop_view = try self.parseDropView() };
             },
+            .kw_table => blk: {
+                _ = self.advance(); // consume TABLE
+                break :blk .{ .drop_table = try self.parseDropTable() };
+            },
             else => {
                 const tok = self.peek();
                 self.error_message = std.fmt.allocPrint(
                     self.arena.allocator(),
-                    "[{d}] Expected VIEW after DROP, got '{s}'",
+                    "[{d}] Expected VIEW or TABLE after DROP, got '{s}'",
                     .{ tok.start, self.tokenText(tok) },
                 ) catch "";
                 return ParseError.UnexpectedToken;
             },
         };
+    }
+
+    fn parseDropTable(self: *Parser) ParseError!ast.DropTableStmt {
+        // DROP TABLE [IF EXISTS] name
+        var if_exists = false;
+        if (self.peek().kind == .kw_if) {
+            _ = self.advance(); // consume IF
+            _ = try self.expect(.kw_exists);
+            if_exists = true;
+        }
+        const name_tok = try self.expect(.identifier);
+        const name = try self.alloc().dupe(u8, self.tokenText(name_tok));
+        return ast.DropTableStmt{ .name = name, .if_exists = if_exists };
     }
 
     fn parseDropView(self: *Parser) ParseError!ast.DropViewStmt {
@@ -679,10 +696,22 @@ pub const Parser = struct {
         const table = try self.alloc().dupe(u8, self.tokenText(table_tok));
 
         _ = try self.expect(.lparen);
-        var cols: std.ArrayList([]const u8) = .empty;
+        var cols: std.ArrayList(ast.IndexColumn) = .empty;
         while (true) {
             const col_tok = try self.expect(.identifier);
-            try cols.append(self.alloc(), try self.alloc().dupe(u8, self.tokenText(col_tok)));
+            const col_name = try self.alloc().dupe(u8, self.tokenText(col_tok));
+            const desc = switch (self.peek().kind) {
+                .kw_desc => blk: {
+                    _ = self.advance();
+                    break :blk true;
+                },
+                .kw_asc => blk: {
+                    _ = self.advance();
+                    break :blk false;
+                },
+                else => false,
+            };
+            try cols.append(self.alloc(), .{ .name = col_name, .desc = desc });
             if (self.peek().kind != .comma) break;
             _ = self.advance();
         }
@@ -923,6 +952,17 @@ pub const Parser = struct {
 
     fn parseInList(self: *Parser, operand: ast.Expr, negated: bool) ParseError!ast.Expr {
         _ = try self.expect(.lparen);
+        // IN (SELECT ...) — subquery form
+        if (self.peek().kind == .kw_select) {
+            const stmt = try self.parseSelect();
+            _ = try self.expect(.rparen);
+            const stmt_ptr = try self.alloc().create(ast.SelectStmt);
+            stmt_ptr.* = stmt;
+            const node = try self.alloc().create(ast.Expr.InSubquery);
+            node.* = .{ .operand = operand, .subquery = stmt_ptr, .negated = negated };
+            return .{ .in_subquery = node };
+        }
+        // IN (val1, val2, ...) — scalar list form
         var list: std.ArrayList(ast.Expr) = .empty;
         if (self.peek().kind != .rparen) {
             try list.append(self.alloc(), try self.parseExpr());

@@ -13,9 +13,12 @@ SELECT age FROM t WHERE name = 'alice';
 18
 
 # DEFAULT keyword explicitly applies the default
+# SQLite does not support DEFAULT as a value expression in VALUES (...)
+skipif sqlite
 statement ok
 INSERT INTO t(name, age) VALUES ('bob', DEFAULT);
 
+skipif sqlite
 query I
 SELECT age FROM t WHERE name = 'bob';
 ----

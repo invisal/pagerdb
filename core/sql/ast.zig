@@ -45,6 +45,7 @@ pub const Expr = union(enum) {
     func_call: *FuncCall,
     cast: *Cast,
     in_list: *InList,
+    in_subquery: *InSubquery,
     between: *Between,
     case_: *Case,
     is_null: *IsNull,
@@ -60,6 +61,8 @@ pub const Expr = union(enum) {
     pub const Cast = struct { target_type: t.ColType, operand: Expr };
     // expr [NOT] IN (val1, val2, ...) — scalar value list, not a subquery.
     pub const InList = struct { operand: Expr, list: []Expr, negated: bool };
+    // expr [NOT] IN (SELECT ...) — subquery produces the set to test membership.
+    pub const InSubquery = struct { operand: Expr, subquery: *SelectStmt, negated: bool };
     // expr [NOT] BETWEEN low AND high — desugars to (>= low AND <= high) in the planner.
     pub const Between = struct { operand: Expr, low: Expr, high: Expr, negated: bool };
     // expr IS [NOT] NULL — SQL null check (distinct from = NULL which returns NULL).
@@ -133,6 +136,16 @@ pub const Expr = union(enum) {
                 };
                 break :blk .{ .in_list = node };
             },
+            // The SelectStmt lives in the parser arena; shallow-copy the pointer.
+            .in_subquery => |isq| blk: {
+                const node = try allocator.create(InSubquery);
+                node.* = .{
+                    .operand = try isq.operand.clone(allocator),
+                    .subquery = isq.subquery,
+                    .negated = isq.negated,
+                };
+                break :blk .{ .in_subquery = node };
+            },
             .between => |b| blk: {
                 const node = try allocator.create(Between);
                 node.* = .{
@@ -201,6 +214,10 @@ pub const Expr = union(enum) {
                 for (il.list) |item| item.deinit(allocator);
                 allocator.free(il.list);
                 allocator.destroy(il);
+            },
+            .in_subquery => |isq| {
+                isq.operand.deinit(allocator);
+                allocator.destroy(isq);
             },
             .between => |b| {
                 b.operand.deinit(allocator);
@@ -328,10 +345,15 @@ pub const CreateTableStmt = struct {
     columns: []ColumnDef,
 };
 
+pub const IndexColumn = struct {
+    name: []const u8, // arena-owned
+    desc: bool, // true = DESC, false = ASC (default)
+};
+
 pub const CreateIndexStmt = struct {
     name: []const u8, // arena-owned
     table: []const u8, // arena-owned
-    columns: [][]const u8, // arena-owned; column names in index order
+    columns: []IndexColumn, // arena-owned; column names and directions in index order
     is_unique: bool,
     if_not_exists: bool,
 };
@@ -346,6 +368,11 @@ pub const DropViewStmt = struct {
     if_exists: bool,
 };
 
+pub const DropTableStmt = struct {
+    name: []const u8, // arena-owned
+    if_exists: bool,
+};
+
 pub const Stmt = union(enum) {
     select: SelectStmt,
     insert: InsertStmt,
@@ -355,6 +382,7 @@ pub const Stmt = union(enum) {
     create_index: CreateIndexStmt,
     create_view: CreateViewStmt,
     drop_view: DropViewStmt,
+    drop_table: DropTableStmt,
     begin: void,
     commit: void,
     rollback: void,

@@ -52,6 +52,8 @@ SELECT COUNT(val) FROM t;
 7
 
 # COUNT(*) counts all rows regardless of modifier.
+# SQLite does not support COUNT(ALL *) — only COUNT(*) is valid there.
+skipif sqlite
 query I
 SELECT COUNT(ALL *) FROM t;
 ----

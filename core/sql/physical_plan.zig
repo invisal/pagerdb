@@ -72,6 +72,7 @@ pub const PhysicalCreateIndex = struct {
     name: []const u8,
     table: []const u8,
     col_indices: []u32,
+    col_desc: []bool,
     is_unique: bool,
     if_not_exists: bool,
 };
@@ -82,6 +83,11 @@ pub const PhysicalCreateView = struct {
 };
 
 pub const PhysicalDropView = struct {
+    name: []const u8,
+    if_exists: bool,
+};
+
+pub const PhysicalDropTable = struct {
     name: []const u8,
     if_exists: bool,
 };
@@ -131,6 +137,7 @@ pub const PhysicalPlan = union(enum) {
     create_index: PhysicalCreateIndex,
     create_view: PhysicalCreateView,
     drop_view: PhysicalDropView,
+    drop_table: PhysicalDropTable,
     begin: void,
     commit: void,
     rollback: void,
@@ -151,7 +158,7 @@ pub const PhysicalPlan = union(enum) {
             .insert_select => |n| n.schema,
             .update => |n| n.schema,
             .delete => |n| n.schema,
-            .create_table, .create_index, .create_view, .drop_view, .begin, .commit, .rollback => lp.Schema{ .table = "", .columns = &.{} },
+            .create_table, .create_index, .create_view, .drop_view, .drop_table, .begin, .commit, .rollback => lp.Schema{ .table = "", .columns = &.{} },
         };
     }
 };
@@ -165,6 +172,7 @@ pub const PhysicalPlanner = struct {
     // between physical_plan.zig and cursor/root.zig / db.zig.
     db_opaque: ?*anyopaque = null,
     subquery_exec: ?ee.SubqueryExecFn = null,
+    in_subquery_exec: ?ee.InSubqueryExecFn = null,
 
     pub fn init(allocator: std.mem.Allocator) PhysicalPlanner {
         return .{ .arena = std.heap.ArenaAllocator.init(allocator) };
@@ -198,11 +206,13 @@ pub const PhysicalPlanner = struct {
                 .name = n.name,
                 .table = n.table,
                 .col_indices = n.col_indices,
+                .col_desc = n.col_desc,
                 .is_unique = n.is_unique,
                 .if_not_exists = n.if_not_exists,
             } },
             .create_view => |n| .{ .create_view = .{ .name = n.name, .sql = n.sql } },
             .drop_view => |n| .{ .drop_view = .{ .name = n.name, .if_exists = n.if_exists } },
+            .drop_table => |n| .{ .drop_table = .{ .name = n.name, .if_exists = n.if_exists } },
             .begin => .{ .begin = {} },
             .commit => .{ .commit = {} },
             .rollback => .{ .rollback = {} },
@@ -292,6 +302,19 @@ pub const PhysicalPlanner = struct {
                     .exec_fn = self.subquery_exec.?,
                 };
                 break :blk .{ .subquery = node };
+            },
+            .in_subquery => |isq| blk: {
+                const inner = try self.alloc().create(PhysicalPlan);
+                inner.* = try self.plan(isq.plan.*);
+                const node = try self.alloc().create(ee.ExecExpr.InSubquery);
+                node.* = .{
+                    .operand = try self.planExpr(isq.operand),
+                    .inner = @ptrCast(inner),
+                    .db = self.db_opaque.?,
+                    .exec_fn = self.in_subquery_exec.?,
+                    .negated = isq.negated,
+                };
+                break :blk .{ .in_subquery = node };
             },
         };
     }
