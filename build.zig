@@ -40,7 +40,7 @@ pub fn build(b: *std.Build) void {
     // ── Benchmark executable ──────────────────────────────────────────────────
     // Benchmarks always use ReleaseFast — debug GPA overhead skews results by 100-2000x
     const bench_mod = b.createModule(.{
-        .root_source_file = b.path("bench/benchmark.zig"),
+        .root_source_file = b.path("bench/main.zig"),
         .target = target,
         .optimize = .ReleaseFast,
         .link_libc = true,
@@ -55,7 +55,8 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(bench_exe);
 
     const run_bench = b.addRunArtifact(bench_exe);
-    const bench_step = b.step("bench", "Run INSERT / SELECT * benchmarks vs SQLite3");
+    if (b.args) |bench_args| run_bench.addArgs(bench_args);
+    const bench_step = b.step("bench", "Run .benchmark files vs SQLite3");
     bench_step.dependOn(&run_bench.step);
 
     // ── DST executable ───────────────────────────────────────────────────────
