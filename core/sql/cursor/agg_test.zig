@@ -5,7 +5,7 @@ const agg_mod = @import("agg_func.zig");
 
 fn openSeqScanInput(db: anytype, a: std.mem.Allocator, table: []const u8) !*cursor_mod.Cursor {
     const input = try a.create(cursor_mod.Cursor);
-    input.* = .{ .seq_scan = .{ .it = try db.scanOpen(table) } };
+    input.* = .{ .seq_scan = .{ .it = try db.scanOpen(table), .batch_arena = std.heap.ArenaAllocator.init(a) } };
     return input;
 }
 

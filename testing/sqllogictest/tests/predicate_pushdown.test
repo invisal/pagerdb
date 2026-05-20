@@ -1,0 +1,138 @@
+# Predicate pushdown correctness tests.
+#
+# These verify that the optimizer's predicate pushdown rule produces correct
+# results across the cases it handles.  They also serve as regression tests
+# for two infinite-loop bugs that existed before the fix:
+#
+#   Bug 1: a predicate with no column refs (e.g. WHERE TRUE) above a join
+#          caused tryPushIntoJoin to recurse into itself forever.
+#   Bug 2: a right-only predicate above a LEFT JOIN did the same thing
+#          because the predicate could never be pushed and kept re-entering
+#          tryPushIntoJoin on each recursion.
+
+statement ok
+CREATE TABLE pp_l (id INTEGER NOT NULL, val INTEGER NOT NULL);
+
+statement ok
+CREATE TABLE pp_r (id INTEGER NOT NULL, val INTEGER NOT NULL);
+
+statement ok
+INSERT INTO pp_l VALUES (1, 10), (2, 20), (3, 30);
+
+statement ok
+INSERT INTO pp_r VALUES (1, 100), (2, 200);
+
+# ── INNER JOIN ──────────────────────────────────────────────────────────────
+
+# Left-only predicate: pushed into left child, only id=1 enters the join.
+query II
+SELECT pp_l.id, pp_r.val
+FROM pp_l INNER JOIN pp_r ON pp_l.id = pp_r.id
+WHERE pp_l.id = 1;
+----
+1
+100
+
+# Right-only predicate: pushed into right child, only val=100 row survives.
+query II
+SELECT pp_l.id, pp_r.val
+FROM pp_l INNER JOIN pp_r ON pp_l.id = pp_r.id
+WHERE pp_r.val = 100;
+----
+1
+100
+
+# Both-sides predicate: becomes part of the join condition.
+query II rowsort
+SELECT pp_l.id, pp_r.val
+FROM pp_l INNER JOIN pp_r ON pp_l.id = pp_r.id
+WHERE pp_l.val < pp_r.val;
+----
+1
+100
+2
+200
+
+# Conjunctive filter: left pred pushed left, right pred pushed right.
+query II
+SELECT pp_l.id, pp_r.val
+FROM pp_l INNER JOIN pp_r ON pp_l.id = pp_r.id
+WHERE pp_l.id = 1 AND pp_r.val = 100;
+----
+1
+100
+
+# No match after pushdown.
+query II
+SELECT pp_l.id, pp_r.val
+FROM pp_l INNER JOIN pp_r ON pp_l.id = pp_r.id
+WHERE pp_l.id = 99;
+----
+
+# Regression – Bug 1: WHERE TRUE has no column refs (.neither) so it cannot
+# be pushed into either join child.  Before the fix this looped forever.
+query I
+SELECT COUNT(*)
+FROM pp_l INNER JOIN pp_r ON pp_l.id = pp_r.id
+WHERE TRUE;
+----
+2
+
+# ── LEFT JOIN ────────────────────────────────────────────────────────────────
+
+# Baseline: left rows without a match appear with NULL on the right.
+query II rowsort
+SELECT pp_l.id, pp_r.val
+FROM pp_l LEFT JOIN pp_r ON pp_l.id = pp_r.id;
+----
+1
+100
+2
+200
+3
+NULL
+
+# Left-only predicate on LEFT JOIN: safe to push into the left child.
+# id=3 is excluded before the join.
+query II rowsort
+SELECT pp_l.id, pp_r.val
+FROM pp_l LEFT JOIN pp_r ON pp_l.id = pp_r.id
+WHERE pp_l.id < 3;
+----
+1
+100
+2
+200
+
+# Regression – Bug 2: right-only predicate on a LEFT JOIN must stay above the
+# join (pushing it would silently convert LEFT to INNER).  Before the fix this
+# looped forever.  Result is the single row where pp_r.val = 100 matches; the
+# other two left rows produce NULL or 200 and are filtered out by the WHERE.
+query II
+SELECT pp_l.id, pp_r.val
+FROM pp_l LEFT JOIN pp_r ON pp_l.id = pp_r.id
+WHERE pp_r.val = 100;
+----
+1
+100
+
+# Mixed: left-only predicate pushed, right-only predicate stays above.
+# pp_l.id < 3 pushed left; pp_r.val > 100 stays above the LEFT JOIN.
+query II
+SELECT pp_l.id, pp_r.val
+FROM pp_l LEFT JOIN pp_r ON pp_l.id = pp_r.id
+WHERE pp_l.id < 3 AND pp_r.val > 100;
+----
+2
+200
+
+# ── Filter-on-Filter merging ─────────────────────────────────────────────────
+
+# Multiple independent WHERE conditions over a plain scan.  The optimizer
+# merges nested Filter nodes into one AND before pushing down.
+query I rowsort
+SELECT pp_l.id FROM pp_l
+WHERE pp_l.id > 0 AND pp_l.val < 25;
+----
+1
+2

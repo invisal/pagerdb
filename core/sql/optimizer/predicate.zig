@@ -191,15 +191,21 @@ fn tryPushIntoJoin(a: std.mem.Allocator, f: *lp.Filter, j: *lp.Join) anyerror!lp
     try join_conds.appendSlice(a, both_preds.items);
     j.condition = try utils.joinConjuncts(a, join_conds.items);
 
+    // Recurse into join children now, before potentially wrapping a filter above.
+    // We must NOT call pushdownPredicates(.filter) when above_preds is non-empty:
+    // those predicates (e.g. literals with no column refs, or right-only predicates
+    // on a LEFT JOIN) would re-enter tryPushIntoJoin and loop forever.
+    const optimized_join = try pushdownPredicates(a, .{ .join = j });
+
     if (above_preds.items.len > 0) {
         const new_filter = try a.create(lp.Filter);
-        new_filter.input = try box(a, .{ .join = j });
+        new_filter.input = try box(a, optimized_join);
         new_filter.schema = j.schema;
         new_filter.predicate = (try utils.joinConjuncts(a, above_preds.items)).?;
-        return pushdownPredicates(a, .{ .filter = new_filter });
+        return .{ .filter = new_filter };
     }
 
-    return pushdownPredicates(a, .{ .join = j });
+    return optimized_join;
 }
 
 // Classifies which join side an expression references, by walking all col_idx
