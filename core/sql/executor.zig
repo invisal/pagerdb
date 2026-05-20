@@ -7,6 +7,7 @@ const ee = @import("exec_expr.zig");
 const Parser = @import("parser.zig").Parser;
 const lp_mod = @import("logical_plan.zig");
 const pp_mod = @import("physical_plan.zig");
+const opt_mod = @import("optimizer/root.zig");
 const cursor_mod = @import("cursor/root.zig");
 
 // ── Result types ───────────────────────────────────────────────────────────────
@@ -278,6 +279,10 @@ pub fn execute(allocator: std.mem.Allocator, db: *Db, sql: []const u8) !ExecResu
         return toSqlError(allocator, e, logical_planner.error_message);
     };
 
+    var optimizer = opt_mod.Optimizer.init(allocator);
+    defer optimizer.deinit();
+    const optimized = try optimizer.optimize(logical);
+
     var phys_planner = pp_mod.PhysicalPlanner.init(allocator);
     defer phys_planner.deinit();
     // Wire the db pointer and subquery execution callback so that scalar
@@ -285,7 +290,7 @@ pub fn execute(allocator: std.mem.Allocator, db: *Db, sql: []const u8) !ExecResu
     phys_planner.db_opaque = @ptrCast(db);
     phys_planner.subquery_exec = cursor_mod.execScalarSubquery;
     phys_planner.in_subquery_exec = cursor_mod.execInSubquery;
-    const physical = try phys_planner.plan(logical);
+    const physical = try phys_planner.plan(optimized);
 
     var ex = Executor.init(db, allocator);
     return ex.exec(physical) catch |e| {
