@@ -536,6 +536,7 @@ pub const WALReader = struct {
         const record_type: RecordType = switch (type_byte) {
             @intFromEnum(RecordType.data) => .data,
             @intFromEnum(RecordType.commit) => .commit,
+            @intFromEnum(RecordType.full_page) => .full_page,
             else => return WALError.CorruptWAL,
         };
 

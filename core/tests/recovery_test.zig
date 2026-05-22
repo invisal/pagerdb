@@ -5,6 +5,7 @@ const Checkpoint = @import("../pager/wal.zig").Checkpoint;
 const segmentPath = @import("../pager/wal.zig").segmentPath;
 const RECORD_HEADER_SIZE = @import("../pager/wal.zig").RECORD_HEADER_SIZE;
 const COMMIT_SIZE = @import("../pager/wal.zig").COMMIT_SIZE;
+const FPW_SIZE = @import("../pager/wal.zig").FPW_SIZE;
 const InMemoryPager = @import("../pager/memory.zig").InMemoryPager;
 const DiskIo = @import("../io/disk_io.zig").DiskIo;
 const Io = @import("../io/io.zig").Io;
@@ -289,4 +290,102 @@ test "recovery returns CorruptWAL when the WAL segment is truncated mid-record" 
     defer pager.close();
 
     try std.testing.expectError(error.CorruptWAL, wal.recover(&pager, alloc));
+}
+
+test "FPW record is applied when page LSN is behind the FPW LSN" {
+    const io = std.testing.io;
+    const alloc = std.testing.allocator;
+    const base = "/tmp/test_fpw_stale";
+    defer cleanupWAL(alloc, io, base, 3);
+
+    // WAL starts at LSN=10; the FPW record will get LSN=10.
+    var disk_io = DiskIo.init(alloc, io);
+    var wal = try makeWAL(alloc, disk_io.io(), base, 10);
+    defer wal.deinit();
+
+    var pager = try InMemoryPager.create(alloc);
+    defer pager.close();
+
+    // Page 1 is stale: lsn=0 < fpw_lsn=10 → FPW must be applied.
+    try pager.writePage(1, &pageWithLSN(0), &.{});
+
+    // Build the FPW payload: a known page image with a sentinel byte.
+    var fpw_image = pageWithLSN(0);
+    fpw_image[200] = 0xAB;
+    _ = try wal.appendFullPage(1, &fpw_image);
+    try wal.appendCommit(0);
+    try wal.flush();
+
+    try wal.recover(&pager, alloc);
+
+    var result: [t.PAGE_SIZE]u8 = undefined;
+    try pager.readPage(1, &result);
+    try std.testing.expectEqual(@as(u8, 0xAB), result[200]);
+}
+
+test "FPW record is skipped when page LSN is already ahead of FPW LSN" {
+    const io = std.testing.io;
+    const alloc = std.testing.allocator;
+    const base = "/tmp/test_fpw_fresh";
+    defer cleanupWAL(alloc, io, base, 3);
+
+    var disk_io = DiskIo.init(alloc, io);
+    var wal = try makeWAL(alloc, disk_io.io(), base, 5);
+    defer wal.deinit();
+
+    var pager = try InMemoryPager.create(alloc);
+    defer pager.close();
+
+    // Page 1 has lsn=999 — well ahead of fpw_lsn=5.  Sentinel must survive.
+    var page = pageWithLSN(999);
+    page[200] = 0xCC;
+    try pager.writePage(1, &page, &.{});
+
+    var fpw_image = pageWithLSN(0);
+    fpw_image[200] = 0xDD; // would overwrite sentinel if wrongly applied
+    _ = try wal.appendFullPage(1, &fpw_image);
+    try wal.appendCommit(0);
+    try wal.flush();
+
+    try wal.recover(&pager, alloc);
+
+    var result: [t.PAGE_SIZE]u8 = undefined;
+    try pager.readPage(1, &result);
+    try std.testing.expectEqual(@as(u8, 0xCC), result[200]); // sentinel unchanged
+}
+
+test "FPW followed by a delta: delta is applied on top of FPW base" {
+    const io = std.testing.io;
+    const alloc = std.testing.allocator;
+    const base = "/tmp/test_fpw_with_delta";
+    defer cleanupWAL(alloc, io, base, 3);
+
+    // FPW gets LSN=10, delta gets LSN=10+FPW_SIZE.
+    var disk_io = DiskIo.init(alloc, io);
+    var wal = try makeWAL(alloc, disk_io.io(), base, 10);
+    defer wal.deinit();
+
+    var pager = try InMemoryPager.create(alloc);
+    defer pager.close();
+    try pager.writePage(1, &pageWithLSN(0), &.{});
+
+    // FPW contains the pre-delta image.
+    const fpw_image = pageWithLSN(0);
+    _ = try wal.appendFullPage(1, &fpw_image);
+    // Delta written on top of the FPW base.
+    _ = try wal.append(1, 100, "hello");
+    try wal.appendCommit(0);
+    try wal.flush();
+
+    try wal.recover(&pager, alloc);
+
+    var result: [t.PAGE_SIZE]u8 = undefined;
+    try pager.readPage(1, &result);
+
+    // Delta bytes must be present.
+    try std.testing.expectEqualSlices(u8, "hello", result[100..105]);
+
+    // next_lsn must account for FPW + data record + commit.
+    const expected_lsn: u64 = FPW_SIZE + RECORD_HEADER_SIZE + "hello".len + COMMIT_SIZE;
+    try std.testing.expectEqual(expected_lsn, wal.next_lsn);
 }
