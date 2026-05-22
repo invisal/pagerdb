@@ -12,4 +12,4 @@ INSERT INTO bench
 CREATE INDEX idx_score ON bench (score);
 
 -- run
-SELECT * FROM bench WHERE score >= 250.0 AND score <= 750.0;
+SELECT * FROM bench WHERE score > 500.0 AND score < 550.0;
