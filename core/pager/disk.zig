@@ -200,7 +200,7 @@ pub const DiskPager = struct {
             frame.data = buf.*;
             frame.dirty = true;
             frame.lru_tick = self.tick;
-            if (latest_lsn) |lsn| t.PageHeader.writeLSN(&frame.data, lsn);
+            if (latest_lsn) |lsn| std.mem.writeInt(u64, frame.data[@offsetOf(t.PageHeader, "lsn")..][0..8], lsn, .little);
             return;
         }
 
@@ -209,7 +209,7 @@ pub const DiskPager = struct {
         frame.data = buf.*;
         frame.dirty = true;
         frame.lru_tick = self.tick;
-        if (latest_lsn) |lsn| t.PageHeader.writeLSN(&frame.data, lsn);
+        if (latest_lsn) |lsn| std.mem.writeInt(u64, frame.data[@offsetOf(t.PageHeader, "lsn")..][0..8], lsn, .little);
     }
 
     fn diskFlush(ptr: *anyopaque, pager: *Pager) anyerror!void {

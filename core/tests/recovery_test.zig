@@ -20,7 +20,7 @@ fn makeWAL(alloc: std.mem.Allocator, std_io: std.Io, path: []const u8, initial_l
 // Returns a zeroed page with the given LSN stamped in the PageHeader.
 fn pageWithLSN(lsn: u64) [t.PAGE_SIZE]u8 {
     var page = std.mem.zeroes([t.PAGE_SIZE]u8);
-    t.PageHeader.writeLSN(&page, lsn);
+    std.mem.writeInt(u64, page[@offsetOf(t.PageHeader, "lsn")..][0..8], lsn, .little);
     return page;
 }
 
@@ -94,7 +94,7 @@ test "recovery applies WAL record to a stale page" {
     var result: [t.PAGE_SIZE]u8 = undefined;
     try pager.readPage(1, &result);
     try std.testing.expectEqualSlices(u8, "hello", result[16..21]);
-    try std.testing.expectEqual(@as(u64, 10), t.PageHeader.readLSN(&result));
+    try std.testing.expectEqual(@as(u64, 10), std.mem.readInt(u64, result[@offsetOf(t.PageHeader, "lsn")..][0..8], .little));
 }
 
 test "recovery skips a page whose LSN is already ahead of the WAL record" {
@@ -122,7 +122,7 @@ test "recovery skips a page whose LSN is already ahead of the WAL record" {
     var result: [t.PAGE_SIZE]u8 = undefined;
     try pager.readPage(1, &result);
     try std.testing.expectEqual(@as(u8, 0xAA), result[16]);
-    try std.testing.expectEqual(@as(u64, 20), t.PageHeader.readLSN(&result));
+    try std.testing.expectEqual(@as(u64, 20), std.mem.readInt(u64, result[@offsetOf(t.PageHeader, "lsn")..][0..8], .little));
 }
 
 test "recovery patches stale pages and skips fresh ones in the same run" {

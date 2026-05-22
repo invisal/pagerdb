@@ -204,9 +204,10 @@ pub const WAL = struct {
                         try pager.readPage(record.page_id, &buffer);
                         const offset: usize = @intCast(record.offset);
                         if (offset + record.payload.len > t.PAGE_SIZE) return error.CorruptWAL;
-                        if (t.PageHeader.readLSN(&buffer) < record.lsn) {
+                        const page_lsn = std.mem.readInt(u64, buffer[@offsetOf(t.PageHeader, "lsn")..][0..8], .little);
+                        if (page_lsn < record.lsn) {
                             @memcpy(buffer[offset .. offset + record.payload.len], record.payload);
-                            t.PageHeader.writeLSN(&buffer, record.lsn);
+                            std.mem.writeInt(u64, buffer[@offsetOf(t.PageHeader, "lsn")..][0..8], record.lsn, .little);
                             try pager.writePage(record.page_id, &buffer, &.{});
                         }
                     }
