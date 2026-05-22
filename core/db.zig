@@ -9,6 +9,7 @@ const index_key_mod = @import("index_key.zig");
 const catalog = @import("catalog.zig");
 const overflow = @import("overflow.zig");
 const txn_mod = @import("txn.zig");
+const pp = @import("sql/physical_plan.zig");
 
 // Database handle.  Must be heap-allocated (via init() or load()) because
 // catalog.pager is a pointer that must remain valid for the lifetime of the
@@ -468,6 +469,35 @@ pub const Db = struct {
         }
     };
 
+    pub const IndexRangeScanIterator = struct {
+        it: btree.IndexBTree.ScanIterator,
+        db: *Db,
+        table_meta: *const catalog.TableMeta,
+        schema_buf: [64]row.ColumnSchema,
+        schema_len: usize,
+
+        // key is a slice into self.it's internal page buffer — valid only until
+        // the next call to next().  Callers must consume it before calling next() again.
+        pub fn next(self: *IndexRangeScanIterator, alloc: std.mem.Allocator) !?struct { rowid: u64, key: []const u8, values: []row.Value } {
+            const key = try self.it.next() orelse return null;
+            const rowid = index_key_mod.extractRowid(key);
+
+            var leaf_buf: [t.PAGE_SIZE]u8 = undefined;
+            const cell = try btree.lookupCell(&self.db.pager, self.table_meta.btree_root, rowid, &leaf_buf) orelse return null;
+            const cols = self.schema_buf[0..self.schema_len];
+
+            const row_bytes: []u8 = if (cell.is_overflow) blk: {
+                const out = try alloc.alloc(u8, cell.overflow_len);
+                errdefer alloc.free(out);
+                try overflow.readChain(&self.db.pager, cell.overflow_page, cell.overflow_len, out);
+                break :blk out;
+            } else try alloc.dupe(u8, cell.row_data);
+            defer alloc.free(row_bytes);
+
+            return .{ .rowid = rowid, .key = key, .values = try row.decodeRow(cols, row_bytes, alloc) };
+        }
+    };
+
     // Open a forward scan over every row in table, in rowid order.
     // The returned iterator borrows &self.pager, so it must not outlive db.
     pub fn scanOpen(self: *Db, table: []const u8) !DbRowIterator {
@@ -481,6 +511,28 @@ pub const Db = struct {
             it.schema_buf[i] = .{ .col_type = c.col_type, .nullable = c.nullable };
         }
         return it;
+    }
+
+    pub fn indexRangeScanOpen(self: *Db, table: []const u8, index: catalog.IndexMeta, range: pp.KeyRange) !IndexRangeScanIterator {
+        const meta = self.cat.getTable(table) orelse return error.TableNotFound;
+        const it = if (range.lower) |lb|
+            try btree.IndexBTree.ScanIterator.initFromLower(&self.pager, index.btree_root, lb.encoded)
+        else
+            try btree.IndexBTree.ScanIterator.init(&self.pager, index.btree_root);
+
+        var iter = IndexRangeScanIterator{
+            .it = it,
+            .db = self,
+            .table_meta = meta,
+            .schema_buf = undefined,
+            .schema_len = meta.columns.len,
+        };
+
+        for (meta.columns, 0..) |c, i| {
+            iter.schema_buf[i] = row.ColumnSchema{ .col_type = c.col_type, .nullable = c.nullable };
+        }
+
+        return iter;
     }
 
     // Walk every row in a table in rowid order, calling cb(rowid, values, ctx).

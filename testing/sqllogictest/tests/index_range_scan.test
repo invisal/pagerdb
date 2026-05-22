@@ -1,0 +1,184 @@
+# Index range scan tests
+# Verifies that Filter(SeqScan) is replaced by IndexRangeScan when a secondary
+# index exists on the filtered column, and that results are correct.
+
+statement ok
+CREATE TABLE scores (id INTEGER, val INTEGER, name TEXT)
+
+statement ok
+CREATE INDEX idx_val ON scores (val)
+
+statement ok
+INSERT INTO scores VALUES (1, 10, 'a')
+
+statement ok
+INSERT INTO scores VALUES (2, 20, 'b')
+
+statement ok
+INSERT INTO scores VALUES (3, 30, 'c')
+
+statement ok
+INSERT INTO scores VALUES (4, 40, 'd')
+
+statement ok
+INSERT INTO scores VALUES (5, 50, 'e')
+
+# Equality on indexed column
+query I
+SELECT id FROM scores WHERE val = 30 ORDER BY id
+----
+3
+
+# Equality — no match
+query I
+SELECT id FROM scores WHERE val = 99 ORDER BY id
+----
+
+# Lower bound only (exclusive)
+query I
+SELECT id FROM scores WHERE val > 20 ORDER BY id
+----
+3
+4
+5
+
+# Lower bound only (inclusive)
+query I
+SELECT id FROM scores WHERE val >= 20 ORDER BY id
+----
+2
+3
+4
+5
+
+# Upper bound only (exclusive)
+query I
+SELECT id FROM scores WHERE val < 20 ORDER BY id
+----
+1
+
+# Upper bound only (inclusive)
+query I
+SELECT id FROM scores WHERE val <= 20 ORDER BY id
+----
+1
+2
+
+# Closed range (both bounds inclusive)
+query I
+SELECT id FROM scores WHERE val >= 20 AND val <= 40 ORDER BY id
+----
+2
+3
+4
+
+# Closed range (exclusive bounds)
+query I
+SELECT id FROM scores WHERE val > 10 AND val < 40 ORDER BY id
+----
+2
+3
+
+# Range that matches nothing
+query I
+SELECT id FROM scores WHERE val > 100
+----
+
+# Range matching all rows
+query I
+SELECT id FROM scores WHERE val >= 10 ORDER BY id
+----
+1
+2
+3
+4
+5
+
+# Range + residual predicate on non-indexed column
+query I
+SELECT id FROM scores WHERE val > 10 AND name = 'c' ORDER BY id
+----
+3
+
+# Multiple residual conjuncts
+query I
+SELECT id FROM scores WHERE val >= 20 AND val <= 40 AND name != 'b' ORDER BY id
+----
+3
+4
+
+# Equality on a value at the boundary (smallest)
+query I
+SELECT id FROM scores WHERE val = 10 ORDER BY id
+----
+1
+
+# Equality on a value at the boundary (largest)
+query I
+SELECT id FROM scores WHERE val = 50 ORDER BY id
+----
+5
+
+# Non-indexed column filter still works (SeqScan fallback)
+query I
+SELECT id FROM scores WHERE name = 'c' ORDER BY id
+----
+3
+
+# Multiple rows with the same indexed value
+statement ok
+CREATE TABLE dupes (id INTEGER, val INTEGER)
+
+statement ok
+CREATE INDEX idx_dupes_val ON dupes (val)
+
+statement ok
+INSERT INTO dupes VALUES (1, 10)
+
+statement ok
+INSERT INTO dupes VALUES (2, 10)
+
+statement ok
+INSERT INTO dupes VALUES (3, 20)
+
+query I
+SELECT id FROM dupes WHERE val = 10 ORDER BY id
+----
+1
+2
+
+query I
+SELECT id FROM dupes WHERE val >= 10 AND val < 20 ORDER BY id
+----
+1
+2
+
+# Text column index range scan
+statement ok
+CREATE TABLE words (id INTEGER, word TEXT)
+
+statement ok
+CREATE INDEX idx_word ON words (word)
+
+statement ok
+INSERT INTO words VALUES (1, 'apple')
+
+statement ok
+INSERT INTO words VALUES (2, 'banana')
+
+statement ok
+INSERT INTO words VALUES (3, 'cherry')
+
+statement ok
+INSERT INTO words VALUES (4, 'date')
+
+query I
+SELECT id FROM words WHERE word = 'banana' ORDER BY id
+----
+2
+
+query I
+SELECT id FROM words WHERE word >= 'banana' AND word <= 'cherry' ORDER BY id
+----
+2
+3

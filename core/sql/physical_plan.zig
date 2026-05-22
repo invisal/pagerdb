@@ -3,6 +3,17 @@ const lp = @import("logical_plan.zig");
 const ee = @import("exec_expr.zig");
 const catalog = @import("../catalog.zig");
 const vtab_mod = @import("../vtable/root.zig");
+const range_mod = @import("optimizer/range.zig");
+
+pub const KeyBound = struct {
+    encoded: []const u8, // arena-owned, valid for the lifetime of the physical plan.
+    inclusive: bool,
+};
+
+pub const KeyRange = struct {
+    lower: ?KeyBound = null,
+    upper: ?KeyBound = null,
+};
 
 // ── Physical plan types ────────────────────────────────────────────────────────
 
@@ -118,7 +129,22 @@ pub const PhysicalDistinct = struct {
     schema: lp.Schema,
 };
 
+pub const PhysicalIndexRangeScan = struct {
+    table: []const u8,
+    index: catalog.IndexMeta,
+    range: KeyRange,
+    schema: lp.Schema,
+
+    // Extra conditions to check after the index scan, because the index cannot
+    // answer them.  Example: WHERE val > 10 AND name = 'c' (index on val).
+    // The index gives us rows where val > 10.  We then fetch each full row and
+    // check name = 'c' here before deciding to keep or skip it.
+    // Null means no extra check needed — the index range is enough.
+    residual: ?ee.ExecExpr = null,
+};
+
 pub const PhysicalPlan = union(enum) {
+    // Scanning Plan
     seq_scan: PhysicalSeqScan,
     vtab_scan: PhysicalVTabScan,
     const_scan: void,
@@ -129,10 +155,15 @@ pub const PhysicalPlan = union(enum) {
     sort: *PhysicalSort,
     distinct: *PhysicalDistinct,
     join: *PhysicalJoin,
+    index_range_scan: PhysicalIndexRangeScan,
+
+    // Mutation Plan
     insert: PhysicalInsert,
     insert_select: PhysicalInsertSelect,
     update: PhysicalUpdate,
     delete: PhysicalDelete,
+
+    // DDL Plan
     create_table: PhysicalCreateTable,
     create_index: PhysicalCreateIndex,
     create_view: PhysicalCreateView,
@@ -154,6 +185,7 @@ pub const PhysicalPlan = union(enum) {
             .sort => |n| n.schema,
             .distinct => |n| n.schema,
             .join => |n| n.schema,
+            .index_range_scan => |n| n.schema,
             .insert => |n| n.schema,
             .insert_select => |n| n.schema,
             .update => |n| n.schema,
@@ -222,6 +254,7 @@ fn planHasOuterRef(plan: PhysicalPlan) bool {
             if (j.condition) |c| if (exprHasOuterRef(c)) break :blk true;
             break :blk planHasOuterRef(j.left) or planHasOuterRef(j.right);
         },
+        .index_range_scan => |n| if (n.residual) |r| exprHasOuterRef(r) else false,
         else => false,
     };
 }
@@ -236,9 +269,13 @@ pub const PhysicalPlanner = struct {
     db_opaque: ?*anyopaque = null,
     subquery_exec: ?ee.SubqueryExecFn = null,
     in_subquery_exec: ?ee.InSubqueryExecFn = null,
+    catalog: *catalog.Catalog,
 
-    pub fn init(allocator: std.mem.Allocator) PhysicalPlanner {
-        return .{ .arena = std.heap.ArenaAllocator.init(allocator) };
+    pub fn init(allocator: std.mem.Allocator, cat: *catalog.Catalog) PhysicalPlanner {
+        return PhysicalPlanner{
+            .arena = std.heap.ArenaAllocator.init(allocator),
+            .catalog = cat,
+        };
     }
 
     pub fn deinit(self: *PhysicalPlanner) void {
@@ -385,17 +422,22 @@ pub const PhysicalPlanner = struct {
 
     fn planFilter(self: *PhysicalPlanner, node: *lp.Filter) !PhysicalPlan {
         if (node.input.* == .seq_scan) {
+            const scan = node.input.seq_scan;
+
             // Find the __rowid column index in this scan's schema, then check
             // if the predicate is a simple equality on it.  If so, replace the
             // SeqScan+Filter with a direct B-tree point lookup.
             const scan_schema = node.input.seq_scan.schema;
             var rowid_col_idx: ?usize = null;
+
             for (scan_schema.columns) |col| {
                 if (std.mem.eql(u8, col.name, "__rowid")) {
                     rowid_col_idx = col.index;
                     break;
                 }
             }
+
+            // WHERE __rowid = N → skip the scan entirely, fetch one row directly.
             if (rowid_col_idx) |ridx| {
                 if (extractRowidEq(node.predicate, ridx)) |rowid_val| {
                     return .{ .point_lookup = .{
@@ -405,7 +447,25 @@ pub const PhysicalPlanner = struct {
                     } };
                 }
             }
+
+            // Try to replace Filter(SeqScan) with an IndexRangeScan using a secondary index.
+            if (self.catalog.getTable(scan.table)) |meta| {
+                for (meta.indexes) |index_meta| {
+                    if (try range_mod.extractRange(self.alloc(), node.predicate, index_meta)) |result| {
+                        const residual_exec: ?ee.ExecExpr = if (result.residual) |r| try self.planExpr(r) else null;
+
+                        return .{ .index_range_scan = .{
+                            .table = scan.table,
+                            .index = index_meta,
+                            .range = result.range,
+                            .schema = node.schema,
+                            .residual = residual_exec,
+                        } };
+                    }
+                }
+            }
         }
+
         const phys_input = try self.alloc().create(PhysicalPlan);
         phys_input.* = try self.plan(node.input.*);
         const filter_node = try self.alloc().create(PhysicalFilter);
@@ -604,7 +664,7 @@ test "SeqScan stays as SeqScan" {
 
     var lplanner = lp.LogicalPlanner.init(&db.cat, alloc);
     defer lplanner.deinit();
-    var pplanner = PhysicalPlanner.init(alloc);
+    var pplanner = PhysicalPlanner.init(alloc, &db.cat);
     defer pplanner.deinit();
 
     const pp = try makePlan("SELECT * FROM t", alloc, &lplanner, &pplanner);
@@ -628,7 +688,7 @@ test "Filter over SeqScan becomes PhysicalFilter" {
 
     var lplanner = lp.LogicalPlanner.init(&db.cat, alloc);
     defer lplanner.deinit();
-    var pplanner = PhysicalPlanner.init(alloc);
+    var pplanner = PhysicalPlanner.init(alloc, &db.cat);
     defer pplanner.deinit();
 
     const pp = try makePlan("SELECT * FROM t WHERE score > 5", alloc, &lplanner, &pplanner);
@@ -652,7 +712,7 @@ test "rowid equality filter becomes PointLookup" {
 
     var lplanner = lp.LogicalPlanner.init(&db.cat, alloc);
     defer lplanner.deinit();
-    var pplanner = PhysicalPlanner.init(alloc);
+    var pplanner = PhysicalPlanner.init(alloc, &db.cat);
     defer pplanner.deinit();
 
     const pp = try makePlan("SELECT * FROM t WHERE __rowid = 42", alloc, &lplanner, &pplanner);
@@ -680,7 +740,7 @@ test "Project carries through exprs" {
 
     var lplanner = lp.LogicalPlanner.init(&db.cat, alloc);
     defer lplanner.deinit();
-    var pplanner = PhysicalPlanner.init(alloc);
+    var pplanner = PhysicalPlanner.init(alloc, &db.cat);
     defer pplanner.deinit();
 
     const pp = try makePlan("SELECT a, c FROM t", alloc, &lplanner, &pplanner);
@@ -705,7 +765,7 @@ test "INSERT physical plan preserves values" {
 
     var lplanner = lp.LogicalPlanner.init(&db.cat, alloc);
     defer lplanner.deinit();
-    var pplanner = PhysicalPlanner.init(alloc);
+    var pplanner = PhysicalPlanner.init(alloc, &db.cat);
     defer pplanner.deinit();
 
     const pp = try makePlan("INSERT INTO t VALUES (7)", alloc, &lplanner, &pplanner);
@@ -728,7 +788,7 @@ test "UPDATE physical plan wraps input" {
 
     var lplanner = lp.LogicalPlanner.init(&db.cat, alloc);
     defer lplanner.deinit();
-    var pplanner = PhysicalPlanner.init(alloc);
+    var pplanner = PhysicalPlanner.init(alloc, &db.cat);
     defer pplanner.deinit();
 
     const pp = try makePlan("UPDATE t SET x = 1 WHERE x = 0", alloc, &lplanner, &pplanner);
