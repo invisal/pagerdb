@@ -160,11 +160,15 @@ pub const DiskPager = struct {
         const offset: u64 = @as(u64, page_id) * t.PAGE_SIZE;
         const n = try self.file.readAt(buf, offset);
         if (n != t.PAGE_SIZE) return error.IncompleteRead;
+        try t.verifyPageChecksum(page_id, buf);
     }
 
     fn writePageRaw(self: *DiskPager, page_id: u32, buf: *const [t.PAGE_SIZE]u8) !void {
+        // Copy so we can stamp the checksum without mutating the caller's buffer.
+        var stamped = buf.*;
+        t.writePageChecksum(page_id, &stamped);
         const offset: u64 = @as(u64, page_id) * t.PAGE_SIZE;
-        try self.file.writeAt(buf, offset);
+        try self.file.writeAt(&stamped, offset);
     }
 
     fn diskReadPage(ptr: *anyopaque, page_id: u32, buf: *[t.PAGE_SIZE]u8) anyerror!void {

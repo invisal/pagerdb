@@ -30,6 +30,38 @@ pub const PageHeader = extern struct {
     _pad: u16,
 };
 
+const CHECKSUM_OFF = @offsetOf(PageHeader, "checksum"); // 8
+const CHECKSUM_END = CHECKSUM_OFF + @sizeOf(u32); // 12
+
+// Compute the page checksum.  Covers every byte except the checksum field
+// itself, so corruption in lsn, page_type, flags, or the data region is
+// detected.  XORing with page_id catches the case where the OS reads the
+// wrong physical block into a buffer (wrong-block detection, same as
+// PostgreSQL's block-number XOR trick).
+pub fn pageChecksum(page_id: u32, buf: *const [PAGE_SIZE]u8) u32 {
+    var h = std.hash.Crc32.init();
+    h.update(buf[0..CHECKSUM_OFF]); // lsn
+    h.update(buf[CHECKSUM_END..]); // page_type, flags, _pad, data
+    return h.final() ^ page_id;
+}
+
+// Stamp the checksum into a page buffer before writing to disk.
+pub fn writePageChecksum(page_id: u32, buf: *[PAGE_SIZE]u8) void {
+    const cs = pageChecksum(page_id, buf);
+    std.mem.writeInt(u32, buf[CHECKSUM_OFF..][0..4], cs, .little);
+}
+
+// Verify the checksum of a page read from disk.  Returns error.BadChecksum
+// on mismatch so callers can distinguish corruption from other I/O errors.
+pub fn verifyPageChecksum(page_id: u32, buf: *const [PAGE_SIZE]u8) error{BadChecksum}!void {
+    const stored = std.mem.readInt(u32, buf[CHECKSUM_OFF..][0..4], .little);
+    // A zero checksum means the page was written before checksum support was
+    // added (or is a freshly zeroed page).  Accept it to stay compatible with
+    // existing databases.
+    if (stored == 0) return;
+    if (pageChecksum(page_id, buf) != stored) return error.BadChecksum;
+}
+
 pub const ColType = enum(u8) {
     int = 0,
     real = 1,
