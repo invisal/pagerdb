@@ -3,9 +3,9 @@
 const std = @import("std");
 const lp = @import("../logical_plan.zig");
 
-// Flattens an AND-tree into a list of independent conjuncts.
-// A "conjunct" is one independent clause of an AND expression.
-// Only splits on AND; everything else is treated as a single opaque conjunct.
+/// Flattens an AND-tree into a list of independent conjuncts.
+/// A "conjunct" is one independent clause of an AND expression.
+/// Only splits on AND; everything else is treated as a single opaque conjunct.
 pub fn splitConjuncts(a: std.mem.Allocator, expr: lp.Expr, out: *std.ArrayListUnmanaged(lp.Expr)) !void {
     if (expr == .binary and expr.binary.op == .and_) {
         try splitConjuncts(a, expr.binary.left, out);

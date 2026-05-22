@@ -6,6 +6,7 @@ const eval = @import("../eval.zig");
 const ee = @import("../exec_expr.zig");
 const vtab_mod = @import("../../vtable/root.zig");
 const agg_mod = @import("agg_func.zig");
+const index_key = @import("./../../index_key.zig");
 
 const Db = db_mod.Db;
 const Allocator = std.mem.Allocator;
@@ -127,6 +128,64 @@ pub const PointLookupCursor = struct {
         const buf = try ctx.alloc.alloc(BorrowedRow, 1);
         buf[0] = r;
         return buf;
+    }
+};
+
+pub const IndexRangeScanCursor = struct {
+    it: Db.IndexRangeScanIterator,
+    range: pp.KeyRange,
+    residual: ?ee.ExecExpr,
+    batch_arena: std.heap.ArenaAllocator,
+    schema_col_count: usize,
+
+    pub fn deinit(self: *IndexRangeScanCursor) void {
+        self.batch_arena.deinit();
+    }
+
+    pub fn next(self: *IndexRangeScanCursor, ctx: EvalContext) !?[]BorrowedRow {
+        resetArena(&self.batch_arena);
+        const ba = self.batch_arena.allocator();
+        var buf = try ba.alloc(BorrowedRow, BATCH_SIZE);
+        var n: usize = 0;
+
+        while (n < BATCH_SIZE) {
+            const hit = try self.it.next(ba) orelse break;
+
+            // Lower bound: initFromLower lands on the right leaf page but
+            // starts at cell_index 0, so the first few entries on that page
+            // may still be below the bound.  Skip them here.
+            if (self.range.lower) |lb| {
+                const prefix_len = @min(hit.key.len, lb.encoded.len);
+                const ord = index_key.compareKeys(hit.key[0..prefix_len], lb.encoded[0..prefix_len]);
+                const before = if (lb.inclusive) ord == .lt else ord != .gt;
+                if (before) continue;
+            }
+
+            // Upper bound: compare the key prefix (same length as the encoded bound)
+            // so the rowid suffix doesn't affect the comparison.
+            if (self.range.upper) |ub| {
+                const prefix_len = @min(hit.key.len, ub.encoded.len);
+                const ord = index_key.compareKeys(hit.key[0..prefix_len], ub.encoded[0..prefix_len]);
+                const past = if (ub.inclusive) ord == .gt else ord != .lt;
+                if (past) break;
+            }
+
+            const vals = try ba.alloc(row_mod.Value, hit.values.len + 3);
+            @memcpy(vals[0..hit.values.len], hit.values);
+            vals[hit.values.len] = .{ .int = @intCast(hit.rowid) };
+            vals[hit.values.len + 1] = .{ .int = 0 };
+            vals[hit.values.len + 2] = .{ .int = 0 };
+
+            if (self.residual) |pred| {
+                const ev = try eval.evalExpr(pred, vals, ctx);
+                if (!eval.isTruthy(ev)) continue;
+            }
+
+            buf[n] = .{ .rowid = hit.rowid, .values = vals };
+            n += 1;
+        }
+        if (n == 0) return null;
+        return buf[0..n];
     }
 };
 
@@ -778,6 +837,7 @@ pub const Cursor = union(enum) {
     seq_scan: SeqScanCursor,
     vtab_scan: VTabScanCursor,
     point_lookup: PointLookupCursor,
+    index_range_scan: *IndexRangeScanCursor,
     filter: *FilterCursor,
     project: *ProjectCursor,
     aggregate: *AggregateCursor,
@@ -811,6 +871,17 @@ pub const Cursor = union(enum) {
                     break :blk2 BorrowedRow{ .rowid = n.rowid, .values = full };
                 } else null;
                 break :blk .{ .point_lookup = .{ .row = r } };
+            },
+            .index_range_scan => |n| blk: {
+                const c = try a.create(IndexRangeScanCursor);
+                c.* = IndexRangeScanCursor{
+                    .it = try db.indexRangeScanOpen(n.table, n.index, n.range),
+                    .batch_arena = std.heap.ArenaAllocator.init(a),
+                    .residual = n.residual,
+                    .range = n.range,
+                    .schema_col_count = n.schema.columns.len - 3,
+                };
+                break :blk Cursor{ .index_range_scan = c };
             },
             .filter => |n| blk: {
                 const fc = try a.create(FilterCursor);
@@ -896,6 +967,7 @@ pub const Cursor = union(enum) {
             .sort => |s| s.next(ctx),
             .distinct => |d| d.next(ctx),
             .join => |j| j.next(ctx),
+            .index_range_scan => |i| i.next(ctx),
         };
     }
 
@@ -909,6 +981,7 @@ pub const Cursor = union(enum) {
             .sort => |s| s.deinit(a),
             .distinct => |d| d.deinit(a),
             .join => |j| j.deinit(a),
+            .index_range_scan => |i| i.deinit(),
             else => {},
         }
     }

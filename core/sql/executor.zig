@@ -283,7 +283,7 @@ pub fn execute(allocator: std.mem.Allocator, db: *Db, sql: []const u8) !ExecResu
     defer optimizer.deinit();
     const optimized = try optimizer.optimize(logical);
 
-    var phys_planner = pp_mod.PhysicalPlanner.init(allocator);
+    var phys_planner = pp_mod.PhysicalPlanner.init(allocator, &db.cat);
     defer phys_planner.deinit();
     // Wire the db pointer and subquery execution callback so that scalar
     // subqueries compiled by planExpr can execute against the live database.

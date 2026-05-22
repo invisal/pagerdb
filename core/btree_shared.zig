@@ -619,12 +619,22 @@ pub fn BTree(comptime Fmt: type) type {
             pager: *Pager,
             current_page: u32,
             cell_index: u16,
-            buf: [t.PAGE_SIZE]u8,
+            buf: [t.PAGE_SIZE]u8 = undefined,
 
             pub fn init(pager: *Pager, root_id: u32) !ScanIterator {
                 const first = try scanFirst(pager, root_id);
-                var it = ScanIterator{ .pager = pager, .current_page = first, .cell_index = 0, .buf = undefined };
+                var it = ScanIterator{ .pager = pager, .current_page = first, .cell_index = 0 };
                 try pager.readPage(first, &it.buf);
+                return it;
+            }
+
+            // Start scanning from the leaf page that contains lower_key.
+            // cell_index starts at 0, so the first few entries may be below
+            // lower_key — the caller is responsible for skipping them.
+            pub fn initFromLower(pager: *Pager, root_id: u32, lower_key: Fmt.Key) !ScanIterator {
+                const leaf_page = try findLeaf(pager, root_id, lower_key);
+                var it = ScanIterator{ .pager = pager, .current_page = leaf_page, .cell_index = 0 };
+                try pager.readPage(leaf_page, &it.buf);
                 return it;
             }
 

@@ -170,6 +170,13 @@ pub fn build(b: *std.Build) void {
     const wasm_step = b.step("wasm", "Build WASM binding for browser/Node.js use");
     wasm_step.dependOn(&b.addInstallArtifact(wasm_exe, .{}).step);
 
+    // ── Check step (used by ZLS check_on_save — compiles without installing) ──
+    // Only checks the core library — the entry point that reaches all files
+    // under core/. CLI and SLT are thin wrappers around core, so errors there
+    // are almost always rooted here. Keeping just one artifact makes this fast.
+    const check_step = b.step("check", "Type-check core sources without installing");
+    check_step.dependOn(&b.addLibrary(.{ .name = "pagerdb", .root_module = core_mod, .linkage = .static }).step);
+
     // ── Tests (rooted at the core library) ───────────────────────────────────
     const test_filter = b.option(
         []const u8,
