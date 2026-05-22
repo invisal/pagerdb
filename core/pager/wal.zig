@@ -13,8 +13,9 @@
 //
 // Record formats:
 //
-//   Data   (type=0):  [type:u8 | checksum:u32 | payload_len:u32 | lsn:u64 | page_id:u32 | offset:u16 | payload...]
-//   Commit (type=1):  [type:u8 | timestamp_us:u64]
+//   Data      (type=0):  [type:u8 | checksum:u32 | payload_len:u32 | lsn:u64 | page_id:u32 | offset:u16 | payload...]
+//   Commit    (type=1):  [type:u8 | timestamp_us:u64]
+//   Full-page (type=2):  [type:u8 | checksum:u32 | lsn:u64 | page_id:u32 | page_data:PAGE_SIZE]
 //
 //   The data record checksum (CRC32) covers every field except itself.
 //   A bad checksum or truncated read means the record was partially written
@@ -24,7 +25,14 @@
 //   point-in-time recovery: given a target time, scan commit records to find
 //   the WAL position to replay up to.
 //
-// Write protocol:  append data records → appendCommit → flush (fsync) → write data pages → fsync
+//   Full-page records are written once per page per checkpoint period, before
+//   the first delta for that page.  They capture the page image from just
+//   before the deltas are applied.  Recovery uses this image to restore a
+//   torn (partially-written) page to a consistent state before replaying
+//   subsequent delta records, preventing corruption from torn 4 KB sector writes
+//   on pages larger than one sector (the same technique PostgreSQL calls FPW).
+//
+// Write protocol:  append [full_page?] data records → appendCommit → flush (fsync) → write data pages → fsync
 //   Crash before flush: no commit marker, recovery discards the records.
 //   Crash after flush:  commit marker present, recovery replays the records.
 //
@@ -62,7 +70,7 @@ const WALError = error{
 
 // Each WAL record begins with a type byte so recovery can distinguish data
 // records from commit markers without parsing the full record header.
-const RecordType = enum(u8) { data = 0, commit = 1 };
+const RecordType = enum(u8) { data = 0, commit = 1, full_page = 2 };
 
 pub const RECORD_HEADER_SIZE: u64 = @sizeOf(u8) + // type
     @sizeOf(u32) + // checksum
@@ -72,6 +80,10 @@ pub const RECORD_HEADER_SIZE: u64 = @sizeOf(u8) + // type
     @sizeOf(u16); // offset
 
 pub const COMMIT_SIZE: u64 = @sizeOf(u8) + @sizeOf(u64); // type + timestamp_us
+
+// Full-page record size: type + checksum + lsn + page_id + page_data.
+// This is ~8 KB per record; only written once per page per checkpoint period.
+pub const FPW_SIZE: u64 = @sizeOf(u8) + @sizeOf(u32) + @sizeOf(u64) + @sizeOf(u32) + t.PAGE_SIZE;
 
 // ── Checkpoint file ───────────────────────────────────────────────────────────
 
@@ -357,6 +369,32 @@ pub const WAL = struct {
         self.next_lsn += COMMIT_SIZE;
     }
 
+    // Write a full-page image of buf to the WAL and return its LSN.
+    // Must be called BEFORE any delta records for the same page in this
+    // transaction so recovery can restore a torn page to a consistent base
+    // before replaying subsequent deltas.
+    // buf is the page content BEFORE the deltas are applied.
+    pub fn appendFullPage(self: *WAL, page_id: u32, buf: *const [t.PAGE_SIZE]u8) !u64 {
+        const type_byte: u8 = @intFromEnum(RecordType.full_page);
+        const lsn = self.next_lsn;
+
+        // CRC32 covers type + lsn + page_id + page_data (everything except checksum).
+        var hasher = std.hash.Crc32.init();
+        hasher.update(&.{type_byte});
+        hasher.update(&intBytes(u64, lsn));
+        hasher.update(&intBytes(u32, page_id));
+        hasher.update(buf);
+
+        try self.appendInt(u8, type_byte);
+        try self.appendInt(u32, hasher.final());
+        try self.appendInt(u64, lsn);
+        try self.appendInt(u32, page_id);
+        try self.buffer.appendSlice(self.alloc, buf);
+
+        self.next_lsn += FPW_SIZE;
+        return lsn;
+    }
+
     // Replay WAL records to bring pages up to date after a crash.
     // Only records from transactions that ended with a commit marker are applied;
     // trailing records without a commit marker are discarded (the transaction
@@ -367,9 +405,16 @@ pub const WAL = struct {
         var wal_reader = self.reader();
         self.next_lsn = try wal_reader.readHeader();
 
-        var pending: std.ArrayList(Record) = .empty;
+        // Buffer committed transactions.  Both data records and full-page images
+        // are held until a commit marker is seen, then applied atomically.
+        // Trailing records with no commit are discarded (transaction never finished).
+        const PendingEntry = union(enum) { data: Record, full_page: FullPageRecord };
+        var pending: std.ArrayList(PendingEntry) = .empty;
         defer {
-            for (pending.items) |r| alloc.free(r.payload);
+            for (pending.items) |pe| switch (pe) {
+                .data => |r| alloc.free(r.payload),
+                .full_page => |fp| alloc.free(fp.payload),
+            };
             pending.deinit(alloc);
         }
 
@@ -377,20 +422,45 @@ pub const WAL = struct {
 
         while (try wal_reader.next(alloc)) |entry| {
             switch (entry) {
-                .data => |record| try pending.append(alloc, record),
+                .data => |record| try pending.append(alloc, .{ .data = record }),
+                .full_page => |fp| try pending.append(alloc, .{ .full_page = fp }),
                 .commit => {
-                    for (pending.items) |record| {
-                        try pager.readPage(record.page_id, &buffer);
-                        const offset: usize = @intCast(record.offset);
-                        if (offset + record.payload.len > t.PAGE_SIZE) return error.CorruptWAL;
-                        const page_lsn = std.mem.readInt(u64, buffer[@offsetOf(t.PageHeader, "lsn")..][0..8], .little);
-                        if (page_lsn < record.lsn) {
-                            @memcpy(buffer[offset .. offset + record.payload.len], record.payload);
-                            std.mem.writeInt(u64, buffer[@offsetOf(t.PageHeader, "lsn")..][0..8], record.lsn, .little);
-                            try pager.writePage(record.page_id, &buffer, &.{});
+                    for (pending.items) |pe| {
+                        switch (pe) {
+                            .data => |record| {
+                                try pager.readPage(record.page_id, &buffer);
+                                const offset: usize = @intCast(record.offset);
+                                if (offset + record.payload.len > t.PAGE_SIZE) return error.CorruptWAL;
+                                const page_lsn = std.mem.readInt(u64, buffer[@offsetOf(t.PageHeader, "lsn")..][0..8], .little);
+                                if (page_lsn < record.lsn) {
+                                    @memcpy(buffer[offset .. offset + record.payload.len], record.payload);
+                                    std.mem.writeInt(u64, buffer[@offsetOf(t.PageHeader, "lsn")..][0..8], record.lsn, .little);
+                                    try pager.writePage(record.page_id, &buffer, &.{});
+                                }
+                            },
+                            .full_page => |fp| {
+                                // Apply the full-page image if the page is stale or torn.
+                                // A BadChecksum means the page was partially written (torn
+                                // sector write); apply the WAL image unconditionally so
+                                // subsequent delta records have a consistent base.
+                                const page_lsn: u64 = blk: {
+                                    pager.readPage(fp.page_id, &buffer) catch |err| switch (err) {
+                                        error.BadChecksum => break :blk 0,
+                                        else => return err,
+                                    };
+                                    break :blk std.mem.readInt(u64, buffer[@offsetOf(t.PageHeader, "lsn")..][0..8], .little);
+                                };
+                                if (page_lsn < fp.lsn) {
+                                    @memcpy(&buffer, fp.payload[0..t.PAGE_SIZE]);
+                                    try pager.writePage(fp.page_id, &buffer, &.{});
+                                }
+                            },
                         }
                     }
-                    for (pending.items) |record| alloc.free(record.payload);
+                    for (pending.items) |pe| switch (pe) {
+                        .data => |r| alloc.free(r.payload),
+                        .full_page => |fp| alloc.free(fp.payload),
+                    };
                     pending.clearRetainingCapacity();
                     self.next_lsn = wal_reader.offset - @sizeOf(u64);
                 },
@@ -426,10 +496,20 @@ pub const Record = struct {
     payload: []const u8,
 };
 
-// WALReader.next() returns this so callers can distinguish data records from
-// commit markers without a separate call.
+// Payload is PAGE_SIZE bytes allocated by WALReader; caller must free.
+pub const FullPageRecord = struct {
+    lsn: u64,
+    page_id: u32,
+    payload: []const u8,
+};
+
+// WALReader.next() returns this so callers can distinguish record types
+// without a separate call.
 pub const WALEntry = union(enum) {
     data: Record,
+    // Full-page image written before the first delta for a page after a
+    // checkpoint.  See FPW_SIZE and appendFullPage for the write side.
+    full_page: FullPageRecord,
     commit: u64, // microseconds since Unix epoch when the transaction committed
 };
 
@@ -493,6 +573,31 @@ pub const WALReader = struct {
                 return .{ .data = Record{
                     .lsn = lsn,
                     .offset = offset,
+                    .page_id = page_id,
+                    .payload = payload,
+                } };
+            },
+            .full_page => {
+                // Truncated checksum field means crash mid-write; treat as end-of-log.
+                const stored = self.readInt(u32) catch return null;
+                const lsn = self.readInt(u64) catch return WALError.CorruptWAL;
+                const page_id = self.readInt(u32) catch return WALError.CorruptWAL;
+
+                const payload = try alloc.alloc(u8, t.PAGE_SIZE);
+                errdefer alloc.free(payload);
+                const n = try self.wal.file.readAt(payload, self.offset);
+                if (n != t.PAGE_SIZE) return WALError.CorruptWAL;
+                self.offset += t.PAGE_SIZE;
+
+                var hasher = std.hash.Crc32.init();
+                hasher.update(&.{type_byte});
+                hasher.update(&WAL.intBytes(u64, lsn));
+                hasher.update(&WAL.intBytes(u32, page_id));
+                hasher.update(payload);
+                if (hasher.final() != stored) return WALError.InvalidChecksum;
+
+                return .{ .full_page = FullPageRecord{
+                    .lsn = lsn,
                     .page_id = page_id,
                     .payload = payload,
                 } };
