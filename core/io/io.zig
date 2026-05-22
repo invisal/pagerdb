@@ -76,6 +76,10 @@ pub const Io = struct {
         openFile: *const fn (*anyopaque, []const u8) anyerror!File,
         // Delete the file at path.  Silently succeeds if the file does not exist.
         deleteFile: *const fn (*anyopaque, []const u8) anyerror!void,
+        // Return the current wall-clock time as microseconds since Unix epoch.
+        // SimIo may return a monotonically advancing counter instead of real
+        // wall time so that tests remain deterministic.
+        nowMicros: *const fn (*anyopaque) u64,
     };
 
     pub fn createFile(self: Io, path: []const u8) !File {
@@ -88,5 +92,9 @@ pub const Io = struct {
 
     pub fn deleteFile(self: Io, path: []const u8) !void {
         return self.vtable.deleteFile(self.ptr, path);
+    }
+
+    pub fn nowMicros(self: Io) u64 {
+        return self.vtable.nowMicros(self.ptr);
     }
 };

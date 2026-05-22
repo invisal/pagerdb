@@ -30,6 +30,7 @@ const Frame = struct {
 
 pub const DiskPager = struct {
     file: File,
+    io: Io,
     allocator: Allocator,
     // Heap-allocated slice; length equals the pool_size passed at creation.
     pool: []Frame,
@@ -55,7 +56,7 @@ pub const DiskPager = struct {
         errdefer file.close();
         const self = try allocator.create(DiskPager);
         errdefer allocator.destroy(self);
-        try initSelf(self, file, allocator, config.pool_size);
+        try initSelf(self, file, io, allocator, config.pool_size);
         errdefer allocator.free(self.pool);
 
         self.wal = config.wal;
@@ -85,7 +86,7 @@ pub const DiskPager = struct {
         const file_size = try file.length();
         const self = try allocator.create(DiskPager);
         errdefer allocator.destroy(self);
-        try initSelf(self, file, allocator, config.pool_size);
+        try initSelf(self, file, io, allocator, config.pool_size);
         errdefer allocator.free(self.pool);
         var pager = Pager{
             .ptr = self,
@@ -111,8 +112,9 @@ pub const DiskPager = struct {
         return pager;
     }
 
-    fn initSelf(self: *DiskPager, file: File, allocator: Allocator, pool_size: usize) !void {
+    fn initSelf(self: *DiskPager, file: File, io: Io, allocator: Allocator, pool_size: usize) !void {
         self.file = file;
+        self.io = io;
         self.allocator = allocator;
         self.tick = 0;
         self.txn_active = false;
@@ -227,7 +229,7 @@ pub const DiskPager = struct {
         // WAL must reach disk before pages so recovery can replay any records
         // that were not yet applied to the data file at crash time.
         if (self.wal) |wal| {
-            try wal.appendCommit();
+            try wal.appendCommit(self.io.nowMicros());
             try wal.flush();
         }
         for (self.pool) |*frame| {

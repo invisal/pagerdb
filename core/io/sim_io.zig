@@ -108,10 +108,16 @@ pub const SimIo = struct {
     fault_after_writes: ?u32 = null,
     write_count: u32 = 0,
 
+    // Monotonically advancing counter used as the simulated wall clock.
+    // Increments by 1 microsecond per call so tests see distinct timestamps
+    // without depending on real wall time.
+    sim_time_us: u64 = 0,
+
     const vtable = Io.VTable{
         .createFile = createFile,
         .openFile = openFile,
         .deleteFile = deleteFile,
+        .nowMicros = nowMicros,
     };
 
     pub fn init(alloc: std.mem.Allocator) SimIo {
@@ -205,5 +211,11 @@ pub const SimIo = struct {
             self.alloc.free(sf.path);
             self.alloc.destroy(sf);
         }
+    }
+
+    fn nowMicros(ptr: *anyopaque) u64 {
+        const self: *SimIo = @ptrCast(@alignCast(ptr));
+        self.sim_time_us += 1;
+        return self.sim_time_us;
     }
 };

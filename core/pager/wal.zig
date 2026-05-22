@@ -13,13 +13,15 @@
 // Record formats:
 //
 //   Data   (type=0):  [type:u8 | checksum:u32 | payload_len:u32 | lsn:u64 | page_id:u32 | offset:u16 | payload...]
-//   Commit (type=1):  [type:u8]
+//   Commit (type=1):  [type:u8 | timestamp_us:u64]
 //
 //   The data record checksum (CRC32) covers every field except itself.
 //   A bad checksum or truncated read means the record was partially written
 //   during a crash and is treated as end-of-log.
-//   The commit record has no checksum — truncation detection is sufficient
-//   since it carries no variable data.
+//   The commit record has no checksum — truncation detection is sufficient.
+//   timestamp_us is microseconds since Unix epoch, stored for future
+//   point-in-time recovery: given a target time, scan commit records to find
+//   the WAL position to replay up to.
 //
 // Write protocol:  append data records → appendCommit → flush (fsync) → write data pages → fsync
 //   Crash before flush: no commit marker, recovery discards the records.
@@ -65,7 +67,7 @@ pub const Record = struct {
 // commit markers without a separate call.
 pub const WALEntry = union(enum) {
     data: Record,
-    commit: void,
+    commit: u64, // microseconds since Unix epoch when the transaction committed
 };
 
 pub const WAL = struct {
@@ -169,9 +171,12 @@ pub const WAL = struct {
     // Write a commit marker as the final WAL entry for a transaction.
     // Must be called before flush() so the marker reaches disk atomically
     // with the preceding data records.
-    pub fn appendCommit(self: *WAL) !void {
+    // timestamp_us is microseconds since Unix epoch, provided by the caller
+    // so WAL stays clock-agnostic and tests can inject deterministic values.
+    pub fn appendCommit(self: *WAL, timestamp_us: u64) !void {
         try self.appendInt(u8, @intFromEnum(RecordType.commit));
-        self.next_lsn += 1;
+        try self.appendInt(u64, timestamp_us);
+        self.next_lsn += 1 + @sizeOf(u64);
     }
 
     // Replay WAL records to bring pages up to date after a crash.
@@ -270,7 +275,12 @@ pub const WALReader = struct {
         };
 
         switch (record_type) {
-            .commit => return .{ .commit = {} },
+            .commit => {
+                // A truncated timestamp means the commit marker itself was torn;
+                // treat as end-of-log (transaction never completed).
+                const timestamp_us = self.readInt(u64) catch return null;
+                return .{ .commit = timestamp_us };
+            },
             .data => {
                 // If the file is truncated mid-record (crash during write), treat it as
                 // end of valid records rather than a hard error.
