@@ -117,6 +117,7 @@ pub const SimIo = struct {
         .createFile = createFile,
         .openFile = openFile,
         .deleteFile = deleteFile,
+        .renameFile = renameFile,
         .nowMicros = nowMicros,
     };
 
@@ -211,6 +212,15 @@ pub const SimIo = struct {
             self.alloc.free(sf.path);
             self.alloc.destroy(sf);
         }
+    }
+
+    fn renameFile(ptr: *anyopaque, old_path: []const u8, new_path: []const u8) anyerror!void {
+        const self: *SimIo = @ptrCast(@alignCast(ptr));
+        const entry = self.files.fetchRemove(old_path) orelse return error.FileNotFound;
+        const sf = entry.value;
+        self.alloc.free(sf.path);
+        sf.path = try self.alloc.dupe(u8, new_path);
+        try self.files.put(sf.path, sf);
     }
 
     fn nowMicros(ptr: *anyopaque) u64 {

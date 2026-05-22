@@ -70,6 +70,7 @@ pub const DiskIo = struct {
         .createFile = createFile,
         .openFile = openFile,
         .deleteFile = deleteFile,
+        .renameFile = renameFile,
         .nowMicros = nowMicros,
     };
 
@@ -105,6 +106,11 @@ pub const DiskIo = struct {
     fn deleteFile(ptr: *anyopaque, path: []const u8) anyerror!void {
         const self: *DiskIo = @ptrCast(@alignCast(ptr));
         try std.Io.Dir.deleteFile(.cwd(), self.std_io, path);
+    }
+
+    fn renameFile(ptr: *anyopaque, old_path: []const u8, new_path: []const u8) anyerror!void {
+        const self: *DiskIo = @ptrCast(@alignCast(ptr));
+        try std.Io.Dir.rename(.cwd(), old_path, .cwd(), new_path, self.std_io);
     }
 
     fn nowMicros(ptr: *anyopaque) u64 {

@@ -10,7 +10,9 @@ const File = io_mod.File;
 const Allocator = std.mem.Allocator;
 
 pub const DEFAULT_POOL_SIZE: usize = 64;
-const WAL_CHECKPOINT_SIZE: usize = 8 * 1024 * 1024; // 8 MB
+// Rotate to a new WAL segment once the current one exceeds this size.
+// Smaller = more frequent checkpoints (faster recovery), larger = fewer I/Os.
+pub const WAL_SEGMENT_SIZE: usize = 8 * 1024 * 1024; // 8 MB
 
 // Runtime-configurable buffer pool settings.  Pass .{} to create/open to
 // accept all defaults (DEFAULT_POOL_SIZE frames × PAGE_SIZE bytes each).
@@ -240,12 +242,12 @@ pub const DiskPager = struct {
         }
         try self.file.sync();
 
-        // Every WAL record is now applied and on disk.  Reset when the WAL
-        // exceeds the checkpoint threshold to bound recovery time.
-        // next_lsn is preserved inside reset() so page LSNs stay valid.
+        // All dirty pages are now on disk.  If the WAL segment has grown past
+        // the threshold, rotate to a new segment and write a checkpoint so
+        // recovery only needs to replay the new (mostly-empty) segment.
         if (self.wal) |wal| {
-            if (wal.offset >= WAL_CHECKPOINT_SIZE) {
-                try wal.reset();
+            if (wal.offset >= WAL_SEGMENT_SIZE) {
+                try wal.rotateAfterCheckpoint();
             }
         }
     }
