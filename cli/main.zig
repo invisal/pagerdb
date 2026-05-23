@@ -4,6 +4,7 @@ const Engine = @import("core");
 
 const ManagedDatabase = Engine.ManagedDatabase;
 const DiskPager = Engine.DiskPager;
+const DiskIo = Engine.DiskIo;
 const InMemoryPager = Engine.InMemoryPager;
 
 const repl = @import("repl.zig");
@@ -22,7 +23,8 @@ pub fn main(init: std.process.Init) !void {
     }
 
     const path: ?[]const u8 = if (args.len < 2) null else args[1];
-    var db = ManagedDatabase.open(alloc, io, path) catch |err| switch (err) {
+    var disk_io = DiskIo.init(alloc, io);
+    var db = ManagedDatabase.open(alloc, disk_io.io(), path) catch |err| switch (err) {
         error.AccessDenied => {
             return error.AccessDenied;
         },

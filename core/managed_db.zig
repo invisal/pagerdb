@@ -5,7 +5,7 @@
 const std = @import("std");
 const Db = @import("db.zig").Db;
 const DiskPager = @import("pager/disk.zig").DiskPager;
-const DiskIo = @import("io/disk_io.zig").DiskIo;
+const Io = @import("io/io.zig").Io;
 const InMemoryPager = @import("pager/memory.zig").InMemoryPager;
 const Pager = @import("pager/pager.zig").Pager;
 const WAL = @import("pager/wal.zig").WAL;
@@ -41,11 +41,6 @@ pub const ManagedDatabase = struct {
     disk_pager: ?*DiskPager,
     wal: ?*WAL,
 
-    // DiskIo is heap-allocated so that Io handles (which hold a pointer into
-    // it) remain valid for the lifetime of ManagedDatabase, not just for the
-    // stack frame of open().
-    disk_io: ?*DiskIo,
-
     wal_base_path: ?[]const u8 = null,
     path: ?[]const u8 = null,
 
@@ -62,17 +57,12 @@ pub const ManagedDatabase = struct {
     ///
     /// **Example:**
     /// ```zig
-    /// var db = try ManagedDatabase.open(allocator, io, "mydb.db");
+    /// var disk_io = DiskIo.init(allocator, std_io);
+    /// var db = try ManagedDatabase.open(allocator, disk_io.io(), "mydb.db");
     /// defer db.deinit();
     /// ```
-    pub fn open(alloc: std.mem.Allocator, std_io: std.Io, path: ?[]const u8) !ManagedDatabase {
+    pub fn open(alloc: std.mem.Allocator, io: Io, path: ?[]const u8) !ManagedDatabase {
         if (path) |db_path| {
-            // Heap-allocate DiskIo so that Io handles derived from it stay valid
-            // for the full lifetime of this ManagedDatabase, not just this frame.
-            const disk_io = try alloc.create(DiskIo);
-            errdefer alloc.destroy(disk_io);
-            disk_io.* = DiskIo.init(alloc, std_io);
-            const io = disk_io.io();
 
             // WAL files share the database path prefix, minus the file extension.
             // e.g. "mydb.db" → "mydb-000001.wal", "mydb.ckpt"
@@ -120,7 +110,6 @@ pub const ManagedDatabase = struct {
                 .wal = wal,
                 .pager = pager,
                 .disk_pager = DiskPager.asDiskPager(&pager),
-                .disk_io = disk_io,
                 .path = try alloc.dupe(u8, db_path),
                 .wal_base_path = wal_base,
                 .alloc = alloc,
@@ -136,7 +125,6 @@ pub const ManagedDatabase = struct {
             .wal = null,
             .pager = pager,
             .disk_pager = null,
-            .disk_io = null,
             .path = null,
             .wal_base_path = null,
             .alloc = alloc,
@@ -159,7 +147,6 @@ pub const ManagedDatabase = struct {
 
         if (self.path) |p| self.alloc.free(p);
         if (self.wal_base_path) |p| self.alloc.free(p);
-        if (self.disk_io) |di| self.alloc.destroy(di);
     }
 
     /// Execute a SQL statement against this database.

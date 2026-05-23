@@ -19,3 +19,14 @@ jobs:
       - uses: ./.github/actions/setup-zig
       - name: Build
         run: zig build
+
+  test:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-zig
+      - name: Run unit tests
+        run: zig build test

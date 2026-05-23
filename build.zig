@@ -78,6 +78,20 @@ pub fn build(b: *std.Build) void {
     if (b.args) |dst_args| run_dst.addArgs(dst_args);
     dst_step.dependOn(&run_dst.step);
 
+    // ── Simulation workload tests ─────────────────────────────────────────────
+    const sim_step = b.step("sim", "Run simulation workload tests");
+
+    for ([_][]const u8{ "order_workload", "random_workload" }) |name| {
+        const mod = b.createModule(.{
+            .root_source_file = b.path(b.fmt("testing/simulator/{s}.zig", .{name})),
+            .target = target,
+            .optimize = optimize,
+        });
+        mod.addImport("core", core_mod);
+        const tests = b.addTest(.{ .root_module = mod });
+        sim_step.dependOn(&b.addRunArtifact(tests).step);
+    }
+
     // ── Sqllogictest runner ───────────────────────────────────────────────────
     const slt_mod = b.createModule(.{
         .root_source_file = b.path("testing/sqllogictest/main.zig"),
