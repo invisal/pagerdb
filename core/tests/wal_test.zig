@@ -1,46 +1,60 @@
 const std = @import("std");
 const WAL = @import("../pager/wal.zig").WAL;
+const segmentPath = @import("../pager/wal.zig").segmentPath;
 const Record = @import("../pager//wal.zig").Record;
 const RECORD_HEADER_SIZE = @import("../pager/wal.zig").RECORD_HEADER_SIZE;
 const DiskIo = @import("../io/disk_io.zig").DiskIo;
 
 const Dir = std.Io.Dir;
 
-test "WAL.open on missing file initializes with lsn=0 and no entries" {
+// Delete WAL segments 1..max_seg and the checkpoint file for base_path.
+fn cleanup(alloc: std.mem.Allocator, std_io: std.Io, base: []const u8, max_seg: u32) void {
+    var seg: u32 = 1;
+    while (seg <= max_seg) : (seg += 1) {
+        const p = segmentPath(base, seg, alloc) catch continue;
+        defer alloc.free(p);
+        Dir.deleteFile(.cwd(), std_io, p) catch {};
+    }
+    const ckpt = std.fmt.allocPrint(alloc, "{s}.ckpt", .{base}) catch return;
+    defer alloc.free(ckpt);
+    Dir.deleteFile(.cwd(), std_io, ckpt) catch {};
+}
+
+test "WAL.open on missing base creates segment 1 with lsn=0" {
     const io = std.testing.io;
     const alloc = std.testing.allocator;
-
-    const path = "/tmp/wal_test_missing.wal";
-    Dir.deleteFile(.cwd(), io, path) catch {};
+    const base = "/tmp/wal_test_missing";
+    defer cleanup(alloc, io, base, 3);
 
     var disk_io = DiskIo.init(alloc, io);
-    var wal = try WAL.open(alloc, disk_io.io(), path);
+    var wal = try WAL.open(alloc, disk_io.io(), base);
     defer wal.deinit();
 
-    try std.testing.expectEqual(0, wal.next_lsn);
+    try std.testing.expectEqual(@as(u64, 0), wal.next_lsn);
 
     var reader = wal.reader();
     try std.testing.expect(try reader.readHeader() == 0);
     try std.testing.expect(try reader.next(alloc) == null);
 }
 
-test "WAL.open on empty file initializes with lsn=0 and no entries" {
+test "WAL.open on empty segment file initializes with lsn=0" {
     const io = std.testing.io;
     const alloc = std.testing.allocator;
+    const base = "/tmp/wal_test_empty";
+    defer cleanup(alloc, io, base, 3);
 
-    const path = "/tmp/wal_test_empty.wal";
-    Dir.deleteFile(.cwd(), io, path) catch {};
-
-    // Create an empty file (no WAL header) to test edge-case handling.
+    // Create an empty segment 1 file (no header) to test the edge case.
+    const seg = try segmentPath(base, 1, alloc);
+    defer alloc.free(seg);
     var disk_io = DiskIo.init(alloc, io);
-    const empty = try disk_io.io().createFile(path);
+    const empty = try disk_io.io().createFile(seg);
     empty.close();
 
     var disk_io2 = DiskIo.init(alloc, io);
-    var wal = try WAL.open(alloc, disk_io2.io(), path);
+    var wal = try WAL.open(alloc, disk_io2.io(), base);
     defer wal.deinit();
 
-    try std.testing.expectEqual(0, wal.next_lsn);
+    try std.testing.expectEqual(@as(u64, 0), wal.next_lsn);
 
     var reader = wal.reader();
     try std.testing.expect(try reader.readHeader() == 0);
@@ -50,15 +64,13 @@ test "WAL.open on empty file initializes with lsn=0 and no entries" {
 test "WAL records can be read after flush" {
     const io = std.testing.io;
     const alloc = std.testing.allocator;
+    const base = "/tmp/wal_records";
+    defer cleanup(alloc, io, base, 3);
 
-    const path = "/tmp/wal_records.wal";
-    Dir.deleteFile(.cwd(), io, path) catch {};
-
-    // Write some WAL records and flush
     var lsn_list: [2]u64 = undefined;
     {
         var disk_io = DiskIo.init(alloc, io);
-        var wal = try WAL.open(alloc, disk_io.io(), path);
+        var wal = try WAL.open(alloc, disk_io.io(), base);
         defer wal.deinit();
 
         lsn_list[0] = try wal.append(1, 10, "abc");
@@ -66,9 +78,9 @@ test "WAL records can be read after flush" {
         try wal.flush();
     }
 
-    // Reopen WAL and replay records
+    // Reopen WAL (segment 1 still active, no checkpoint yet) and read records.
     var disk_io2 = DiskIo.init(alloc, io);
-    var wal = try WAL.open(alloc, disk_io2.io(), path);
+    var wal = try WAL.open(alloc, disk_io2.io(), base);
     defer wal.deinit();
 
     var reader = wal.reader();
@@ -86,30 +98,31 @@ test "WAL records can be read after flush" {
 test "WAL reader returns InvalidChecksum on corrupted payload" {
     const io = std.testing.io;
     const alloc = std.testing.allocator;
-
-    const path = "/tmp/wal_checksum.wal";
-    Dir.deleteFile(.cwd(), io, path) catch {};
+    const base = "/tmp/wal_checksum";
+    defer cleanup(alloc, io, base, 3);
 
     {
         var disk_io = DiskIo.init(alloc, io);
-        var wal = try WAL.open(alloc, disk_io.io(), path);
+        var wal = try WAL.open(alloc, disk_io.io(), base);
         defer wal.deinit();
         _ = try wal.append(1, 0, "abc");
         try wal.flush();
     }
 
     // Flip the first byte of the payload on disk.
-    // Layout: [file header: 8 bytes][record header: RECORD_HEADER_SIZE bytes][payload...]
+    // Layout: [segment header: 8 bytes][record header: RECORD_HEADER_SIZE bytes][payload...]
     const payload_offset = 8 + RECORD_HEADER_SIZE;
+    const seg = try segmentPath(base, 1, alloc);
+    defer alloc.free(seg);
     {
         var disk_io = DiskIo.init(alloc, io);
-        const file = try disk_io.io().openFile(path);
+        const file = try disk_io.io().openFile(seg);
         defer file.close();
         try file.writeAt(&[_]u8{0xFF}, payload_offset);
     }
 
     var disk_io2 = DiskIo.init(alloc, io);
-    var wal = try WAL.open(alloc, disk_io2.io(), path);
+    var wal = try WAL.open(alloc, disk_io2.io(), base);
     defer wal.deinit();
 
     var reader = wal.reader();
@@ -117,23 +130,24 @@ test "WAL reader returns InvalidChecksum on corrupted payload" {
     try std.testing.expectError(error.InvalidChecksum, reader.next(alloc));
 }
 
-test "WAL reader can read LSN from header" {
+test "WAL segment header persists next_lsn across reopens" {
     const io = std.testing.io;
     const alloc = std.testing.allocator;
-    const path = "/tmp/wal_lsn_continue.wal";
+    const base = "/tmp/wal_lsn_continue";
+    defer cleanup(alloc, io, base, 3);
 
-    // Create WAL with LSN 100
+    // Open WAL, set LSN 100, rewrite segment header to persist it.
     {
         var disk_io = DiskIo.init(alloc, io);
-        var wal = try WAL.open(alloc, disk_io.io(), path);
+        var wal = try WAL.open(alloc, disk_io.io(), base);
         defer wal.deinit();
-
         wal.next_lsn = 100;
-        try wal.reset();
+        try wal.writeSegmentHeader();
     }
 
+    // Reopen and verify the header reads back LSN 100.
     var disk_io2 = DiskIo.init(alloc, io);
-    var wal = try WAL.open(alloc, disk_io2.io(), path);
+    var wal = try WAL.open(alloc, disk_io2.io(), base);
     defer wal.deinit();
 
     var reader = wal.reader();

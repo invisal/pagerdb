@@ -64,7 +64,7 @@ pub fn buildChain(pager: *Pager, row_data: []const u8) !u32 {
         }
 
         // Write as much remaining row data as fits in this overflow page.
-        const ph = t.PageHeader{ .page_type = .overflow, .flags = 0, .checksum = 0, .lsn = 0 };
+        const ph = t.PageHeader{ .lsn = 0, .checksum = 0, .page_type = .overflow, .flags = 0, ._pad = 0 };
         var pw = PageWriter.init(pager, page_id);
         pw.writeAt(0, std.mem.asBytes(&ph));
         pw.writeInt(u16, @intCast(DATA_LEN_OFF), @intCast(chunk_len), .little);

@@ -70,6 +70,8 @@ pub const DiskIo = struct {
         .createFile = createFile,
         .openFile = openFile,
         .deleteFile = deleteFile,
+        .renameFile = renameFile,
+        .nowMicros = nowMicros,
     };
 
     pub fn init(alloc: std.mem.Allocator, std_io: std.Io) DiskIo {
@@ -104,5 +106,16 @@ pub const DiskIo = struct {
     fn deleteFile(ptr: *anyopaque, path: []const u8) anyerror!void {
         const self: *DiskIo = @ptrCast(@alignCast(ptr));
         try std.Io.Dir.deleteFile(.cwd(), self.std_io, path);
+    }
+
+    fn renameFile(ptr: *anyopaque, old_path: []const u8, new_path: []const u8) anyerror!void {
+        const self: *DiskIo = @ptrCast(@alignCast(ptr));
+        try std.Io.Dir.rename(.cwd(), old_path, .cwd(), new_path, self.std_io);
+    }
+
+    fn nowMicros(ptr: *anyopaque) u64 {
+        const self: *DiskIo = @ptrCast(@alignCast(ptr));
+        const ts = std.Io.Clock.real.now(self.std_io);
+        return @intCast(ts.toMicroseconds());
     }
 };

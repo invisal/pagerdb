@@ -101,7 +101,7 @@ pub fn removeCellPtr(pw: *PageWriter, h: *t.BTreeHeader, i: u16) void {
 }
 
 pub fn initLeafPage(pw: *PageWriter, is_rowid: bool) void {
-    pw.writeAt(0, std.mem.asBytes(&t.PageHeader{ .page_type = .btree_leaf, .flags = 0, .checksum = 0, .lsn = 0 }));
+    pw.writeAt(0, std.mem.asBytes(&t.PageHeader{ .lsn = 0, .checksum = 0, .page_type = .btree_leaf, .flags = 0, ._pad = 0 }));
     writeBTreeHeader(pw, t.BTreeHeader{
         .cell_count = 0,
         .flags = if (is_rowid) BTREE_FLAG_ROWID_TREE else 0,
@@ -115,7 +115,7 @@ pub fn initLeafPage(pw: *PageWriter, is_rowid: bool) void {
 }
 
 pub fn initInternalPage(pw: *PageWriter, is_rowid: bool) void {
-    pw.writeAt(0, std.mem.asBytes(&t.PageHeader{ .page_type = .btree_internal, .flags = 0, .checksum = 0, .lsn = 0 }));
+    pw.writeAt(0, std.mem.asBytes(&t.PageHeader{ .lsn = 0, .checksum = 0, .page_type = .btree_internal, .flags = 0, ._pad = 0 }));
     writeBTreeHeader(pw, t.BTreeHeader{
         .cell_count = 0,
         .flags = if (is_rowid) BTREE_FLAG_ROWID_TREE else 0,

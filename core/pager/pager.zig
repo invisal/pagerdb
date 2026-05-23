@@ -55,10 +55,11 @@ pub const Pager = struct {
         var buf = std.mem.zeroes([t.PAGE_SIZE]u8);
         const fp = t.FreePage{
             .header = .{
+                .lsn = 0,
+                .checksum = 0,
                 .page_type = .free,
                 .flags = 0,
-                .checksum = 0,
-                .lsn = 0,
+                ._pad = 0,
             },
             .next_free_page = self.free_list_head,
             ._reserved = 0,

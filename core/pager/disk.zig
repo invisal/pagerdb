@@ -10,7 +10,9 @@ const File = io_mod.File;
 const Allocator = std.mem.Allocator;
 
 pub const DEFAULT_POOL_SIZE: usize = 64;
-const WAL_CHECKPOINT_SIZE: usize = 8 * 1024 * 1024; // 8 MB
+// Rotate to a new WAL segment once the current one exceeds this size.
+// Smaller = more frequent checkpoints (faster recovery), larger = fewer I/Os.
+pub const WAL_SEGMENT_SIZE: usize = 8 * 1024 * 1024; // 8 MB
 
 // Runtime-configurable buffer pool settings.  Pass .{} to create/open to
 // accept all defaults (DEFAULT_POOL_SIZE frames × PAGE_SIZE bytes each).
@@ -24,12 +26,17 @@ pub const Config = struct {
 const Frame = struct {
     page_id: u32,
     dirty: bool,
+    // Set after WAL rotation; cleared on first write so that write emits a
+    // full-page WAL record (FPW) capturing the pre-delta page image.  Recovery
+    // uses FPW to reconstruct a page whose disk write was torn mid-sector.
+    needs_fpw: bool,
     lru_tick: u64,
     data: [t.PAGE_SIZE]u8,
 };
 
 pub const DiskPager = struct {
     file: File,
+    io: Io,
     allocator: Allocator,
     // Heap-allocated slice; length equals the pool_size passed at creation.
     pool: []Frame,
@@ -55,7 +62,7 @@ pub const DiskPager = struct {
         errdefer file.close();
         const self = try allocator.create(DiskPager);
         errdefer allocator.destroy(self);
-        try initSelf(self, file, allocator, config.pool_size);
+        try initSelf(self, file, io, allocator, config.pool_size);
         errdefer allocator.free(self.pool);
 
         self.wal = config.wal;
@@ -85,7 +92,7 @@ pub const DiskPager = struct {
         const file_size = try file.length();
         const self = try allocator.create(DiskPager);
         errdefer allocator.destroy(self);
-        try initSelf(self, file, allocator, config.pool_size);
+        try initSelf(self, file, io, allocator, config.pool_size);
         errdefer allocator.free(self.pool);
         var pager = Pager{
             .ptr = self,
@@ -111,8 +118,9 @@ pub const DiskPager = struct {
         return pager;
     }
 
-    fn initSelf(self: *DiskPager, file: File, allocator: Allocator, pool_size: usize) !void {
+    fn initSelf(self: *DiskPager, file: File, io: Io, allocator: Allocator, pool_size: usize) !void {
         self.file = file;
+        self.io = io;
         self.allocator = allocator;
         self.tick = 0;
         self.txn_active = false;
@@ -121,6 +129,7 @@ pub const DiskPager = struct {
         for (self.pool) |*frame| {
             frame.page_id = std.math.maxInt(u32);
             frame.dirty = false;
+            frame.needs_fpw = false;
             frame.lru_tick = 0;
         }
     }
@@ -160,11 +169,15 @@ pub const DiskPager = struct {
         const offset: u64 = @as(u64, page_id) * t.PAGE_SIZE;
         const n = try self.file.readAt(buf, offset);
         if (n != t.PAGE_SIZE) return error.IncompleteRead;
+        try t.verifyPageChecksum(page_id, buf);
     }
 
     fn writePageRaw(self: *DiskPager, page_id: u32, buf: *const [t.PAGE_SIZE]u8) !void {
+        // Copy so we can stamp the checksum without mutating the caller's buffer.
+        var stamped = buf.*;
+        t.writePageChecksum(page_id, &stamped);
         const offset: u64 = @as(u64, page_id) * t.PAGE_SIZE;
-        try self.file.writeAt(buf, offset);
+        try self.file.writeAt(&stamped, offset);
     }
 
     fn diskReadPage(ptr: *anyopaque, page_id: u32, buf: *[t.PAGE_SIZE]u8) anyerror!void {
@@ -189,27 +202,41 @@ pub const DiskPager = struct {
 
         var latest_lsn: ?u64 = null;
 
-        // |*wal| gives a pointer into self.wal so current_lsn increments persist.
-        if (self.wal) |wal| {
-            for (deltas) |d| {
-                latest_lsn = try wal.append(page_id, d.offset, buf[d.offset .. d.offset + d.len]);
-            }
-        }
-
         if (self.poolFind(page_id)) |frame| {
+            if (self.wal) |wal| {
+                // First write after a WAL rotation: emit a full-page record containing
+                // the pre-delta page image so recovery can reconstruct this page even
+                // if its later disk write is torn (partial 512-byte sector write on an
+                // 8 KB page).  Only needed for pool hits; cold misses load from disk
+                // which is already at last-checkpoint state.
+                if (frame.needs_fpw and deltas.len > 0) {
+                    _ = try wal.appendFullPage(page_id, &frame.data);
+                    frame.needs_fpw = false;
+                }
+                for (deltas) |d| {
+                    latest_lsn = try wal.append(page_id, d.offset, buf[d.offset .. d.offset + d.len]);
+                }
+            }
             frame.data = buf.*;
             frame.dirty = true;
             frame.lru_tick = self.tick;
-            if (latest_lsn) |lsn| t.PageHeader.writeLSN(&frame.data, lsn);
+            if (latest_lsn) |lsn| std.mem.writeInt(u64, frame.data[@offsetOf(t.PageHeader, "lsn")..][0..8], lsn, .little);
             return;
         }
 
         const frame = try self.poolEvict();
         frame.page_id = page_id;
+        frame.needs_fpw = false;
+        frame.lru_tick = self.tick;
+
+        if (self.wal) |wal| {
+            for (deltas) |d| {
+                latest_lsn = try wal.append(page_id, d.offset, buf[d.offset .. d.offset + d.len]);
+            }
+        }
         frame.data = buf.*;
         frame.dirty = true;
-        frame.lru_tick = self.tick;
-        if (latest_lsn) |lsn| t.PageHeader.writeLSN(&frame.data, lsn);
+        if (latest_lsn) |lsn| std.mem.writeInt(u64, frame.data[@offsetOf(t.PageHeader, "lsn")..][0..8], lsn, .little);
     }
 
     fn diskFlush(ptr: *anyopaque, pager: *Pager) anyerror!void {
@@ -223,7 +250,7 @@ pub const DiskPager = struct {
         // WAL must reach disk before pages so recovery can replay any records
         // that were not yet applied to the data file at crash time.
         if (self.wal) |wal| {
-            try wal.appendCommit();
+            try wal.appendCommit(self.io.nowMicros());
             try wal.flush();
         }
         for (self.pool) |*frame| {
@@ -234,12 +261,19 @@ pub const DiskPager = struct {
         }
         try self.file.sync();
 
-        // Every WAL record is now applied and on disk.  Reset when the WAL
-        // exceeds the checkpoint threshold to bound recovery time.
-        // next_lsn is preserved inside reset() so page LSNs stay valid.
+        // All dirty pages are now on disk.  If the WAL segment has grown past
+        // the threshold, rotate to a new segment and write a checkpoint so
+        // recovery only needs to replay the new (mostly-empty) segment.
+        // After rotation, mark every pool frame so the next write to each will
+        // emit a full-page WAL record (FPW) before its deltas.
         if (self.wal) |wal| {
-            if (wal.offset >= WAL_CHECKPOINT_SIZE) {
-                try wal.reset();
+            if (wal.offset >= WAL_SEGMENT_SIZE) {
+                try wal.rotateAfterCheckpoint();
+                for (self.pool) |*frame| {
+                    if (frame.page_id != std.math.maxInt(u32)) {
+                        frame.needs_fpw = true;
+                    }
+                }
             }
         }
     }
