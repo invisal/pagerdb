@@ -9,7 +9,11 @@ const Io = io_mod.Io;
 const File = io_mod.File;
 const Allocator = std.mem.Allocator;
 
-pub const DEFAULT_POOL_SIZE: usize = 64;
+// 256 frames × 4 KB = 1 MB buffer pool.  Large enough to hold the dirty pages
+// for typical single-statement transactions (e.g. INSERT…SELECT of ~10 k rows
+// needs ~150–200 B-tree pages).  64 was too small: under the no-steal policy a
+// large implicit transaction would exhaust the pool before committing.
+pub const DEFAULT_POOL_SIZE: usize = 256;
 // Rotate to a new WAL segment once the current one exceeds this size.
 // Smaller = more frequent checkpoints (faster recovery), larger = fewer I/Os.
 pub const WAL_SEGMENT_SIZE: usize = 8 * 1024 * 1024; // 8 MB
@@ -55,6 +59,7 @@ pub const DiskPager = struct {
         .close = diskClose,
         .beginTxn = diskBeginTxn,
         .endTxn = diskEndTxn,
+        .abortTxn = diskAbortTxn,
     };
 
     pub fn create(allocator: Allocator, io: Io, path: []const u8, config: Config) !Pager {
@@ -285,6 +290,23 @@ pub const DiskPager = struct {
 
     fn diskEndTxn(ptr: *anyopaque) void {
         const self: *DiskPager = @ptrCast(@alignCast(ptr));
+        self.txn_active = false;
+    }
+
+    // Discard every dirty frame without writing to disk.  Under no-steal, dirty
+    // frames were never flushed to the data file, so dropping them restores the
+    // pool to a clean state that matches the last committed data-file snapshot.
+    // Called by db.rollback() so that even a failed logical undo (e.g. because
+    // the pool itself was full) cannot leave corrupted data on disk.
+    fn diskAbortTxn(ptr: *anyopaque) void {
+        const self: *DiskPager = @ptrCast(@alignCast(ptr));
+        for (self.pool) |*frame| {
+            if (frame.dirty) {
+                frame.page_id = std.math.maxInt(u32);
+                frame.dirty = false;
+                frame.needs_fpw = false;
+            }
+        }
         self.txn_active = false;
     }
 

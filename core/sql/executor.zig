@@ -165,6 +165,15 @@ pub const Executor = struct {
         const meta = self.db.cat.getTable(n.table) orelse return error.TableNotFound;
         const col_count = meta.columns.len;
 
+        // Wrap all row inserts in a single implicit transaction so that:
+        //   1. The statement is atomic — a mid-insert failure rolls back all rows.
+        //   2. There is one WAL flush + fsync at commit instead of one per row,
+        //      which is critical for disk performance on large INSERT...SELECTs.
+        // If the caller already opened an explicit transaction we join it instead.
+        const auto_txn = self.db.txn == null;
+        if (auto_txn) try self.db.begin();
+        errdefer if (auto_txn) self.db.rollback() catch {};
+
         for (rows.items) |src_row| {
             const vals = try self.alloc.alloc(row_mod.Value, col_count);
             defer self.alloc.free(vals);
@@ -179,6 +188,8 @@ pub const Executor = struct {
 
             _ = try self.db.insert(n.table, vals);
         }
+
+        if (auto_txn) try self.db.commit();
 
         return rows.items.len;
     }

@@ -13,6 +13,7 @@ pub const row = @import("row.zig");
 pub const catalog = @import("catalog.zig");
 pub const btree = @import("btree_shared.zig");
 pub const WAL = @import("pager/wal.zig").WAL;
+pub const walSegmentPath = @import("pager/wal.zig").segmentPath;
 pub const Io = @import("io/io.zig").Io;
 pub const File = @import("io/io.zig").File;
 pub const DiskIo = @import("io/disk_io.zig").DiskIo;

@@ -25,6 +25,11 @@ pub const Pager = struct {
         // No-steal support: prevent dirty data frames from being evicted mid-transaction.
         beginTxn: *const fn (*anyopaque) void,
         endTxn: *const fn (*anyopaque) void,
+        // Discard all dirty frames without writing to disk.  Called on rollback so
+        // that partial or failed undo does not leave corrupted pages in the pool.
+        // Safe under no-steal: dirty frames were never written to the data file, so
+        // dropping them always restores the database file to the last committed state.
+        abortTxn: *const fn (*anyopaque) void,
     };
 
     pub fn readPage(self: *Pager, page_id: u32, buf: *[t.PAGE_SIZE]u8) !void {
@@ -49,6 +54,10 @@ pub const Pager = struct {
 
     pub fn endTxn(self: *Pager) void {
         self.vtable.endTxn(self.ptr);
+    }
+
+    pub fn abortTxn(self: *Pager) void {
+        self.vtable.abortTxn(self.ptr);
     }
 
     pub fn freePage(self: *Pager, page_id: u32) !void {
