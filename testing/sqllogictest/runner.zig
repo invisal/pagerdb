@@ -288,6 +288,7 @@ pub fn runFile(alloc: Allocator, page_alloc: Allocator, io: std.Io, path: []cons
                     skip_next = false;
                     continue;
                 }
+                writeCrashBreadcrumb(io, path, stmt.line, stmt.sql);
                 // Per-statement arena backed by page_alloc (the same CountingAllocator
                 // that backs the file-level arena) so that transient execution memory
                 // is included in peak tracking and the limit applies globally.
@@ -312,6 +313,7 @@ pub fn runFile(alloc: Allocator, page_alloc: Allocator, io: std.Io, path: []cons
                     skip_next = false;
                     continue;
                 }
+                writeCrashBreadcrumb(io, path, qry.line, qry.sql);
                 var stmt_arena = std.heap.ArenaAllocator.init(page_alloc);
                 defer stmt_arena.deinit();
                 const print_err = agent or (show_errors > 0 and failures_shown < show_errors);
@@ -336,6 +338,27 @@ pub fn runFile(alloc: Allocator, page_alloc: Allocator, io: std.Io, path: []cons
     }
 
     return result;
+}
+
+// Overwrite testing/sqllogictest/last_crash.md before every statement/query so
+// that a hard crash (SIGABRT/panic) leaves a readable record of the exact SQL
+// that was executing.  Failures are silently ignored — this is best-effort.
+fn writeCrashBreadcrumb(io: std.Io, slt_path: []const u8, line: usize, sql: []const u8) void {
+    const f = Dir.cwd().createFile(io, "testing/sqllogictest/last_crash.md", .{ .truncate = true }) catch return;
+    defer f.close(io);
+    var buf: [4096]u8 = undefined;
+    const msg = std.fmt.bufPrint(&buf,
+        \\# Crash Breadcrumb
+        \\
+        \\**File:** `{s}`
+        \\**Line:** {d}
+        \\
+        \\```sql
+        \\{s}
+        \\```
+        \\
+    , .{ slt_path, line, sql }) catch return;
+    f.writeStreamingAll(io, msg) catch return;
 }
 
 fn runStatement(exec_alloc: Allocator, buf_alloc: Allocator, backend: Backend, path: []const u8, stmt: parser.StatementRecord, print_error: bool, report: ?*std.ArrayList(u8)) !bool {

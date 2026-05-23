@@ -28,7 +28,7 @@ jobs:
       matrix:
         workload:
           - name: random_workload
-            args: "--seeds 20"
+            args: "--seeds 20 --ops 500"
           - name: order_workload
             args: "--order --seeds 20"
     steps:
