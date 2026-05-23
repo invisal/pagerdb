@@ -46,6 +46,7 @@ pub const InMemoryPager = struct {
         .close = memClose,
         .beginTxn = memBeginTxn,
         .endTxn = memEndTxn,
+        .abortTxn = memAbortTxn,
     };
 
     pub fn create(allocator: Allocator) !Pager {
@@ -142,6 +143,10 @@ pub const InMemoryPager = struct {
     fn memFlush(_: *anyopaque, _: *Pager) anyerror!void {}
     fn memBeginTxn(_: *anyopaque) void {}
     fn memEndTxn(_: *anyopaque) void {}
+    // InMemoryPager is write-through: every write goes directly into the backing
+    // map, so there are no dirty frames to discard.  abortTxn is a no-op here;
+    // logical undo in db.rollback() already restores correct in-memory state.
+    fn memAbortTxn(_: *anyopaque) void {}
 
     fn memClose(ptr: *anyopaque) void {
         const self: *InMemoryPager = @ptrCast(@alignCast(ptr));

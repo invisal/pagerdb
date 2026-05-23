@@ -220,6 +220,20 @@ pub const SimIo = struct {
         const sf = entry.value;
         self.alloc.free(sf.path);
         sf.path = try self.alloc.dupe(u8, new_path);
+
+        // If a file already exists at new_path, free it before replacing it.
+        // This mirrors POSIX rename(2) semantics: the destination is atomically
+        // replaced if it exists.  Without this, repeated renames to the same
+        // destination (e.g. .ckpt.tmp → .ckpt across multiple recover() calls)
+        // would orphan the old SimFile in the allocator.
+        if (self.files.fetchRemove(new_path)) |dst| {
+            const dst_sf = dst.value;
+            dst_sf.durable.deinit(self.alloc);
+            dst_sf.pending.deinit(self.alloc);
+            self.alloc.free(dst_sf.path);
+            self.alloc.destroy(dst_sf);
+        }
+
         try self.files.put(sf.path, sf);
     }
 

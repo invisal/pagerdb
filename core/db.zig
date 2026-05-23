@@ -75,6 +75,10 @@ pub const Db = struct {
     pub fn rollback(self: *Db) !void {
         if (self.txn == null) return error.NoActiveTransaction;
 
+        // Best-effort logical undo: walk the undo log in reverse and attempt to
+        // reverse each operation.  Individual steps use catch {} so that a
+        // failure (e.g. error.BufferPoolFull) does not prevent later steps or
+        // the final abortTxn call from running.
         const log = self.txn.?.log.items;
         var i: usize = log.len;
         while (i > 0) {
@@ -84,12 +88,12 @@ pub const Db = struct {
                     // Undo the insert: delete the row and its index entries.
                     const meta = self.cat.getTable(e.table) orelse continue;
                     if (meta.indexes.len > 0) {
-                        if (try readAndDecodeRow(self, meta, e.rowid)) |vals| {
+                        if (readAndDecodeRow(self, meta, e.rowid) catch null) |vals| {
                             defer freeValues(self.allocator, vals);
-                            try deleteFromIndexes(self, meta, e.rowid, vals);
+                            deleteFromIndexes(self, meta, e.rowid, vals) catch {};
                         }
                     }
-                    _ = try btree.RowidBTree.delete(&self.pager, meta.btree_root, e.rowid);
+                    _ = btree.RowidBTree.delete(&self.pager, meta.btree_root, e.rowid) catch {};
                 },
                 .delete => |e| {
                     // Undo the delete: re-insert the original row and its index entries.
@@ -97,36 +101,40 @@ pub const Db = struct {
                     if (meta.indexes.len > 0) {
                         var schema_buf: [64]row.ColumnSchema = undefined;
                         const cols = buildColSchema(meta.columns, &schema_buf);
-                        const vals = try row.decodeRow(cols, e.row_bytes, self.allocator);
-                        defer freeValues(self.allocator, vals);
-                        try insertToIndexes(self, meta, e.rowid, vals);
+                        if (row.decodeRow(cols, e.row_bytes, self.allocator) catch null) |vals| {
+                            defer freeValues(self.allocator, vals);
+                            insertToIndexes(self, meta, e.rowid, vals) catch {};
+                        }
                     }
-                    try btree.insertRow(&self.pager, meta.btree_root, e.rowid, e.row_bytes);
+                    btree.insertRow(&self.pager, meta.btree_root, e.rowid, e.row_bytes) catch {};
                 },
                 .update => |e| {
                     // Undo the update: restore old row bytes and fix index entries.
                     const meta = self.cat.getTable(e.table) orelse continue;
                     if (meta.indexes.len > 0) {
                         // Delete the current (new) index entries before overwriting.
-                        if (try readAndDecodeRow(self, meta, e.rowid)) |new_vals| {
+                        if (readAndDecodeRow(self, meta, e.rowid) catch null) |new_vals| {
                             defer freeValues(self.allocator, new_vals);
-                            try deleteFromIndexes(self, meta, e.rowid, new_vals);
+                            deleteFromIndexes(self, meta, e.rowid, new_vals) catch {};
                         }
                         // Insert index entries for the original row.
                         var schema_buf: [64]row.ColumnSchema = undefined;
                         const cols = buildColSchema(meta.columns, &schema_buf);
-                        const old_vals = try row.decodeRow(cols, e.old_row_bytes, self.allocator);
-                        defer freeValues(self.allocator, old_vals);
-                        try insertToIndexes(self, meta, e.rowid, old_vals);
+                        if (row.decodeRow(cols, e.old_row_bytes, self.allocator) catch null) |old_vals| {
+                            defer freeValues(self.allocator, old_vals);
+                            insertToIndexes(self, meta, e.rowid, old_vals) catch {};
+                        }
                     }
-                    _ = try btree.RowidBTree.delete(&self.pager, meta.btree_root, e.rowid);
-                    try btree.insertRow(&self.pager, meta.btree_root, e.rowid, e.old_row_bytes);
+                    _ = btree.RowidBTree.delete(&self.pager, meta.btree_root, e.rowid) catch {};
+                    btree.insertRow(&self.pager, meta.btree_root, e.rowid, e.old_row_bytes) catch {};
                 },
             }
         }
 
-        self.pager.endTxn();
-        try self.pager.flush();
+        // Discard all dirty frames.  Under no-steal, these pages were never written
+        // to the data file, so dropping them leaves the file in the last committed
+        // state — even if the logical undo above only partially succeeded.
+        self.pager.abortTxn();
         self.txn.?.deinit();
         self.txn = null;
     }
