@@ -44,10 +44,13 @@ pub fn main(init: std.process.Init) !void {
 
     var file_path: ?[]const u8 = null;
     var btree_check_table: ?[]const u8 = null;
+    var fail_fast = false;
 
     for (args[1..]) |arg| {
         if (std.mem.startsWith(u8, arg, "--btree-check=")) {
             btree_check_table = arg["--btree-check=".len..];
+        } else if (std.mem.eql(u8, arg, "--fail-fast")) {
+            fail_fast = true;
         } else {
             file_path = arg;
         }
@@ -101,10 +104,12 @@ pub fn main(init: std.process.Init) !void {
 
                 switch (matcher.matchStatement(exec_result, stmt.expected)) {
                     .match => passed += 1,
-                    .mismatch => {
+                    .mismatch => |m| {
                         failed += 1;
-                        // std.debug.print("[n:{d}] FAIL\n", .{counter});
-                        // printStatementMismatch(path, stmt, m);
+                        if (fail_fast) {
+                            printStatementMismatch(path, stmt, m);
+                            std.process.exit(1);
+                        }
                     },
                 }
 
@@ -138,19 +143,23 @@ pub fn main(init: std.process.Init) !void {
                     // The query returned a SQL error — always a mismatch for a
                     // query record (queries are expected to return rows, not errors).
                     failed += 1;
-                    // std.debug.print("[n:{d}] FAIL\n", .{counter});
-                    // std.debug.print("FAIL {s}:{d}: sql error: {s}\n  sql: {s}\n", .{
-                    //     path, qry.line, exec_result.err.message, qry.sql,
-                    // });
+                    if (fail_fast) {
+                        std.debug.print("FAIL {s}:{d}: sql error: {s}\n  sql: {s}\n", .{
+                            path, qry.line, exec_result.err.message, qry.sql,
+                        });
+                        std.process.exit(1);
+                    }
                     continue;
                 }
 
                 if (exec_result != .result_set) {
                     failed += 1;
-                    // std.debug.print("[n:{d}] FAIL\n", .{counter});
-                    // std.debug.print("FAIL {s}:{d}: query returned no result set\n  sql: {s}\n", .{
-                    //     path, qry.line, qry.sql,
-                    // });
+                    if (fail_fast) {
+                        std.debug.print("FAIL {s}:{d}: query returned no result set\n  sql: {s}\n", .{
+                            path, qry.line, qry.sql,
+                        });
+                        std.process.exit(1);
+                    }
                     continue;
                 }
 
@@ -170,10 +179,12 @@ pub fn main(init: std.process.Init) !void {
                 // matchQuery sorts values in-place (for rowsort / valuesort) then compares.
                 switch (matcher.matchQuery(values, col_count, qry.expected, qry.sort_mode)) {
                     .match => passed += 1,
-                    .mismatch => {
+                    .mismatch => |m| {
                         failed += 1;
-                        // std.debug.print("[n:{d}] FAIL\n", .{counter});
-                        // printQueryMismatch(path, qry, m, values, col_count);
+                        if (fail_fast) {
+                            printQueryMismatch(path, qry, m, values, col_count);
+                            std.process.exit(1);
+                        }
                     },
                 }
 

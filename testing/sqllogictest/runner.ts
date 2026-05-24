@@ -16,6 +16,7 @@
  *   --concurrency <n>   Max parallel workers (default: CPU count)
  *   --memory-mb <mb>    Virtual memory cap per worker in MB (default: 512)
  *   --no-build          Skip `zig build` (binary must already exist)
+ *   --fail-fast         Stop on first failure and print details (implies --concurrency 1)
  */
 
 import { readdirSync, writeFileSync, statSync } from "fs";
@@ -54,6 +55,7 @@ function parseArgs() {
   let concurrency = cpus().length;
   let memoryMb = 512;
   let noBuild = false;
+  let failFast = false;
 
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
@@ -68,9 +70,13 @@ function parseArgs() {
     else if (arg === "--memory-mb" && args[i + 1])
       memoryMb = parseInt(args[++i]);
     else if (arg === "--no-build") noBuild = true;
+    else if (arg === "--fail-fast") failFast = true;
   }
 
-  return { dir, output, commit, timeoutSec, concurrency, memoryMb, noBuild };
+  // fail-fast must be sequential so we can stop immediately on the first failure.
+  if (failFast) concurrency = 1;
+
+  return { dir, output, commit, timeoutSec, concurrency, memoryMb, noBuild, failFast };
 }
 
 // ─── Helpers ───────────────────────────────────────────────────────────────────
@@ -106,14 +112,15 @@ async function runFile(
   binary: string,
   file: string,
   timeoutSec: number,
-  memoryKb: number
-): Promise<{ passed: number; failed: number; tag: string; elapsed: number }> {
+  memoryKb: number,
+  extraArgs: string[] = []
+): Promise<{ passed: number; failed: number; tag: string; elapsed: number; output: string }> {
   const start = Date.now();
 
   // ulimit -v caps virtual memory (in KB). Wrapping with sh -c ensures the
   // limit applies to the child process without affecting the runner itself.
   const proc = Bun.spawn(
-    ["sh", "-c", `ulimit -v ${memoryKb} && exec "$@"`, "--", binary, file],
+    ["sh", "-c", `ulimit -v ${memoryKb} && exec "$@"`, "--", binary, file, ...extraArgs],
     { stdout: "pipe", stderr: "pipe" }
   );
 
@@ -131,19 +138,20 @@ async function runFile(
   clearTimeout(timer);
 
   const elapsed = Date.now() - start;
-  const { passed, failed } = parsePassFail(stdout + stderr);
+  const combined = stdout + stderr;
+  const { passed, failed } = parsePassFail(combined);
 
   let tag: string;
   if (timedOut) tag = "TIMEOUT";
   else if (exitCode === 0) tag = "PASS";
   else tag = "FAIL";
 
-  return { passed, failed, tag, elapsed };
+  return { passed, failed, tag, elapsed, output: combined };
 }
 
 // ─── Main ──────────────────────────────────────────────────────────────────────
 
-const { dir, output, commit, timeoutSec, concurrency, memoryMb, noBuild } =
+const { dir, output, commit, timeoutSec, concurrency, memoryMb, noBuild, failFast } =
   parseArgs();
 
 // Build the binary once
@@ -190,20 +198,24 @@ const results: FileResult[] = new Array(files.length);
 let totalPassed = 0;
 let totalFailed = 0;
 let cursor = 0; // next file index to dispatch
+let stopped = false; // set true by fail-fast to halt further dispatch
+
+const binaryArgs = failFast ? ["--fail-fast"] : [];
 
 async function worker() {
-  while (cursor < files.length) {
+  while (cursor < files.length && !stopped) {
     const idx = cursor++;
     const file = files[idx];
     const name = file.startsWith(testDir + "/")
       ? file.slice(testDir.length + 1)
       : basename(file);
 
-    const { passed, failed, tag, elapsed } = await runFile(
+    const { passed, failed, tag, elapsed, output } = await runFile(
       binary,
       file,
       timeoutSec,
-      memoryKb
+      memoryKb,
+      binaryArgs
     );
 
     const total = passed + failed;
@@ -216,6 +228,12 @@ async function worker() {
         .toFixed(1)
         .padStart(6)}%  [${elapsed}ms]`
     );
+
+    if (failFast && tag !== "PASS") {
+      // Print the raw binary output so the failure detail is visible.
+      process.stderr.write(output);
+      stopped = true;
+    }
 
     totalPassed += passed;
     totalFailed += failed;
