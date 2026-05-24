@@ -220,6 +220,15 @@ pub const SimIo = struct {
         const sf = entry.value;
         self.alloc.free(sf.path);
         sf.path = try self.alloc.dupe(u8, new_path);
+        // POSIX rename atomically replaces the destination if it already exists.
+        // Free the displaced SimFile so its pending/durable allocations are not leaked.
+        if (self.files.fetchRemove(new_path)) |old_entry| {
+            const old_sf = old_entry.value;
+            old_sf.durable.deinit(self.alloc);
+            old_sf.pending.deinit(self.alloc);
+            self.alloc.free(old_sf.path);
+            self.alloc.destroy(old_sf);
+        }
         try self.files.put(sf.path, sf);
     }
 

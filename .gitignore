@@ -11,3 +11,4 @@ scratch/
 
 testing/sqllogictest/upstream/
 testing/sqllogictest/last_error.md
+testing/sqllogictest/node_modules/

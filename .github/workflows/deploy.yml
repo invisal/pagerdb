@@ -1,4 +1,4 @@
-name: Deploy Site
+name: Master Pipeline
 
 run-name: >
   Deploy (${{ github.ref_name }}) — ${{ github.event.head_commit.message }}
@@ -9,8 +9,70 @@ on:
   workflow_dispatch:
 
 jobs:
-  deploy:
-    name: Build & Deploy
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-zig
+      - name: Build
+        run: zig build
+
+  sqllogictest:
+    name: SQLLogicTest
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-zig
+      - uses: oven-sh/setup-bun@v2
+      - name: Install runner dependencies
+        run: bun install --cwd testing/sqllogictest
+      - name: Install sqlite3
+        run: sudo apt-get install -y libsqlite3-dev
+      - name: Fetch upstream sqllogictest suite
+        run: |
+          git clone --depth=1 https://github.com/invisal/sqllogictest /tmp/slt-upstream
+          cp -r /tmp/slt-upstream/test testing/sqllogictest/upstream
+          rm -rf /tmp/slt-upstream
+      - name: Run sqllogictest suite
+        run: |
+          mkdir -p pages
+          echo '## SQLLogicTest Results' >> "$GITHUB_STEP_SUMMARY"
+          printf '```\n' >> "$GITHUB_STEP_SUMMARY"
+          bun testing/sqllogictest/runner.ts \
+            --dir testing/sqllogictest/upstream \
+            --json pages/sqllogictest.json \
+            --commit ${{ github.sha }} \
+            2>&1 | tee -a "$GITHUB_STEP_SUMMARY" || true
+          printf '```\n' >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload Pages artifact
+        if: always()
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: pages/
+
+  deploy-slt-results:
+    name: Deploy SLT Results to Pages
+    needs: sqllogictest
+    if: always()
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/deploy-pages@v4
+        id: deploy
+
+  deploy-site:
+    name: Deploy Site
+    needs: deploy-slt-results
+    if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 20
     environment: Production
