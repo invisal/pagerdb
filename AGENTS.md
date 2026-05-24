@@ -7,7 +7,7 @@ Run these commands after every code change, in order:
 ```
 zig fmt .
 zig build
-zig build slt
+bun testing/sqllogictest/runner.ts --no-build
 ```
 
 Do not report a fix as complete until all three succeed without errors.

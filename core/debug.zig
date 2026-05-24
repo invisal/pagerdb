@@ -1,5 +1,8 @@
 const std = @import("std");
 const ExecResult = @import("sql/executor.zig").ExecResult;
+
+pub const check_btree = @import("debug/check_btree.zig");
+pub const print_page = @import("debug/print_page.zig");
 const ResultSet = @import("sql/executor.zig").ResultSet;
 const Row = @import("sql/executor.zig").Row;
 const row_mod = @import("row.zig");

@@ -1,348 +1,312 @@
-// sqllogictest runner entry point.
+// sqllogictest runner — single-file, sequential, PagerDB only.
 //
 // Usage:
-//   zig build slt                                        — scan tests/ (default)
-//   zig build slt -- --dir testing/sqllogictest/upstream — scan a directory recursively
-//   zig build slt -- path/to/test.slt                    — run specific file(s)
-//   zig build slt -- --show-errors 5                     — show up to 5 failure details per file
-//   zig build slt -- --agent                             — stop at first failure, write full diff and DB state to last_error.md
-//   zig build slt -- --sqlite                            — run against SQLite3 instead of PagerDB
-//   zig build slt -- --jobs 4                            — limit to 4 parallel workers
-//   zig build slt -- --json out.json                     — write per-file results as JSON
-//   zig build slt -- --commit abc123                     — embed git SHA in JSON output
+//   zig build slt -- <file.test>
 //
-// Each file runs with a 256 MB memory cap (hard limit, not configurable).
+// Each run gets a fresh in-memory database so tests are isolated.
 
 const std = @import("std");
-const runner = @import("runner.zig");
+const pdb = @import("core");
+const parser = @import("parser.zig");
+const matcher = @import("matcher.zig");
 
-const DEFAULT_TEST_DIR = "testing/sqllogictest/tests";
-const MEM_LIMIT_BYTES: usize = 256 * 1024 * 1024;
-const Dir = std.Io.Dir;
+const Database = pdb.Database;
+const InMemoryPager = pdb.InMemoryPager;
+const execute = pdb.execute;
+const check_btree = pdb.debug.check_btree;
 
-// Per-file result written by the owning worker thread.
-// Indexed by file position in all_files, so no two threads touch the same slot.
-const FileResult = struct {
-    passed: usize = 0,
-    failed: usize = 0,
-    peak_mem_bytes: usize = 0,
-    db_size_bytes: usize = 0,
-};
+// Tracks the record currently under execution so the panic handler can print it.
+var panic_ctx: struct {
+    counter: usize = 0,
+    file: []const u8 = "",
+    line: usize = 0,
+    sql: []const u8 = "",
+} = .{};
 
-const WorkerCtx = struct {
-    io: std.Io,
-    paths: []const []const u8,
-    show_errors: usize,
-    agent: bool,
-    sqlite: bool,
-    thread_id: usize,
-    thread_count: usize,
-    file_results: []FileResult,
-};
+pub const panic = std.debug.FullPanic(panicHandler);
 
-// Wraps a backing allocator to track current and peak bytes in use.
-// Alloc/resize/remap return failure once MEM_LIMIT_BYTES would be exceeded.
-// Thread-safety: one CountingAllocator per file/thread, no sharing.
-const CountingAllocator = struct {
-    backing: std.mem.Allocator,
-    current_bytes: usize = 0,
-    peak_bytes: usize = 0,
-
-    pub fn allocator(self: *CountingAllocator) std.mem.Allocator {
-        return .{ .ptr = self, .vtable = &vtable };
+fn panicHandler(msg: []const u8, ret_addr: ?usize) noreturn {
+    if (panic_ctx.counter > 0) {
+        std.debug.print(
+            "\n\nPANIC at {s}:{d} {s}\nStatement:\n{s}\n\n\n",
+            .{ panic_ctx.file, panic_ctx.line, msg, panic_ctx.sql },
+        );
     }
-
-    const vtable = std.mem.Allocator.VTable{
-        .alloc = alloc,
-        .resize = resize,
-        .remap = remap,
-        .free = free,
-    };
-
-    fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
-        const self: *CountingAllocator = @ptrCast(@alignCast(ctx));
-        if (self.current_bytes + len > MEM_LIMIT_BYTES) return null;
-        const result = self.backing.rawAlloc(len, alignment, ret_addr) orelse return null;
-        self.current_bytes += len;
-        if (self.current_bytes > self.peak_bytes) self.peak_bytes = self.current_bytes;
-        return result;
-    }
-
-    fn resize(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) bool {
-        const self: *CountingAllocator = @ptrCast(@alignCast(ctx));
-        if (new_len > memory.len) {
-            const delta = new_len - memory.len;
-            if (self.current_bytes + delta > MEM_LIMIT_BYTES) return false;
-        }
-        if (!self.backing.rawResize(memory, alignment, new_len, ret_addr)) return false;
-        if (new_len > memory.len) {
-            self.current_bytes += new_len - memory.len;
-            if (self.current_bytes > self.peak_bytes) self.peak_bytes = self.current_bytes;
-        } else {
-            self.current_bytes -= memory.len - new_len;
-        }
-        return true;
-    }
-
-    fn remap(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) ?[*]u8 {
-        const self: *CountingAllocator = @ptrCast(@alignCast(ctx));
-        if (new_len > memory.len) {
-            const delta = new_len - memory.len;
-            if (self.current_bytes + delta > MEM_LIMIT_BYTES) return null;
-        }
-        const result = self.backing.rawRemap(memory, alignment, new_len, ret_addr) orelse return null;
-        if (new_len > memory.len) {
-            self.current_bytes += new_len - memory.len;
-            if (self.current_bytes > self.peak_bytes) self.peak_bytes = self.current_bytes;
-        } else {
-            self.current_bytes -= memory.len - new_len;
-        }
-        return result;
-    }
-
-    fn free(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret_addr: usize) void {
-        const self: *CountingAllocator = @ptrCast(@alignCast(ctx));
-        self.backing.rawFree(memory, alignment, ret_addr);
-        self.current_bytes -= memory.len;
-    }
-};
-
-fn fmtMem(bytes: usize) struct { value: usize, unit: []const u8 } {
-    if (bytes >= 1024 * 1024) return .{ .value = bytes / (1024 * 1024), .unit = "MB" };
-    if (bytes >= 1024) return .{ .value = bytes / 1024, .unit = "KB" };
-    return .{ .value = bytes, .unit = "B" };
+    std.debug.defaultPanic(msg, ret_addr);
 }
 
-const JsonSummary = struct { passed: usize, failed: usize, files: usize };
-const JsonFile = struct { path: []const u8, passed: usize, failed: usize };
-const JsonOutput = struct {
-    generated_at: i64,
-    commit: []const u8,
-    summary: JsonSummary,
-    files: []const JsonFile,
-};
-
 pub fn main(init: std.process.Init) !void {
-    const io = init.io;
     const alloc = init.gpa;
+    const io = init.io;
 
     const args = try init.minimal.args.toSlice(alloc);
     defer alloc.free(args);
 
-    var scan_dir: []const u8 = DEFAULT_TEST_DIR;
-    var show_errors: usize = 0;
-    var agent: bool = false;
-    var sqlite: bool = false;
-    var n_jobs: ?usize = null;
-    var json_path: ?[]const u8 = null;
-    var commit: []const u8 = "";
-    var explicit_files: std.ArrayList([]const u8) = .empty;
-    defer explicit_files.deinit(alloc);
+    var file_path: ?[]const u8 = null;
+    var btree_check_table: ?[]const u8 = null;
 
-    var i: usize = 1;
-    while (i < args.len) : (i += 1) {
-        if (std.mem.eql(u8, args[i], "--dir") and i + 1 < args.len) {
-            i += 1;
-            scan_dir = args[i];
-        } else if (std.mem.eql(u8, args[i], "--show-errors") and i + 1 < args.len) {
-            i += 1;
-            show_errors = std.fmt.parseInt(usize, args[i], 10) catch 0;
-        } else if (std.mem.eql(u8, args[i], "--agent")) {
-            agent = true;
-        } else if (std.mem.eql(u8, args[i], "--sqlite")) {
-            sqlite = true;
-        } else if (std.mem.eql(u8, args[i], "--jobs") and i + 1 < args.len) {
-            i += 1;
-            n_jobs = std.fmt.parseInt(usize, args[i], 10) catch null;
-        } else if (std.mem.eql(u8, args[i], "--json") and i + 1 < args.len) {
-            i += 1;
-            json_path = args[i];
-        } else if (std.mem.eql(u8, args[i], "--commit") and i + 1 < args.len) {
-            i += 1;
-            commit = args[i];
+    for (args[1..]) |arg| {
+        if (std.mem.startsWith(u8, arg, "--btree-check=")) {
+            btree_check_table = arg["--btree-check=".len..];
         } else {
-            try explicit_files.append(alloc, args[i]);
+            file_path = arg;
         }
     }
 
-    // --agent requires sequential execution so we can stop after the first failed file.
-    if (agent) n_jobs = 1;
-
-    var all_files: std.ArrayList([]const u8) = .empty;
-    defer {
-        for (all_files.items) |f| alloc.free(f);
-        all_files.deinit(alloc);
-    }
-
-    if (explicit_files.items.len > 0) {
-        for (explicit_files.items) |path| {
-            try all_files.append(alloc, try alloc.dupe(u8, path));
-        }
-    } else {
-        try collectFiles(alloc, io, scan_dir, &all_files);
-        std.sort.block([]const u8, all_files.items, {}, struct {
-            fn lt(_: void, a: []const u8, b: []const u8) bool {
-                return std.mem.order(u8, a, b) == .lt;
-            }
-        }.lt);
-    }
-
-    if (all_files.items.len == 0) {
-        std.debug.print("no test files found\n", .{});
-        return;
-    }
-
-    // One result slot per file; each slot is written by exactly one thread (via hash
-    // partitioning), so no synchronization is needed.
-    const file_results = try alloc.alloc(FileResult, all_files.items.len);
-    defer alloc.free(file_results);
-    @memset(file_results, .{});
-
-    const cpu_count = std.Thread.getCpuCount() catch 1;
-    const thread_count = @min(n_jobs orelse cpu_count, all_files.items.len);
-
-    const threads = try alloc.alloc(std.Thread, thread_count);
-    defer alloc.free(threads);
-
-    for (threads, 0..) |*t, id| {
-        t.* = try std.Thread.spawn(.{}, workerFn, .{WorkerCtx{
-            .io = io,
-            .paths = all_files.items,
-            .show_errors = show_errors,
-            .agent = agent,
-            .sqlite = sqlite,
-            .thread_id = id,
-            .thread_count = thread_count,
-            .file_results = file_results,
-        }});
-    }
-    for (threads) |t| t.join();
-
-    var total_passed: usize = 0;
-    var total_failed: usize = 0;
-    for (file_results) |r| {
-        total_passed += r.passed;
-        total_failed += r.failed;
-    }
-
-    if (json_path) |path| {
-        try writeJson(alloc, io, path, commit, all_files.items, file_results);
-    }
-
-    const total = total_passed + total_failed;
-    const pct: f64 = if (total == 0) 100.0 else @as(f64, @floatFromInt(total_passed)) / @as(f64, @floatFromInt(total)) * 100.0;
-    std.debug.print("\n{d} passed, {d} failed across {d} file(s) ({d:.1}%)\n", .{
-        total_passed, total_failed, all_files.items.len, pct,
-    });
-
-    if (total_failed > 0) std.process.exit(1);
-}
-
-fn workerFn(ctx: WorkerCtx) void {
-    for (ctx.paths, 0..) |path, file_idx| {
-        if (std.hash.Wyhash.hash(0, path) % ctx.thread_count != ctx.thread_id) continue;
-
-        // CountingAllocator wraps page_allocator and serves as the backing
-        // store for both the file-level arena and per-statement arenas (via
-        // page_alloc in runner). This lets us measure peak bytes in use at
-        // any point during the file run, and enforce the 256 MB hard cap.
-        var counter = CountingAllocator{ .backing = std.heap.page_allocator };
-        var arena = std.heap.ArenaAllocator.init(counter.allocator());
-        defer arena.deinit();
-
-        var db_bytes: usize = 0;
-        const result = runner.runFile(arena.allocator(), counter.allocator(), ctx.io, path, ctx.show_errors, ctx.agent, ctx.sqlite, &db_bytes) catch |err| {
-            const db = fmtMem(db_bytes);
-            if (err == error.OutOfMemory) {
-                std.debug.print("{s}: exceeded 256 MB memory limit [db:{d}{s}]\n", .{ path, db.value, db.unit });
-            } else {
-                std.debug.print("error in {s}: {s} [db:{d}{s}]\n", .{ path, @errorName(err), db.value, db.unit });
-            }
-            ctx.file_results[file_idx].failed += 1;
-            if (ctx.agent) break;
-            continue;
-        };
-
-        const peak = fmtMem(counter.peak_bytes);
-        const db = fmtMem(db_bytes);
-        ctx.file_results[file_idx] = .{
-            .passed = result.passed,
-            .failed = result.failed,
-            .peak_mem_bytes = counter.peak_bytes,
-            .db_size_bytes = db_bytes,
-        };
-
-        const status = if (result.failed == 0) "ok" else "FAILED";
-        std.debug.print("{s}: {d} passed, {d} failed [{s}] db:{d}{s} peak:{d}{s}\n", .{
-            path, result.passed, result.failed, status, db.value, db.unit, peak.value, peak.unit,
-        });
-
-        if (ctx.agent and result.failed > 0) break;
-    }
-}
-
-fn writeJson(
-    alloc: std.mem.Allocator,
-    io: std.Io,
-    path: []const u8,
-    commit: []const u8,
-    paths: []const []const u8,
-    results: []const FileResult,
-) !void {
-    const json_files = try alloc.alloc(JsonFile, paths.len);
-    defer alloc.free(json_files);
-
-    var total_passed: usize = 0;
-    var total_failed: usize = 0;
-    for (paths, results, json_files) |p, r, *jf| {
-        jf.* = .{ .path = p, .passed = r.passed, .failed = r.failed };
-        total_passed += r.passed;
-        total_failed += r.failed;
-    }
-
-    const generated_at = std.Io.Clock.real.now(io).toSeconds();
-
-    const output = JsonOutput{
-        .generated_at = generated_at,
-        .commit = commit,
-        .summary = .{ .passed = total_passed, .failed = total_failed, .files = paths.len },
-        .files = json_files,
-    };
-
-    const json_bytes = try std.json.Stringify.valueAlloc(alloc, output, .{ .whitespace = .indent_2 });
-    defer alloc.free(json_bytes);
-
-    const json_file = try Dir.cwd().createFile(io, path, .{});
-    defer json_file.close(io);
-    try json_file.writeStreamingAll(io, json_bytes);
-}
-
-// Recursively collects all .slt / .test files under dir_path into out.
-fn collectFiles(alloc: std.mem.Allocator, io: std.Io, dir_path: []const u8, out: *std.ArrayList([]const u8)) !void {
-    var dir = Dir.cwd().openDir(io, dir_path, .{ .iterate = true }) catch |err| {
-        std.debug.print("error opening dir '{s}': {s}\n", .{ dir_path, @errorName(err) });
+    const path = file_path orelse {
+        std.debug.print("Usage: slt <file.test>\n", .{});
         return;
     };
-    defer dir.close(io);
 
-    var it = dir.iterate();
-    while (try it.next(io)) |entry| {
-        const full = try std.fmt.allocPrint(alloc, "{s}/{s}", .{ dir_path, entry.name });
-        switch (entry.kind) {
-            .directory => {
-                try collectFiles(alloc, io, full, out);
-                alloc.free(full);
+    const content = try readFile(alloc, io, path);
+    defer alloc.free(content);
+
+    var parsed = try parser.parse(alloc, content);
+    defer parsed.deinit();
+
+    // Fresh in-memory database per run — no leftover state between test files.
+    var db = try Database.init(try InMemoryPager.create(alloc), alloc);
+    defer db.close();
+
+    var passed: usize = 0;
+    var failed: usize = 0;
+    var skip_next = false;
+
+    for (parsed.records, 1..) |record, counter| {
+        switch (record) {
+            // skipif / onlyif do not execute SQL — they set a flag that causes
+            // the immediately following record to be skipped.
+            .skipif => |engine| {
+                if (engineMatches(engine)) skip_next = true;
+                continue;
             },
-            .file => {
-                if (std.mem.endsWith(u8, entry.name, ".slt") or
-                    std.mem.endsWith(u8, entry.name, ".test"))
-                {
-                    try out.append(alloc, full);
-                } else {
-                    alloc.free(full);
+            .onlyif => |engine| {
+                if (!engineMatches(engine)) skip_next = true;
+                continue;
+            },
+
+            // statement: run SQL, check only whether it succeeded or errored.
+            // No rows are inspected.
+            .statement => |stmt| {
+                if (skip_next) {
+                    skip_next = false;
+                    continue;
+                }
+
+                panic_ctx = .{ .counter = counter, .file = path, .line = stmt.line, .sql = stmt.sql };
+                var arena = std.heap.ArenaAllocator.init(alloc);
+                defer arena.deinit();
+
+                const exec_result = try execute(arena.allocator(), db, stmt.sql);
+
+                switch (matcher.matchStatement(exec_result, stmt.expected)) {
+                    .match => passed += 1,
+                    .mismatch => {
+                        failed += 1;
+                        // std.debug.print("[n:{d}] FAIL\n", .{counter});
+                        // printStatementMismatch(path, stmt, m);
+                    },
+                }
+
+                if (btree_check_table) |tname| {
+                    checkTableBtrees(alloc, db, tname) catch |err| {
+                        std.debug.print("[n:{d}] BTREE INVARIANT FAIL after statement: {}\n  sql: {s}\n", .{ counter, err, stmt.sql });
+                        std.process.exit(1);
+                    };
                 }
             },
-            else => alloc.free(full),
+
+            // query: run SQL, format every cell to a string using the type_string
+            // hint, then compare the flat value list against the expected values.
+            //
+            // The type_string maps column index → format hint: I=integer, R=real,
+            // T=text. It affects how real numbers are displayed (e.g. type I causes
+            // truncation to match SQLite reference output).
+            .query => |qry| {
+                if (skip_next) {
+                    skip_next = false;
+                    continue;
+                }
+
+                panic_ctx = .{ .counter = counter, .file = path, .line = qry.line, .sql = qry.sql };
+                var arena = std.heap.ArenaAllocator.init(alloc);
+                defer arena.deinit();
+
+                const exec_result = try execute(arena.allocator(), db, qry.sql);
+
+                if (exec_result == .err) {
+                    // The query returned a SQL error — always a mismatch for a
+                    // query record (queries are expected to return rows, not errors).
+                    failed += 1;
+                    // std.debug.print("[n:{d}] FAIL\n", .{counter});
+                    // std.debug.print("FAIL {s}:{d}: sql error: {s}\n  sql: {s}\n", .{
+                    //     path, qry.line, exec_result.err.message, qry.sql,
+                    // });
+                    continue;
+                }
+
+                if (exec_result != .result_set) {
+                    failed += 1;
+                    // std.debug.print("[n:{d}] FAIL\n", .{counter});
+                    // std.debug.print("FAIL {s}:{d}: query returned no result set\n  sql: {s}\n", .{
+                    //     path, qry.line, qry.sql,
+                    // });
+                    continue;
+                }
+
+                const rs = &exec_result.result_set;
+                const col_count = rs.columns.len;
+
+                // Format every cell to a string before handing off to matcher.
+                // matcher.matchQuery needs [][]const u8, not raw DB values.
+                var values = try arena.allocator().alloc([]const u8, rs.rows.len * col_count);
+                for (rs.rows, 0..) |row, ri| {
+                    for (row.values, 0..) |val, ci| {
+                        const col_type: u8 = if (ci < qry.type_string.len) qry.type_string[ci] else 0;
+                        values[ri * col_count + ci] = try formatValue(arena.allocator(), val, col_type);
+                    }
+                }
+
+                // matchQuery sorts values in-place (for rowsort / valuesort) then compares.
+                switch (matcher.matchQuery(values, col_count, qry.expected, qry.sort_mode)) {
+                    .match => passed += 1,
+                    .mismatch => {
+                        failed += 1;
+                        // std.debug.print("[n:{d}] FAIL\n", .{counter});
+                        // printQueryMismatch(path, qry, m, values, col_count);
+                    },
+                }
+
+                if (btree_check_table) |tname| {
+                    checkTableBtrees(alloc, db, tname) catch |err| {
+                        std.debug.print("[n:{d}] BTREE INVARIANT FAIL after query: {}\n  sql: {s}\n", .{ counter, err, qry.sql });
+                        std.process.exit(1);
+                    };
+                }
+            },
         }
     }
+
+    const total = passed + failed;
+    const pct: f64 = if (total == 0) 100.0 else @as(f64, @floatFromInt(passed)) / @as(f64, @floatFromInt(total)) * 100.0;
+    std.debug.print("{s}: {d} passed, {d} failed ({d:.1}%)\n", .{ path, passed, failed, pct });
+
+    if (failed > 0) std.process.exit(1);
+}
+
+// --------------------------
+// B-tree invariant checking
+// --------------------------
+
+// Check all B-trees owned by a named table: the rowid tree and every index tree.
+// Called after each SLT operation when --btree-check=<name> is active.
+fn checkTableBtrees(alloc: std.mem.Allocator, db: *Database, table_name: []const u8) !void {
+    const meta = db.cat.tables.get(table_name) orelse return; // table not yet created — skip
+    check_btree.checkBtreeInvariant(pdb.btree.RowidFormat, alloc, &db.pager, meta.btree_root) catch |err| {
+        std.debug.print("  rowid tree (root={d})\n", .{meta.btree_root});
+        return err;
+    };
+    for (meta.indexes) |idx| {
+        check_btree.checkBtreeInvariant(pdb.btree.IndexFormat, alloc, &db.pager, idx.btree_root) catch |err| {
+            std.debug.print("  index '{s}' tree (root={d})\n", .{ idx.name, idx.btree_root });
+            return err;
+        };
+    }
+}
+
+// --------------------------
+// Engine matching
+// --------------------------
+
+// We target ANSI SQL / PostgreSQL compatibility, so both "pagerdb" and
+// "postgresql" directives apply to us.
+fn engineMatches(engine: []const u8) bool {
+    return std.mem.eql(u8, engine, "pagerdb") or std.mem.eql(u8, engine, "postgresql");
+}
+
+// --------------------------
+// Value formatting
+// --------------------------
+
+// Formats a single DB value to an owned string for SLT comparison.
+// col_type is the SLT type character from the query type_string:
+//   'I' = integer, 'R' = real, 'T' = text, 0 = unknown (treat as text).
+// When col_type is 'I' and the stored value is real, we truncate toward zero
+// to match the SQLite reference tool's behaviour.
+fn formatValue(alloc: std.mem.Allocator, val: anytype, col_type: u8) ![]u8 {
+    return switch (val) {
+        .null => alloc.dupe(u8, "NULL"),
+        .int => |n| std.fmt.allocPrint(alloc, "{d}", .{n}),
+        .real => |f| if (col_type == 'I')
+            std.fmt.allocPrint(alloc, "{d}", .{@as(i64, @intFromFloat(@trunc(f)))})
+        else
+            // Normalize -0.0 → 0.0 to match reference output.
+            std.fmt.allocPrint(alloc, "{d}", .{if (f == 0.0) @as(f64, 0.0) else f}),
+        .text => |s| alloc.dupe(u8, s),
+        .blob => |b| std.fmt.allocPrint(alloc, "<blob {d}B>", .{b.len}),
+    };
+}
+
+// --------------------------
+// Error printing
+// --------------------------
+
+fn printStatementMismatch(path: []const u8, stmt: parser.StatementRecord, m: matcher.Mismatch) void {
+    switch (m) {
+        .statement => |s| {
+            if (s.want_err) {
+                std.debug.print("FAIL {s}:{d}: expected error but statement succeeded\n  sql: {s}\n", .{
+                    path, stmt.line, stmt.sql,
+                });
+            } else {
+                std.debug.print("FAIL {s}:{d}: expected ok but got error: {s}\n  sql: {s}\n", .{
+                    path, stmt.line, s.got_msg orelse "(unknown)", stmt.sql,
+                });
+            }
+        },
+        else => {},
+    }
+}
+
+fn printQueryMismatch(
+    path: []const u8,
+    qry: parser.QueryRecord,
+    m: matcher.Mismatch,
+    values: []const []const u8,
+    col_count: usize,
+) void {
+    switch (m) {
+        .count => |c| std.debug.print(
+            "FAIL {s}:{d}: expected {d} values, got {d}\n  sql: {s}\n",
+            .{ path, qry.line, c.expected, c.got, qry.sql },
+        ),
+        .value => |v| std.debug.print(
+            "FAIL {s}:{d}: value[{d}] expected '{s}', got '{s}'\n  sql: {s}\n",
+            .{ path, qry.line, v.index, v.expected, v.got, qry.sql },
+        ),
+        .hash => |h| std.debug.print(
+            "FAIL {s}:{d}: hash mismatch (expected {s}, got {s})\n  sql: {s}\n",
+            .{ path, qry.line, h.expected_md5, h.got_md5, qry.sql },
+        ),
+        .sql_error => |msg| std.debug.print(
+            "FAIL {s}:{d}: sql error: {s}\n  sql: {s}\n",
+            .{ path, qry.line, msg, qry.sql },
+        ),
+        .statement => {},
+    }
+    _ = values;
+    _ = col_count;
+}
+
+// --------------------------
+// File I/O
+// --------------------------
+
+fn readFile(alloc: std.mem.Allocator, io: std.Io, filename: []const u8) ![]u8 {
+    const f = try std.Io.Dir.cwd().openFile(io, filename, .{ .mode = .read_only });
+    defer f.close(io);
+    const len = @as(usize, try f.length(io));
+    const buf = try alloc.alloc(u8, len);
+    _ = try f.readPositionalAll(io, buf, 0);
+    return buf;
 }

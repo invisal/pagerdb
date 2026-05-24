@@ -270,11 +270,20 @@ pub fn BTree(comptime Fmt: type) type {
 
             var lh = readBTreeHeader(&lw.buf);
             var rh = readBTreeHeader(&rw.buf);
+            rh.parent_page = lh.parent_page;
             rh.prev_leaf = lw.page_id;
             rh.next_leaf = lh.next_leaf;
             lh.next_leaf = right_id;
             writeBTreeHeader(lw, lh);
             writeBTreeHeader(&rw, rh);
+
+            if (rh.next_leaf != 0) {
+                var next_pw = try PageWriter.open(pager, rh.next_leaf);
+                var next_h = readBTreeHeader(&next_pw.buf);
+                next_h.prev_leaf = right_id;
+                writeBTreeHeader(&next_pw, next_h);
+                try next_pw.commit();
+            }
 
             try leafInsert(&rw, payload);
             try lw.commit();
@@ -302,12 +311,21 @@ pub fn BTree(comptime Fmt: type) type {
             }
 
             var rh = readBTreeHeader(&rw.buf);
+            rh.parent_page = h.parent_page;
             rh.prev_leaf = lw.page_id;
             rh.next_leaf = h.next_leaf;
             h.next_leaf = right_id;
             h.cell_count = mid;
             writeBTreeHeader(lw, h);
             writeBTreeHeader(&rw, rh);
+
+            if (rh.next_leaf != 0) {
+                var next_pw = try PageWriter.open(pager, rh.next_leaf);
+                var next_h = readBTreeHeader(&next_pw.buf);
+                next_h.prev_leaf = right_id;
+                writeBTreeHeader(&next_pw, next_h);
+                try next_pw.commit();
+            }
 
             if (findKeyPos(&lw.buf, h, Fmt.payloadKey(payload)) < mid) {
                 try leafInsert(lw, payload);

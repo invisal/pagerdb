@@ -46,6 +46,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/setup-zig
+      - uses: oven-sh/setup-bun@v2
+      - name: Install runner dependencies
+        run: bun install --cwd testing/sqllogictest
       - name: Install sqlite3
         run: sudo apt-get install -y libsqlite3-dev
       - name: Fetch upstream sqllogictest suite
@@ -57,5 +60,7 @@ jobs:
         run: |
           echo '## SQLLogicTest Results' >> "$GITHUB_STEP_SUMMARY"
           printf '```\n' >> "$GITHUB_STEP_SUMMARY"
-          zig build slt -- --dir testing/sqllogictest/upstream 2>&1 | tee -a "$GITHUB_STEP_SUMMARY" || true
+          bun testing/sqllogictest/runner.ts \
+            --dir testing/sqllogictest/upstream \
+            2>&1 | tee -a "$GITHUB_STEP_SUMMARY" || true
           printf '```\n' >> "$GITHUB_STEP_SUMMARY"

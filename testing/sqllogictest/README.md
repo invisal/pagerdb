@@ -1,48 +1,57 @@
 # sqllogictest Runner
 
-A [sqllogictest](https://www.sqlite.org/sqllogictest/doc/trunk/about.wiki)-compatible test runner for VisalDB. Test files are plain text (`.slt` or `.test`) describing SQL statements and expected query results.
+A [sqllogictest](https://www.sqlite.org/sqllogictest/doc/trunk/about.wiki)-compatible test runner for PagerDB. Test files are plain text (`.test`) describing SQL statements and expected query results.
 
-## Usage
+## Running tests
+
+### All local test files
+
+Uses the Bun runner (`runner.ts`), which runs every `.test` file in the directory as a separate process, collects results, and prints a summary. Requires `zig build` to have run first.
 
 ```bash
-# Scan the built-in tests/ directory (default)
-zig build slt
+bun runner.ts --no-build
+```
 
-# Scan any directory recursively for .slt and .test files
-zig build slt -- --dir testing/sqllogictest/upstream
+Or let the runner build the binary itself:
 
-# Run a specific file
+```bash
+bun runner.ts
+```
+
+### Single file
+
+```bash
 zig build slt -- testing/sqllogictest/tests/basic.test
-
-# Show up to N individual failure details per file
-zig build slt -- --show-errors 5
-zig build slt -- --dir testing/sqllogictest/upstream --show-errors 5
 ```
 
-## Output format
+## runner.ts options
 
-By default the runner prints one summary line per file and a final total — no individual failure lines:
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--dir <path>` | `testing/sqllogictest/tests` | Directory of `.test` files to run |
+| `--json <path>` | *(none)* | Write a JSON report (see schema below) |
+| `--commit <sha>` | `unknown` | Commit SHA to embed in the JSON report |
+| `--timeout <sec>` | `180` | Per-file timeout in seconds |
+| `--no-build` | *(off)* | Skip `zig build` (binary must already exist) |
 
-```
-testing/sqllogictest/tests/aggregate.test: 19 passed, 0 failed [ok]
-testing/sqllogictest/tests/basic.test:    13 passed, 0 failed [ok]
-testing/sqllogictest/tests/select.test:   20 passed, 0 failed [ok]
+### JSON report schema
 
-52 passed, 0 failed across 3 file(s)
-```
+The `--json` output matches the `CoveragePayload` type consumed by the site:
 
-Add `--show-errors N` to reveal the first N failure details per file:
-
-```
-FAIL testing/sqllogictest/tests/basic.test:12: expected ok but got error: no such column: x
-  ... and 3 more failure(s) not shown
+```json
+{
+  "generated_at": 1700000000,
+  "commit": "abc123",
+  "summary": { "passed": 404, "failed": 0, "files": 21 },
+  "files": [
+    { "path": "basic.test", "passed": 13, "failed": 0 }
+  ]
+}
 ```
 
 ## Upstream test suite
 
 The `upstream/` folder holds the original SQLite sqllogictest files. It is gitignored and must be fetched manually.
-
-**Fetch the upstream tests** (clone to a temp location, copy only the test files — no `.git/` included):
 
 ```bash
 git clone --depth=1 https://github.com/invisal/sqllogictest /tmp/slt-upstream
@@ -50,13 +59,13 @@ cp -r /tmp/slt-upstream/test testing/sqllogictest/upstream
 rm -rf /tmp/slt-upstream
 ```
 
-**Then run them:**
+Then run against the upstream suite:
 
 ```bash
-zig build slt -- --dir testing/sqllogictest/upstream
+bun runner.ts --dir testing/sqllogictest/upstream
 ```
 
-Many upstream tests will fail — they cover SQL features not yet implemented in VisalDB. That is expected. Use the per-file summary to track compatibility progress.
+Many upstream tests will fail — they cover SQL features not yet implemented in PagerDB. That is expected. Use the per-file summary to track compatibility progress.
 
 ## Test file format
 
