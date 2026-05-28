@@ -56,17 +56,17 @@ pub const SeqScanCursor = struct {
         resetArena(&self.batch_arena);
         const ba = self.batch_arena.allocator();
         var buf = try ba.alloc(BorrowedRow, BATCH_SIZE);
+        // Decode directly into a pre-sized slice that already has room for
+        // __rowid/__pageid/__slotid, avoiding an intermediate alloc+memcpy.
+        const schema_len = self.it.schema_len;
         var n: usize = 0;
         while (n < BATCH_SIZE) {
-            const hit = try self.it.next(ba) orelse break;
-            // Append __rowid, __pageid, __slotid as the last three values so
-            // they align with the synthetic SchemaCol entries injected by buildSchema.
-            const vals = try ba.alloc(row_mod.Value, hit.values.len + 3);
-            @memcpy(vals[0..hit.values.len], hit.values);
-            vals[hit.values.len] = .{ .int = @intCast(hit.rowid) };
-            vals[hit.values.len + 1] = .{ .int = @intCast(hit.page_id) };
-            vals[hit.values.len + 2] = .{ .int = @intCast(hit.slot_id) };
-            buf[n] = .{ .rowid = hit.rowid, .values = vals };
+            const vals = try ba.alloc(row_mod.Value, schema_len + 3);
+            const meta = try self.it.nextInto(vals, ba) orelse break;
+            vals[schema_len] = .{ .int = @intCast(meta.rowid) };
+            vals[schema_len + 1] = .{ .int = @intCast(meta.page_id) };
+            vals[schema_len + 2] = .{ .int = @intCast(meta.slot_id) };
+            buf[n] = .{ .rowid = meta.rowid, .values = vals };
             n += 1;
         }
         if (n == 0) return null;

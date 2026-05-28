@@ -25,17 +25,17 @@ const Frame = struct {
     data: [t.PAGE_SIZE]u8 = undefined,
 };
 
-// InMemoryPager is a pager implementation backed by a hash map.
-// Used for testing and in-memory databases.  Unlike DiskPager there is no
-// buffer pool — every page is always in memory.  This trades memory for
-// simplicity and removes I/O error paths from test code.
+// InMemoryPager is a pager implementation backed by an ArrayList.
+// Used for testing and in-memory databases.  Page IDs are dense integers
+// starting at 0, so an ArrayList gives O(1) access with no hashing and
+// better cache locality than the previous HashMap approach.
 //
 // When created via createWithConfig with pool_size > 0, an LRU buffer pool is
-// layered on top.  The hashmap remains the source of truth; the pool is a
+// layered on top.  The ArrayList remains the source of truth; the pool is a
 // write-through cache that exercises eviction without needing a real disk.
 pub const InMemoryPager = struct {
     allocator: Allocator,
-    pages: std.AutoHashMap(u32, [t.PAGE_SIZE]u8),
+    pages: std.ArrayListUnmanaged([t.PAGE_SIZE]u8),
     pool: []Frame, // empty slice when pool_size = 0
     tick: u64 = 0,
 
@@ -57,7 +57,7 @@ pub const InMemoryPager = struct {
         errdefer allocator.destroy(self);
         self.allocator = allocator;
         self.tick = 0;
-        self.pages = std.AutoHashMap(u32, [t.PAGE_SIZE]u8).init(allocator);
+        self.pages = .empty;
 
         if (config.pool_size > 0) {
             self.pool = try allocator.alloc(Frame, config.pool_size);
@@ -66,7 +66,7 @@ pub const InMemoryPager = struct {
             self.pool = &.{};
         }
 
-        try self.pages.put(0, std.mem.zeroes([t.PAGE_SIZE]u8));
+        try self.pages.append(allocator, std.mem.zeroes([t.PAGE_SIZE]u8));
         return Pager{
             .ptr = self,
             .vtable = &vtable,
@@ -109,8 +109,9 @@ pub const InMemoryPager = struct {
                 return;
             }
 
-            // Pool miss: load from backing map, bring into pool.
-            const page = self.pages.get(page_id) orelse return error.PageNotFound;
+            // Pool miss: load from backing array, bring into pool.
+            if (page_id >= self.pages.items.len) return error.PageNotFound;
+            const page = self.pages.items[page_id];
             buf.* = page;
             const frame = self.poolEvict();
             self.tick += 1;
@@ -118,16 +119,19 @@ pub const InMemoryPager = struct {
             return;
         }
 
-        // No pool: direct map lookup.
-        const page = self.pages.get(page_id) orelse return error.PageNotFound;
-        buf.* = page;
+        // No pool: direct array index.
+        if (page_id >= self.pages.items.len) return error.PageNotFound;
+        buf.* = self.pages.items[page_id];
     }
 
     fn memWritePage(ptr: *anyopaque, page_id: u32, buf: *const [t.PAGE_SIZE]u8, _: []Delta) anyerror!void {
         const self: *InMemoryPager = @ptrCast(@alignCast(ptr));
 
-        // Write-through: always commit to the backing map first.
-        try self.pages.put(page_id, buf.*);
+        // Grow the array if this is a new page being appended.
+        if (page_id >= self.pages.items.len) {
+            try self.pages.resize(self.allocator, page_id + 1);
+        }
+        self.pages.items[page_id] = buf.*;
 
         // Keep the pool consistent if this page is already cached.
         if (self.pool.len > 0) {
@@ -146,7 +150,7 @@ pub const InMemoryPager = struct {
     fn memClose(ptr: *anyopaque) void {
         const self: *InMemoryPager = @ptrCast(@alignCast(ptr));
         if (self.pool.len > 0) self.allocator.free(self.pool);
-        self.pages.deinit();
+        self.pages.deinit(self.allocator);
         self.allocator.destroy(self);
     }
 };

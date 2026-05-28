@@ -165,12 +165,13 @@ pub const Db = struct {
         const cols = buildColSchema(table.columns, &schema_buf);
         var it = try btree.RowidBTree.ScanIterator.init(&self.pager, table.btree_root);
         while (try it.next()) |cell| {
-            const row_bytes: []u8 = if (cell.is_overflow) blk: {
-                const out = try self.allocator.alloc(u8, cell.overflow_len);
-                try overflow.readChain(&self.pager, cell.overflow_page, cell.overflow_len, out);
-                break :blk out;
-            } else try self.allocator.dupe(u8, cell.row_data);
-            defer self.allocator.free(row_bytes);
+            const overflow_buf: ?[]u8 = if (cell.is_overflow) blk: {
+                const buf = try self.allocator.alloc(u8, cell.overflow_len);
+                try overflow.readChain(&self.pager, cell.overflow_page, cell.overflow_len, buf);
+                break :blk buf;
+            } else null;
+            defer if (overflow_buf) |b| self.allocator.free(b);
+            const row_bytes: []const u8 = overflow_buf orelse cell.row_data;
 
             const values = try row.decodeRow(cols, row_bytes, self.allocator);
             defer freeValues(self.allocator, values);
@@ -314,12 +315,13 @@ pub const Db = struct {
             var leaf_buf: [t.PAGE_SIZE]u8 = undefined;
             const cell = try btree.lookupCell(&self.pager, meta.btree_root, rowid, &leaf_buf) orelse return false;
 
-            const row_bytes: []u8 = if (cell.is_overflow) blk: {
-                const out = try self.allocator.alloc(u8, cell.overflow_len);
-                try overflow.readChain(&self.pager, cell.overflow_page, cell.overflow_len, out);
-                break :blk out;
-            } else try self.allocator.dupe(u8, cell.row_data);
-            defer self.allocator.free(row_bytes);
+            const overflow_buf: ?[]u8 = if (cell.is_overflow) blk: {
+                const buf = try self.allocator.alloc(u8, cell.overflow_len);
+                try overflow.readChain(&self.pager, cell.overflow_page, cell.overflow_len, buf);
+                break :blk buf;
+            } else null;
+            defer if (overflow_buf) |b| self.allocator.free(b);
+            const row_bytes: []const u8 = overflow_buf orelse cell.row_data;
 
             if (self.txn) |*active_txn| try active_txn.logDelete(table, rowid, row_bytes);
 
@@ -366,12 +368,13 @@ pub const Db = struct {
             var leaf_buf: [t.PAGE_SIZE]u8 = undefined;
             const cell = try btree.lookupCell(&self.pager, meta.btree_root, rowid, &leaf_buf) orelse return false;
 
-            const old_row_bytes: []u8 = if (cell.is_overflow) blk: {
-                const out = try self.allocator.alloc(u8, cell.overflow_len);
-                try overflow.readChain(&self.pager, cell.overflow_page, cell.overflow_len, out);
-                break :blk out;
-            } else try self.allocator.dupe(u8, cell.row_data);
-            defer self.allocator.free(old_row_bytes);
+            const overflow_buf: ?[]u8 = if (cell.is_overflow) blk: {
+                const buf = try self.allocator.alloc(u8, cell.overflow_len);
+                try overflow.readChain(&self.pager, cell.overflow_page, cell.overflow_len, buf);
+                break :blk buf;
+            } else null;
+            defer if (overflow_buf) |b| self.allocator.free(b);
+            const old_row_bytes: []const u8 = overflow_buf orelse cell.row_data;
 
             if (self.txn) |*active_txn| try active_txn.logUpdate(table, rowid, old_row_bytes);
 
@@ -432,12 +435,13 @@ pub const Db = struct {
         var leaf_buf: [t.PAGE_SIZE]u8 = undefined;
         const cell = try btree.lookupCell(&self.pager, meta.btree_root, rowid, &leaf_buf) orelse return null;
 
-        const row_bytes: []u8 = if (cell.is_overflow) blk: {
-            const out = try allocator.alloc(u8, cell.overflow_len);
-            try overflow.readChain(&self.pager, cell.overflow_page, cell.overflow_len, out);
-            break :blk out;
-        } else try allocator.dupe(u8, cell.row_data);
-        defer allocator.free(row_bytes);
+        const overflow_buf: ?[]u8 = if (cell.is_overflow) blk: {
+            const buf = try allocator.alloc(u8, cell.overflow_len);
+            try overflow.readChain(&self.pager, cell.overflow_page, cell.overflow_len, buf);
+            break :blk buf;
+        } else null;
+        defer if (overflow_buf) |b| allocator.free(b);
+        const row_bytes: []const u8 = overflow_buf orelse cell.row_data;
 
         return try row.decodeRow(cols, row_bytes, allocator);
     }
@@ -454,18 +458,32 @@ pub const Db = struct {
         pub fn next(self: *DbRowIterator, allocator: std.mem.Allocator) !?struct { rowid: u64, page_id: u32, slot_id: u16, values: []row.Value } {
             const cell = try self.it.next() orelse return null;
             const cols = self.schema_buf[0..self.schema_len];
-
-            // Overflow rows span multiple pages; copy into a temp buffer,
-            // decode, then free the raw bytes.
-            const row_bytes: []u8 = if (cell.is_overflow) blk: {
-                const out = try allocator.alloc(u8, cell.overflow_len);
-                errdefer allocator.free(out);
-                try overflow.readChain(self.it.pager, cell.overflow_page, cell.overflow_len, out);
-                break :blk out;
-            } else try allocator.dupe(u8, cell.row_data);
-            defer allocator.free(row_bytes);
-
+            const overflow_buf: ?[]u8 = if (cell.is_overflow) blk: {
+                const buf = try allocator.alloc(u8, cell.overflow_len);
+                errdefer allocator.free(buf);
+                try overflow.readChain(self.it.pager, cell.overflow_page, cell.overflow_len, buf);
+                break :blk buf;
+            } else null;
+            defer if (overflow_buf) |b| allocator.free(b);
+            const row_bytes: []const u8 = overflow_buf orelse cell.row_data;
             return .{ .rowid = cell.rowid, .page_id = cell.page_id, .slot_id = cell.slot_idx, .values = try row.decodeRow(cols, row_bytes, allocator) };
+        }
+
+        // Decode the next row directly into a caller-supplied slice.
+        // `out` must have len >= schema_len; only out[0..schema_len] is written.
+        // Saves one alloc(Value×N) per call compared to next().
+        pub fn nextInto(self: *DbRowIterator, out: []row.Value, allocator: std.mem.Allocator) !?struct { rowid: u64, page_id: u32, slot_id: u16 } {
+            const cell = try self.it.next() orelse return null;
+            const cols = self.schema_buf[0..self.schema_len];
+            if (cell.is_overflow) {
+                const buf = try allocator.alloc(u8, cell.overflow_len);
+                defer allocator.free(buf);
+                try overflow.readChain(self.it.pager, cell.overflow_page, cell.overflow_len, buf);
+                try row.decodeRowInto(cols, buf, out[0..self.schema_len], allocator);
+            } else {
+                try row.decodeRowInto(cols, cell.row_data, out[0..self.schema_len], allocator);
+            }
+            return .{ .rowid = cell.rowid, .page_id = cell.page_id, .slot_id = cell.slot_idx };
         }
     };
 
@@ -486,13 +504,14 @@ pub const Db = struct {
             const cell = try btree.lookupCell(&self.db.pager, self.table_meta.btree_root, rowid, &leaf_buf) orelse return null;
             const cols = self.schema_buf[0..self.schema_len];
 
-            const row_bytes: []u8 = if (cell.is_overflow) blk: {
-                const out = try alloc.alloc(u8, cell.overflow_len);
-                errdefer alloc.free(out);
-                try overflow.readChain(&self.db.pager, cell.overflow_page, cell.overflow_len, out);
-                break :blk out;
-            } else try alloc.dupe(u8, cell.row_data);
-            defer alloc.free(row_bytes);
+            const overflow_buf: ?[]u8 = if (cell.is_overflow) blk: {
+                const buf = try alloc.alloc(u8, cell.overflow_len);
+                errdefer alloc.free(buf);
+                try overflow.readChain(&self.db.pager, cell.overflow_page, cell.overflow_len, buf);
+                break :blk buf;
+            } else null;
+            defer if (overflow_buf) |b| alloc.free(b);
+            const row_bytes: []const u8 = overflow_buf orelse cell.row_data;
 
             return .{ .rowid = rowid, .key = key, .values = try row.decodeRow(cols, row_bytes, alloc) };
         }
@@ -550,12 +569,13 @@ pub const Db = struct {
 
         var it = try btree.RowidBTree.ScanIterator.init(&self.pager, meta.btree_root);
         while (try it.next()) |cell| {
-            const row_bytes: []u8 = if (cell.is_overflow) blk: {
-                const out = try self.allocator.alloc(u8, cell.overflow_len);
-                try overflow.readChain(&self.pager, cell.overflow_page, cell.overflow_len, out);
-                break :blk out;
-            } else try self.allocator.dupe(u8, cell.row_data);
-            defer self.allocator.free(row_bytes);
+            const overflow_buf: ?[]u8 = if (cell.is_overflow) blk: {
+                const buf = try self.allocator.alloc(u8, cell.overflow_len);
+                try overflow.readChain(&self.pager, cell.overflow_page, cell.overflow_len, buf);
+                break :blk buf;
+            } else null;
+            defer if (overflow_buf) |b| self.allocator.free(b);
+            const row_bytes: []const u8 = overflow_buf orelse cell.row_data;
 
             const values = try row.decodeRow(cols, row_bytes, self.allocator);
             defer {
@@ -608,12 +628,13 @@ fn buildIndexKeyPrefix(values: []const row.Value, col_indices: []const u32, col_
 fn readAndDecodeRow(self: *Db, meta: *const catalog.TableMeta, rowid: u64) !?[]row.Value {
     var leaf_buf: [t.PAGE_SIZE]u8 = undefined;
     const cell = try btree.lookupCell(&self.pager, meta.btree_root, rowid, &leaf_buf) orelse return null;
-    const row_bytes: []u8 = if (cell.is_overflow) blk: {
-        const out = try self.allocator.alloc(u8, cell.overflow_len);
-        try overflow.readChain(&self.pager, cell.overflow_page, cell.overflow_len, out);
-        break :blk out;
-    } else try self.allocator.dupe(u8, cell.row_data);
-    defer self.allocator.free(row_bytes);
+    const overflow_buf: ?[]u8 = if (cell.is_overflow) blk: {
+        const buf = try self.allocator.alloc(u8, cell.overflow_len);
+        try overflow.readChain(&self.pager, cell.overflow_page, cell.overflow_len, buf);
+        break :blk buf;
+    } else null;
+    defer if (overflow_buf) |b| self.allocator.free(b);
+    const row_bytes: []const u8 = overflow_buf orelse cell.row_data;
     var schema_buf: [64]row.ColumnSchema = undefined;
     const cols = buildColSchema(meta.columns, &schema_buf);
     return try row.decodeRow(cols, row_bytes, self.allocator);
