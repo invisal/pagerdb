@@ -148,47 +148,60 @@ pub fn encodeRow(values: []const Value, buf: []u8) usize {
     return pos;
 }
 
-pub fn decodeRow(
+// Decode a serialised row into a caller-supplied slice.
+// `out` must have len >= cols.len.  Text and blob values are duped into
+// `allocator`; integer and real values are read directly from `buf`.
+// Used by hot paths (SeqScanCursor) to skip an intermediate allocation.
+pub fn decodeRowInto(
     cols: []const ColumnSchema,
     buf: []const u8,
+    out: []Value,
     allocator: std.mem.Allocator,
-) ![]Value {
+) !void {
     const bitmap_size = nullBitmapSize(cols.len);
     const bitmap = buf[0..bitmap_size];
     var pos: usize = bitmap_size;
 
-    const values = try allocator.alloc(Value, cols.len);
-
     for (cols, 0..) |col, i| {
         if (isNull(bitmap, i)) {
-            values[i] = .null;
+            out[i] = .null;
             continue;
         }
         switch (col.col_type) {
             .int => {
                 const raw = std.mem.readInt(u64, buf[pos..][0..8], .big);
-                values[i] = .{ .int = decodeInt(raw) };
+                out[i] = .{ .int = decodeInt(raw) };
                 pos += 8;
             },
             .real => {
                 const bits = std.mem.readInt(u64, buf[pos..][0..8], .little);
-                values[i] = .{ .real = @bitCast(bits) };
+                out[i] = .{ .real = @bitCast(bits) };
                 pos += 8;
             },
             .text => {
                 const len = std.mem.readInt(u16, buf[pos..][0..2], .big);
                 pos += 2;
-                values[i] = .{ .text = try allocator.dupe(u8, buf[pos..][0..len]) };
+                out[i] = .{ .text = try allocator.dupe(u8, buf[pos..][0..len]) };
                 pos += len;
             },
             .blob => {
                 const len = std.mem.readInt(u32, buf[pos..][0..4], .big);
                 pos += 4;
-                values[i] = .{ .blob = try allocator.dupe(u8, buf[pos..][0..len]) };
+                out[i] = .{ .blob = try allocator.dupe(u8, buf[pos..][0..len]) };
                 pos += len;
             },
         }
     }
+}
+
+pub fn decodeRow(
+    cols: []const ColumnSchema,
+    buf: []const u8,
+    allocator: std.mem.Allocator,
+) ![]Value {
+    const values = try allocator.alloc(Value, cols.len);
+    errdefer allocator.free(values);
+    try decodeRowInto(cols, buf, values, allocator);
     return values;
 }
 
