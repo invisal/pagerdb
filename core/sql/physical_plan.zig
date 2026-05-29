@@ -111,6 +111,27 @@ pub const PhysicalJoin = struct {
     schema: lp.Schema,
 };
 
+// A single equi-join key pair: left.values[left_idx] == right.values[right_idx].
+// Indices are into each side's own row, not the merged schema.
+pub const EquiKey = struct {
+    left_idx: usize,
+    right_idx: usize,
+};
+
+// Hash join: build a hash table on the right side keyed by equi-join columns,
+// then probe it once per left row.  Reduces O(L×R) nested-loop comparisons to
+// O(L + R) average.  Falls back to PhysicalJoin (nested-loop) when the
+// condition has no equi-join predicate (CROSS JOIN, non-equi theta join).
+pub const PhysicalHashJoin = struct {
+    left: PhysicalPlan,
+    right: PhysicalPlan,
+    keys: []EquiKey, // equi-join key pairs extracted from the condition
+    residual: ?ee.ExecExpr, // remaining non-equi predicates after key extraction, or null
+    join_type: lp.JoinType,
+    schema: lp.Schema,
+    left_col_count: usize, // number of columns in the left schema
+};
+
 pub const PhysicalAggregate = struct {
     input: *PhysicalPlan,
     group_by: []const usize,
@@ -155,6 +176,7 @@ pub const PhysicalPlan = union(enum) {
     sort: *PhysicalSort,
     distinct: *PhysicalDistinct,
     join: *PhysicalJoin,
+    hash_join: *PhysicalHashJoin,
     index_range_scan: PhysicalIndexRangeScan,
 
     // Mutation Plan
@@ -185,6 +207,7 @@ pub const PhysicalPlan = union(enum) {
             .sort => |n| n.schema,
             .distinct => |n| n.schema,
             .join => |n| n.schema,
+            .hash_join => |n| n.schema,
             .index_range_scan => |n| n.schema,
             .insert => |n| n.schema,
             .insert_select => |n| n.schema,
@@ -194,6 +217,85 @@ pub const PhysicalPlan = union(enum) {
         };
     }
 };
+
+// ── Equi-join key extraction ──────────────────────────────────────────────────
+
+// Walks one node of an AND tree collecting equi-join key pairs and residual predicates.
+// An equi-join pair is a binary `=` where one side is a left-schema col_idx and the
+// other is a right-schema col_idx.  Everything else goes into residuals.
+fn walkEquiJoin(
+    alloc: std.mem.Allocator,
+    expr: ee.ExecExpr,
+    left_col_count: usize,
+    keys: *std.ArrayListUnmanaged(EquiKey),
+    residuals: *std.ArrayListUnmanaged(ee.ExecExpr),
+) !void {
+    switch (expr) {
+        .binary => |b| {
+            if (b.op == .and_) {
+                try walkEquiJoin(alloc, b.left, left_col_count, keys, residuals);
+                try walkEquiJoin(alloc, b.right, left_col_count, keys, residuals);
+                return;
+            }
+            if (b.op == .eq) {
+                const li: ?usize = switch (b.left) {
+                    .col_idx => |i| i,
+                    else => null,
+                };
+                const ri: ?usize = switch (b.right) {
+                    .col_idx => |i| i,
+                    else => null,
+                };
+                if (li != null and ri != null) {
+                    const l = li.?;
+                    const r = ri.?;
+                    if (l < left_col_count and r >= left_col_count) {
+                        try keys.append(alloc, .{ .left_idx = l, .right_idx = r - left_col_count });
+                        return;
+                    }
+                    if (r < left_col_count and l >= left_col_count) {
+                        try keys.append(alloc, .{ .left_idx = r, .right_idx = l - left_col_count });
+                        return;
+                    }
+                }
+            }
+            try residuals.append(alloc, expr);
+        },
+        else => try residuals.append(alloc, expr),
+    }
+}
+
+const EquiExtract = struct {
+    keys: []EquiKey,
+    residual: ?ee.ExecExpr,
+};
+
+// Returns null when the condition has no equi-join predicates (signal to fall back
+// to nested-loop join).  Otherwise returns the extracted key pairs and any
+// non-equi predicates folded into a single residual expression.
+fn extractEquiKeys(
+    alloc: std.mem.Allocator,
+    condition: ee.ExecExpr,
+    left_col_count: usize,
+) !?EquiExtract {
+    var keys: std.ArrayListUnmanaged(EquiKey) = .empty;
+    var residuals: std.ArrayListUnmanaged(ee.ExecExpr) = .empty;
+    try walkEquiJoin(alloc, condition, left_col_count, &keys, &residuals);
+    if (keys.items.len == 0) return null;
+
+    // Fold residual list into a left-deep AND tree.
+    var residual: ?ee.ExecExpr = null;
+    for (residuals.items) |r| {
+        if (residual == null) {
+            residual = r;
+        } else {
+            const bin = try alloc.create(ee.ExecExpr.Binary);
+            bin.* = .{ .op = .and_, .left = residual.?, .right = r };
+            residual = .{ .binary = bin };
+        }
+    }
+    return .{ .keys = try keys.toOwnedSlice(alloc), .residual = residual };
+}
 
 // ── Correlation detection ──────────────────────────────────────────────────────
 
@@ -550,11 +652,34 @@ pub const PhysicalPlanner = struct {
     }
 
     fn planJoin(self: *PhysicalPlanner, node: *lp.Join) !PhysicalPlan {
+        const left_plan = try self.plan(node.left.*);
+        const right_plan = try self.plan(node.right.*);
+        const left_col_count = node.left.schema().columns.len;
+        const opt_condition: ?ee.ExecExpr = if (node.condition) |cond| try self.planExpr(cond) else null;
+
+        // Use hash join when the condition has at least one equi-join predicate and
+        // the join is not a CROSS JOIN (which has no condition to hash on).
+        if (opt_condition != null and node.join_type != .cross) {
+            if (try extractEquiKeys(self.alloc(), opt_condition.?, left_col_count)) |eq| {
+                const hj = try self.alloc().create(PhysicalHashJoin);
+                hj.* = .{
+                    .left = left_plan,
+                    .right = right_plan,
+                    .keys = eq.keys,
+                    .residual = eq.residual,
+                    .join_type = node.join_type,
+                    .schema = node.schema,
+                    .left_col_count = left_col_count,
+                };
+                return .{ .hash_join = hj };
+            }
+        }
+
         const join_node = try self.alloc().create(PhysicalJoin);
         join_node.* = .{
-            .left = try self.plan(node.left.*),
-            .right = try self.plan(node.right.*),
-            .condition = if (node.condition) |cond| try self.planExpr(cond) else null,
+            .left = left_plan,
+            .right = right_plan,
+            .condition = opt_condition,
             .join_type = node.join_type,
             .schema = node.schema,
         };

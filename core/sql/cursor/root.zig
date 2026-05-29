@@ -721,6 +721,138 @@ pub const JoinCursor = struct {
     }
 };
 
+// ── Hash join cursor ───────────────────────────────────────────────────────────
+
+// Build-probe hash join.
+//
+// Build phase (open): iterate the right child, hash each row by its equi-join
+// key columns into a hash table mapping hash → list of right-row indices.
+//
+// Probe phase (next): for each left row hash its key columns, look up the
+// bucket, verify actual key equality for each candidate (guarding against hash
+// collisions), evaluate any residual non-equi condition, then emit matches.
+//
+// This cuts inner-loop work from O(R) per left row (nested-loop) to O(1)
+// average, giving O(L + R) total instead of O(L × R).
+pub const HashJoinCursor = struct {
+    left: *Cursor,
+    right_rows: []BorrowedRow, // all right rows, materialized in query arena at open time
+    // Maps hash(key columns) → indices into right_rows.  Multiple indices per
+    // hash bucket handle genuine duplicates and hash collisions.
+    hash_table: std.AutoHashMapUnmanaged(u64, std.ArrayListUnmanaged(u32)),
+    keys: []pp.EquiKey,
+    residual: ?ee.ExecExpr, // non-equi part of the original ON condition, if any
+    is_left_join: bool,
+    right_col_count: usize,
+    left_batch: []BorrowedRow,
+    left_pos: usize,
+    bucket: []const u32, // right-row index candidates for the current left row
+    bucket_pos: usize,
+    had_match: bool,
+    batch_arena: std.heap.ArenaAllocator,
+
+    fn hashRightKeys(row: []const row_mod.Value, keys: []const pp.EquiKey) u64 {
+        var h = std.hash.Wyhash.init(0);
+        for (keys) |k| row[k.right_idx].hashInto(&h);
+        return h.final();
+    }
+
+    fn hashLeftKeys(row: []const row_mod.Value, keys: []const pp.EquiKey) u64 {
+        var h = std.hash.Wyhash.init(0);
+        for (keys) |k| row[k.left_idx].hashInto(&h);
+        return h.final();
+    }
+
+    fn keysMatch(left_row: []const row_mod.Value, right_row: []const row_mod.Value, keys: []const pp.EquiKey) bool {
+        for (keys) |k| {
+            if (!left_row[k.left_idx].eql(right_row[k.right_idx])) return false;
+        }
+        return true;
+    }
+
+    pub fn next(self: *HashJoinCursor, ctx: EvalContext) !?[]BorrowedRow {
+        const ba = self.batch_arena.allocator();
+        const eval_ctx = EvalContext{ .outer = ctx.outer, .alloc = ctx.alloc, .batch_alloc = ba, .subquery_cache = ctx.subquery_cache };
+        var out: std.ArrayListUnmanaged(BorrowedRow) = .empty;
+
+        while (true) {
+            // Fetch a new left batch when the current one is exhausted.
+            while (self.left_pos >= self.left_batch.len) {
+                resetArena(&self.batch_arena);
+                out = .empty;
+                self.left_batch = try self.left.next(ctx) orelse {
+                    if (out.items.len > 0) return out.items;
+                    return null;
+                };
+                self.left_pos = 0;
+                self.had_match = false;
+                // Pre-look up the hash bucket for the first row in the batch.
+                if (self.left_batch.len > 0) {
+                    const h = hashLeftKeys(self.left_batch[0].values, self.keys);
+                    self.bucket = if (self.hash_table.get(h)) |list| list.items else &.{};
+                    self.bucket_pos = 0;
+                }
+            }
+
+            const left_row = self.left_batch[self.left_pos];
+
+            // Walk hash bucket candidates for this left row.
+            while (self.bucket_pos < self.bucket.len) {
+                const right_idx = self.bucket[self.bucket_pos];
+                self.bucket_pos += 1;
+                const right_row = self.right_rows[right_idx];
+
+                // Guard against hash collisions: verify actual key equality.
+                if (!keysMatch(left_row.values, right_row.values, self.keys)) continue;
+
+                const combined = try ba.alloc(row_mod.Value, left_row.values.len + right_row.values.len);
+                @memcpy(combined[0..left_row.values.len], left_row.values);
+                @memcpy(combined[left_row.values.len..], right_row.values);
+
+                const should_emit = if (self.residual) |res| blk: {
+                    const ev = try eval.evalExpr(res, combined, eval_ctx);
+                    break :blk eval.isTruthy(ev);
+                } else true;
+
+                if (should_emit) {
+                    self.had_match = true;
+                    try out.append(ba, .{ .rowid = left_row.rowid, .values = combined });
+                }
+
+                if (out.items.len >= BATCH_SIZE) return out.items;
+            }
+
+            // Finished bucket for this left row; advance to next left row.
+            self.left_pos += 1;
+
+            // LEFT JOIN: emit left row with NULLs if no right row matched.
+            if (self.is_left_join and !self.had_match) {
+                const combined = try ba.alloc(row_mod.Value, left_row.values.len + self.right_col_count);
+                @memcpy(combined[0..left_row.values.len], left_row.values);
+                @memset(combined[left_row.values.len..], .null);
+                try out.append(ba, .{ .rowid = left_row.rowid, .values = combined });
+            }
+            self.had_match = false;
+
+            // Pre-look up the bucket for the next left row while still in this batch.
+            if (self.left_pos < self.left_batch.len) {
+                const h = hashLeftKeys(self.left_batch[self.left_pos].values, self.keys);
+                self.bucket = if (self.hash_table.get(h)) |list| list.items else &.{};
+                self.bucket_pos = 0;
+            }
+
+            if (out.items.len > 0) return out.items;
+        }
+    }
+
+    pub fn deinit(self: *HashJoinCursor, a: Allocator) void {
+        self.left.deinit(a);
+        a.destroy(self.left);
+        self.hash_table.deinit(a);
+        self.batch_arena.deinit();
+    }
+};
+
 // ── Scalar subquery executor ───────────────────────────────────────────────────
 
 // Executes an IN subquery check for needle against the subquery's first column.
@@ -844,6 +976,7 @@ pub const Cursor = union(enum) {
     sort: *SortCursor,
     distinct: *DistinctCursor,
     join: *JoinCursor,
+    hash_join: *HashJoinCursor,
 
     pub fn open(plan: pp.PhysicalPlan, db: *Db, a: Allocator) !Cursor {
         return switch (plan) {
@@ -951,6 +1084,46 @@ pub const Cursor = union(enum) {
                 jc.batch_arena = std.heap.ArenaAllocator.init(a);
                 break :blk .{ .join = jc };
             },
+            .hash_join => |n| blk: {
+                // Build phase: materialize the right side and index it by key hash.
+                const right_init_ctx = EvalContext{ .outer = &.{}, .alloc = a };
+                var right_list: std.ArrayListUnmanaged(BorrowedRow) = .empty;
+                var right_cur = try open(n.right, db, a);
+                defer right_cur.deinit(a);
+                while (try right_cur.next(right_init_ctx)) |batch| {
+                    for (batch) |r| try right_list.append(a, try r.clone(a));
+                }
+                const right_rows = try right_list.toOwnedSlice(a);
+
+                var hash_table: std.AutoHashMapUnmanaged(u64, std.ArrayListUnmanaged(u32)) = .empty;
+                for (right_rows, 0..) |row, i| {
+                    var hasher = std.hash.Wyhash.init(0);
+                    for (n.keys) |k| row.values[k.right_idx].hashInto(&hasher);
+                    const h = hasher.final();
+                    const gop = try hash_table.getOrPut(a, h);
+                    if (!gop.found_existing) gop.value_ptr.* = .empty;
+                    try gop.value_ptr.append(a, @intCast(i));
+                }
+
+                const hjc = try a.create(HashJoinCursor);
+                hjc.* = .{
+                    .left = try a.create(Cursor),
+                    .right_rows = right_rows,
+                    .hash_table = hash_table,
+                    .keys = n.keys,
+                    .residual = n.residual,
+                    .is_left_join = n.join_type == .left,
+                    .right_col_count = n.right.schema().columns.len,
+                    .left_batch = &.{},
+                    .left_pos = 0,
+                    .bucket = &.{},
+                    .bucket_pos = 0,
+                    .had_match = false,
+                    .batch_arena = std.heap.ArenaAllocator.init(a),
+                };
+                hjc.left.* = try open(n.left, db, a);
+                break :blk .{ .hash_join = hjc };
+            },
             else => error.UnsupportedPlan,
         };
     }
@@ -967,6 +1140,7 @@ pub const Cursor = union(enum) {
             .sort => |s| s.next(ctx),
             .distinct => |d| d.next(ctx),
             .join => |j| j.next(ctx),
+            .hash_join => |j| j.next(ctx),
             .index_range_scan => |i| i.next(ctx),
         };
     }
@@ -981,6 +1155,7 @@ pub const Cursor = union(enum) {
             .sort => |s| s.deinit(a),
             .distinct => |d| d.deinit(a),
             .join => |j| j.deinit(a),
+            .hash_join => |j| j.deinit(a),
             .index_range_scan => |i| i.deinit(),
             else => {},
         }
